@@ -1,0 +1,579 @@
+"""Workflow orchestration over the M3–M6 engines (Milestone 7).
+
+A workflow is an ORDERED, AUDITABLE composition of existing capabilities:
+
+    Dataset → Tokenizer → Training → Evaluation → Comparison → Gate
+    → Suite Run (M10 batches; M11 stage) → …
+
+M7 coordinates immutable operations; it never replaces an engine and never
+adds training intelligence. One plan (``WorkflowPlan``) = one synchronous
+execution = one immutable run manifest at
+``models/<model_id>/workflows/workflow-<workflow_id>/manifest.json``.
+
+Rules honoured here (tested):
+
+  * stages execute in declared order, at most once; each stage references its
+    inputs EXPLICITLY (literal checkpoint ids or ``from_stage`` pointers to an
+    earlier train stage's final checkpoint) — nothing is ever guessed
+  * branching is driven by the actual M6 ``GateDecision``: gate passed →
+    next stage or ``on_pass``; gate failed → ``on_fail`` stage or STOP.
+    A stopped run records the gate's rollback suggestion but NEVER executes
+    rollback, retraining or model selection
+  * evidence is reused by identity (M4 evaluations, M5 comparisons) exactly
+    like the M6 gate engine; gate decisions and workflow runs stay
+    append-only because each explicit execution is an auditable event
+  * a stage that fails records its error in the run (no fabricated artifact
+    ids) and the run persists with status ``failed`` referencing the earlier
+    successful artifacts; the original exception is re-raised for API mapping
+    (404 missing, 409 corrupt, 422 invalid)
+  * ``result_hash`` is deterministic over the semantic execution only (plan,
+    status, per-stage evidence hashes/results, transitions) — never
+    workflow ids, timestamps or paths
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from . import config as forge_cfg
+from .comparison import ComparisonEngine
+from .dataset import DatasetEngine
+from .evaluation import EvaluationEngine
+from .gates import GateEngine
+from .suite_runs import SuiteRunEngine
+from .schemas import (
+    ArtifactKind,
+    ComparisonRequest,
+    ComparisonState,
+    EvalStateKind,
+    EvaluationConfig,
+    GateDecision,
+    GateDecisionResult,
+    GateRequest,
+    StageStateRef,
+    StageType,
+    SuiteRunRequest,
+    TrainingConfig,
+    WorkflowArtifact,
+    WorkflowGateStage,
+    WorkflowPlan,
+    WorkflowRecord,
+    WorkflowRecipeRef,
+    WorkflowStage,
+    WorkflowSuiteRunStage,
+    WorkflowStageResult,
+    WorkflowStatus,
+    WorkflowTransition,
+)
+from .storage import Storage, atomic_write_json, read_json
+from .training import TrainingEngine
+
+log = forge_cfg.get_logger("workflows")
+
+WORKFLOW_MANIFEST = "manifest.json"
+WORKFLOWS_DIR = "workflows"
+
+
+class WorkflowEngine:
+    """Ordered execution of one WorkflowPlan over the existing engines."""
+
+    def __init__(self, storage: Storage):
+        self.storage = storage
+        self.datasets = DatasetEngine(storage)
+        self.training = TrainingEngine(storage)
+        self.evaluation = EvaluationEngine(storage)
+        self.comparison = ComparisonEngine(storage)
+        self.gates = GateEngine(storage)
+        self.suite_runs = SuiteRunEngine(storage)
+
+    # ------------------------------------------------------------------ #
+    # Paths / registry helpers
+    # ------------------------------------------------------------------ #
+
+    def _workflows_root(self, model_id: str) -> Path:
+        return self.storage.model_dir(model_id) / WORKFLOWS_DIR
+
+    def _workflow_dir(self, model_id: str, workflow_id: str) -> Path:
+        return self._workflows_root(model_id) / f"workflow-{workflow_id}"
+
+    def _model_exists(self, model_id: str) -> bool:
+        return (self.storage.model_dir(model_id) / "manifest.json").exists()
+
+    def list_workflows(self, model_id: str) -> list[WorkflowRecord]:
+        """Immutable workflow history (append-only, deterministic order).
+
+        Raises FileNotFoundError for an unknown model; returns [] when the
+        model has no workflow runs yet.
+        """
+        if not self._model_exists(model_id):
+            raise FileNotFoundError(f"model '{model_id}' not found")
+        root = self._workflows_root(model_id)
+        if not root.exists():
+            return []
+        records = []
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or not d.name.startswith("workflow-"):
+                continue
+            mpath = d / WORKFLOW_MANIFEST
+            if mpath.exists():
+                try:
+                    records.append(WorkflowRecord(**read_json(mpath)))
+                except Exception:
+                    log.warning("unreadable workflow manifest %s", mpath)
+        records.sort(key=lambda r: (r.created_at, r.workflow_id))
+        return records
+
+    def get_workflow(self, model_id: str, workflow_id: str) -> WorkflowRecord:
+        """One persisted immutable workflow run (never mutates it)."""
+        if not self._model_exists(model_id):
+            raise FileNotFoundError(f"model '{model_id}' not found")
+        path = self._workflow_dir(model_id, workflow_id) / WORKFLOW_MANIFEST
+        if not path.exists():
+            raise FileNotFoundError(
+                f"workflow run '{workflow_id}' not found for model '{model_id}'")
+        return WorkflowRecord(**read_json(path))
+
+    # ------------------------------------------------------------------ #
+    # The run
+    # ------------------------------------------------------------------ #
+
+    def run(self, plan: WorkflowPlan, *,
+           recipe_id: Optional[str] = None,
+           recipe_hash: Optional[str] = None,
+           composition: Optional[list[WorkflowRecipeRef]] = None
+           ) -> WorkflowRecord:
+        """Execute one plan synchronously; persist one immutable run record.
+
+        Validates nothing beyond the plan schema + model existence before
+        executing (structural problems -> ValueError/FileNotFoundError with no
+        artifact). A failing stage persists a ``failed`` run that references
+        the earlier successful artifacts and identifies the failure point, then
+        re-raises the stage exception for API mapping. Gate-driven stops are a
+        NORMAL outcome: the ``stopped`` record is returned.
+
+        ``recipe_id``/``recipe_hash`` (M12) are optional provenance for runs
+        produced by a registered workflow recipe (the RecipeEngine binds the
+        model into the plan and delegates here — this engine stays the SOLE
+        workflow executor). ``composition`` (M14) is the deterministic
+        expansion trace of the referenced recipes for composite recipe runs.
+        Inline plan runs leave all three null; they never influence
+        ``result_hash`` (semantic execution only).
+        """
+        start = time.monotonic()
+        model = self._require_model(plan.model_id)
+        model_id = plan.model_id
+        n = len(plan.stages)
+        stage_ids = [s.stage_id for s in plan.stages]
+        index = {sid: i for i, sid in enumerate(stage_ids)}
+
+        results: list[WorkflowStageResult] = [
+            WorkflowStageResult(stage_id=s.stage_id, type=s.type)
+            for s in plan.stages]
+        transitions: list[WorkflowTransition] = []
+        artifacts: dict[str, WorkflowArtifact] = {}
+        status: WorkflowStatus = WorkflowStatus.COMPLETED
+        terminal_reason: Optional[str] = None
+        failed_stage_id: Optional[str] = None
+        suggested: Optional[str] = None
+        hint: Optional[str] = None
+
+        idx = 0
+        while idx < n:
+            stage = plan.stages[idx]
+            try:
+                artifact, branch = self._execute_stage(model, stage, artifacts)
+            except Exception as exc:  # stage failed: record + persist + re-raise
+                results[idx].executed = True
+                results[idx].error = str(exc)
+                for j in range(idx + 1, n):
+                    results[j].skipped = True
+                status = WorkflowStatus.FAILED
+                failed_stage_id = stage.stage_id
+                terminal_reason = f"stage '{stage.stage_id}' failed: {exc}"
+                record = self._record(plan, model_id, model.config_hash,
+                                      status, terminal_reason, failed_stage_id,
+                                      results, transitions, suggested, hint,
+                                      start, recipe_id, recipe_hash,
+                                      composition)
+                self._persist(record)
+                log.error("workflow run for model %s failed at stage %s: %s",
+                          model_id, stage.stage_id, exc)
+                raise
+            results[idx].executed = True
+            results[idx].artifact = artifact
+            artifacts[stage.stage_id] = artifact
+
+            if stage.type != StageType.GATE:
+                to_stage = stage_ids[idx + 1] if idx + 1 < n else None
+                transitions.append(WorkflowTransition(
+                    stage_id=stage.stage_id, decision="next", to_stage=to_stage))
+                idx += 1
+                continue
+
+            decision: GateDecisionResult = (artifact.gate_decision
+                                            if artifact.gate_decision is not None
+                                            else GateDecisionResult.PASSED)
+            passed = decision == GateDecisionResult.PASSED
+            branch_target = stage.on_pass if passed else stage.on_fail
+            if passed:
+                transitions.append(WorkflowTransition(
+                    stage_id=stage.stage_id, decision="passed",
+                    to_stage=branch_target if branch_target else
+                    (stage_ids[idx + 1] if idx + 1 < n else None)))
+                if branch_target:
+                    jump = index[branch_target]
+                    for j in range(idx + 1, jump):
+                        results[j].skipped = True
+                    idx = jump
+                else:
+                    idx += 1
+                continue
+
+            # gate failed
+            if stage.on_fail is None:
+                status = WorkflowStatus.STOPPED
+                gate_record = self.gates.get_decision(model_id,
+                                                      artifact.artifact_id)
+                suggested = gate_record.suggested_checkpoint_id
+                hint = gate_record.hint
+                terminal_reason = (
+                    f"gate '{stage.stage_id}' decision failed; workflow stopped "
+                    f"(no on_fail branch)")
+                transitions.append(WorkflowTransition(
+                    stage_id=stage.stage_id, decision="failed", to_stage=None))
+                for j in range(idx + 1, n):
+                    results[j].skipped = True
+                break
+            transitions.append(WorkflowTransition(
+                stage_id=stage.stage_id, decision="failed",
+                to_stage=stage.on_fail))
+            jump = index[stage.on_fail]
+            for j in range(idx + 1, jump):
+                results[j].skipped = True
+            idx = jump
+
+        record = self._record(plan, model_id, model.config_hash, status,
+                              terminal_reason, failed_stage_id, results,
+                              transitions, suggested, hint, start,
+                              recipe_id, recipe_hash, composition)
+        self._persist(record)
+        log.info("workflow %s on model %s: %s (%d stages)",
+                 record.workflow_id, model_id, status.value, n)
+        return record
+
+    # ------------------------------------------------------------------ #
+    # Per-stage execution (thin orchestration over M3–M6)
+    # ------------------------------------------------------------------ #
+
+    def _execute_stage(self, model, stage: WorkflowStage,
+                       artifacts: dict[str, WorkflowArtifact]
+                       ) -> tuple[WorkflowArtifact, Optional[str]]:
+        """Run one stage through its existing engine.
+
+        Returns (artifact summary, branch decision) where branch is only set
+        for gate stages ('passed'/'failed').
+        """
+        model_id = model.id
+        if stage.type == StageType.TRAIN:
+            cfg: TrainingConfig = stage.training  # type: ignore[assignment]
+            report = self.training.run(cfg)
+            summary = self._training_artifact(model_id, report)
+            return summary, None
+
+        if stage.type == StageType.EVALUATE:
+            payload = stage.evaluation  # type: ignore[assignment]
+            cfg: EvaluationConfig = payload.config.model_copy()
+            if payload.checkpoint_from_stage:
+                ckpt_id = self._final_checkpoint_of(
+                    payload.checkpoint_from_stage, artifacts)
+                cfg = cfg.model_copy(update={"checkpoint_id": ckpt_id})
+            state = ComparisonState(
+                state_kind=EvalStateKind.CHECKPOINT if cfg.checkpoint_id
+                else EvalStateKind.CURRENT,
+                checkpoint_id=cfg.checkpoint_id)
+            state_hash = self.comparison.verified_state_hash(model_id, state)
+            version = self._resolve_version(cfg.dataset_id, cfg.dataset_version)
+            window = (cfg.max_seq_len if cfg.max_seq_len is not None
+                      else model.config.context_length)
+            seed = cfg.effective_seed()
+            candidates = self.evaluation.list_evaluations(model_id)
+            rec = self.comparison.resolve_evaluation(
+                model_id=model_id, state=state, state_hash=state_hash,
+                dataset_id=cfg.dataset_id, version=version,
+                split=cfg.split.value, tokenizer_id=cfg.tokenizer_id,
+                max_eval_tokens=cfg.max_eval_tokens, batch_size=cfg.batch_size,
+                window=window, seed=seed, candidates=candidates)
+            return (WorkflowArtifact(
+                kind=ArtifactKind.EVALUATION, artifact_id=rec.eval_id,
+                result_hash=rec.result_hash, state_hash=rec.state_hash,
+                checkpoint_id=cfg.checkpoint_id, loss_nats=rec.loss_nats), None)
+
+        if stage.type == StageType.COMPARE:
+            payload_cmp = stage.comparison  # type: ignore[assignment]
+            state_a = self._state_of(payload_cmp.state_a, artifacts)
+            state_b = self._state_of(payload_cmp.state_b, artifacts)
+            # both states verified BEFORE anything is evaluated (M5 order)
+            hash_a = self.comparison.verified_state_hash(model_id, state_a)
+            hash_b = self.comparison.verified_state_hash(model_id, state_b)
+            version = self._resolve_version(payload_cmp.dataset_id,
+                                            payload_cmp.dataset_version)
+            window = (payload_cmp.max_seq_len
+                      if payload_cmp.max_seq_len is not None
+                      else model.config.context_length)
+            # seed parity with the M5 engine: derive from the request exactly
+            # as M5's run() would (states literal, raw probe fields)
+            request = ComparisonRequest(
+                model_id=model_id, state_a=state_a, state_b=state_b,
+                dataset_id=payload_cmp.dataset_id,
+                dataset_version=payload_cmp.dataset_version,
+                split=payload_cmp.split, tokenizer_id=payload_cmp.tokenizer_id,
+                max_eval_tokens=payload_cmp.max_eval_tokens,
+                batch_size=payload_cmp.batch_size,
+                max_seq_len=payload_cmp.max_seq_len,
+                seed=payload_cmp.seed, tolerance=payload_cmp.tolerance)
+            seed = request.effective_seed()
+            candidates = self.evaluation.list_evaluations(model_id)
+            eval_a = self.comparison.resolve_evaluation(
+                model_id=model_id, state=state_a, state_hash=hash_a,
+                dataset_id=payload_cmp.dataset_id, version=version,
+                split=payload_cmp.split.value,
+                tokenizer_id=payload_cmp.tokenizer_id,
+                max_eval_tokens=payload_cmp.max_eval_tokens,
+                batch_size=payload_cmp.batch_size, window=window, seed=seed,
+                candidates=candidates)
+            candidates.append(eval_a)
+            eval_b = self.comparison.resolve_evaluation(
+                model_id=model_id, state=state_b, state_hash=hash_b,
+                dataset_id=payload_cmp.dataset_id, version=version,
+                split=payload_cmp.split.value,
+                tokenizer_id=payload_cmp.tokenizer_id,
+                max_eval_tokens=payload_cmp.max_eval_tokens,
+                batch_size=payload_cmp.batch_size, window=window, seed=seed,
+                candidates=candidates)
+            existing = self.comparison.find_exact_comparison(
+                model_id=model_id, state_a_hash=hash_a, state_b_hash=hash_b,
+                dataset_id=payload_cmp.dataset_id, version=version,
+                split=payload_cmp.split.value,
+                tokenizer_id=payload_cmp.tokenizer_id,
+                max_eval_tokens=payload_cmp.max_eval_tokens,
+                batch_size=payload_cmp.batch_size, window=window, seed=seed,
+                tolerance=payload_cmp.tolerance)
+            if existing is not None:
+                record = existing
+            else:
+                record = self.comparison.compare_records(
+                    eval_a, eval_b, tolerance=payload_cmp.tolerance,
+                    started_at=None)
+            return (WorkflowArtifact(
+                kind=ArtifactKind.COMPARISON,
+                artifact_id=record.comparison_id,
+                result_hash=record.result_hash,
+                delta_loss_nats=record.delta_loss_nats,
+                verdict=record.verdict), None)
+
+        # SUITE RUN (M11): a thin orchestration adapter over the M10 engine.
+        # The stage names ONE suite and ONE explicit state source; the state
+        # is resolved through the same StageStateRef provenance rules as M7
+        # compare/gate stages (from_stage -> that train stage's final
+        # checkpoint; nothing is ever guessed). SuiteRunEngine.run persists
+        # the immutable suite-run record and reuses exact M4 evaluations;
+        # preflight failures (unknown suite/state/corrupt suite) raise here
+        # so the M7 failure path records the stage error and no fabricated
+        # suite-run artifact ever exists. A suite run whose own record ended
+        # with status 'failed' (per-probe failures) is a REAL persisted
+        # artifact and is referenced as such — never converted to success.
+        if stage.type == StageType.SUITE_RUN:
+            payload_sr: WorkflowSuiteRunStage = stage.suite_run  # type: ignore[assignment]
+            state = self._state_of(payload_sr.state, artifacts)
+            record = self.suite_runs.run(SuiteRunRequest(
+                model_id=model_id, suite_id=payload_sr.suite_id, state=state))
+            return (WorkflowArtifact(
+                kind=ArtifactKind.SUITE_RUN,
+                artifact_id=record.suite_run_id,
+                result_hash=record.result_hash,
+                state_hash=record.state_hash,
+                checkpoint_id=state.checkpoint_id), None)
+
+        # GATE: M6 is the single source of truth for decision semantics.
+        # The stage carries either an inline policy or a registry policy_id —
+        # GateEngine.run resolves both through PolicyEngine (the inline path
+        # stays byte-identical to historical M6 behaviour).
+        payload_gate: WorkflowGateStage = stage.gate  # type: ignore[assignment]
+        candidate = self._state_of(payload_gate.candidate, artifacts)
+        decision_record = self.gates.run(GateRequest(
+            model_id=model_id, policy=payload_gate.policy,
+            policy_id=payload_gate.policy_id, candidate=candidate))
+        return (self._gate_artifact(decision_record),
+                decision_record.decision.value)
+
+    @staticmethod
+    def _state_of(ref: StageStateRef,
+                  artifacts: dict[str, WorkflowArtifact]) -> ComparisonState:
+        """Resolve an explicit state source to a ComparisonState.
+
+        A checkpoint ``from_stage`` pointer resolves to that train stage's
+        FINAL checkpoint; a stage that produced none raises FileNotFoundError
+        (the workflow fails cleanly; no id is fabricated).
+        """
+        if ref.state_kind == EvalStateKind.CURRENT:
+            return ComparisonState(state_kind=EvalStateKind.CURRENT)
+        if ref.checkpoint_id:
+            return ComparisonState(state_kind=EvalStateKind.CHECKPOINT,
+                                   checkpoint_id=ref.checkpoint_id)
+        artifact = artifacts.get(ref.from_stage) if ref.from_stage else None
+        if artifact is None or artifact.kind != ArtifactKind.TRAINING_REPORT \
+                or not artifact.checkpoint_id:
+            raise FileNotFoundError(
+                f"stage '{ref.from_stage}' produced no final checkpoint — "
+                f"nothing to reference")
+        return ComparisonState(state_kind=EvalStateKind.CHECKPOINT,
+                               checkpoint_id=artifact.checkpoint_id)
+
+    @staticmethod
+    def _final_checkpoint_of(stage_id: str,
+                             artifacts: dict[str, WorkflowArtifact]) -> str:
+        artifact = artifacts.get(stage_id)
+        if artifact is None or artifact.kind != ArtifactKind.TRAINING_REPORT \
+                or not artifact.checkpoint_id:
+            raise FileNotFoundError(
+                f"stage '{stage_id}' produced no final checkpoint — nothing "
+                f"to reference")
+        return artifact.checkpoint_id
+
+    def _resolve_version(self, dataset_id: str,
+                         version: Optional[int]) -> int:
+        try:
+            meta = self.datasets.load_meta(dataset_id)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"dataset '{dataset_id}' not found") from None
+        return meta.latest_version if version is None else version
+
+    def _training_artifact(self, model_id: str, report) -> WorkflowArtifact:
+        """Summarise an M3 TrainingReport (id + outcome + final checkpoint)."""
+        summary = WorkflowArtifact(
+            kind=ArtifactKind.TRAINING_REPORT, artifact_id=report.run_id,
+            checkpoint_id=report.final_model_version,
+            accepted=report.accepted, optimizer_steps=report.optimizer_steps,
+            epochs_run=report.epochs_run,
+            best_validation_loss=report.best_validation_loss,
+            final_train_loss=report.final_train_loss)
+        if report.final_model_version:
+            try:
+                ckpt = self.training.get_checkpoint(
+                    model_id, report.final_model_version)
+                summary.state_hash = ckpt.weights_sha256
+                summary.final_validation_loss = ckpt.validation_loss
+            except Exception:  # pragma: no cover - report/manifest desync
+                log.warning("final checkpoint %s unreadable after training",
+                            report.final_model_version)
+        return summary
+
+    @staticmethod
+    def _gate_artifact(record: GateDecision) -> WorkflowArtifact:
+        return WorkflowArtifact(
+            kind=ArtifactKind.GATE_DECISION,
+            artifact_id=record.decision_id,
+            result_hash=record.result_hash,
+            state_hash=record.candidate.state_hash,
+            checkpoint_id=record.candidate.checkpoint_id,
+            loss_nats=record.candidate_loss,
+            delta_loss_nats=record.delta_loss_nats,
+            verdict=record.verdict,
+            gate_decision=record.decision)
+
+    # ------------------------------------------------------------------ #
+    # Record assembly, result hash, persistence
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _record(plan: WorkflowPlan, model_id: str, config_hash: str,
+                status: WorkflowStatus, terminal_reason: Optional[str],
+                failed_stage_id: Optional[str],
+                results: list[WorkflowStageResult],
+                transitions: list[WorkflowTransition],
+                suggested: Optional[str], hint: Optional[str],
+                start: float,
+                recipe_id: Optional[str] = None,
+                recipe_hash: Optional[str] = None,
+                composition: Optional[list[WorkflowRecipeRef]] = None
+                ) -> WorkflowRecord:
+        record = WorkflowRecord(
+            workflow_id=uuid.uuid4().hex[:12],
+            model_id=model_id,
+            config_hash=config_hash,
+            name=plan.name,
+            plan_hash=plan.plan_hash(),
+            plan=plan,
+            status=status,
+            terminal_reason=terminal_reason,
+            failed_stage_id=failed_stage_id,
+            stages=results,
+            transitions=transitions,
+            suggested_checkpoint_id=suggested,
+            hint=hint,
+            recipe_id=recipe_id,
+            recipe_hash=recipe_hash,
+            composition=composition,
+            result_hash="",
+            created_at=datetime.now(timezone.utc),
+            duration_seconds=round(time.monotonic() - start, 3),
+        )
+        return record.model_copy(update={"result_hash": WorkflowEngine.result_hash(record)})
+
+    @staticmethod
+    def result_hash(record: WorkflowRecord) -> str:
+        """Deterministic hash over the semantic execution only.
+
+        Includes the plan, terminal status, per-stage evidence (kind + the
+        underlying artifacts' deterministic hashes/losses/verdicts/decisions —
+        never their random ids), executed/skipped flags and the transition
+        decisions. Excludes workflow_id, created_at, duration, paths and all
+        recipe provenance (recipe_id/recipe_hash/composition — M12/M14
+        bookkeeping, not semantics), so identical workflows over identical
+        immutable inputs reproduce it.
+        """
+        def semantic(artifact: Optional[WorkflowArtifact]):
+            if artifact is None:
+                return None
+            # JSON form (enum -> value), minus random artifact/checkpoint ids:
+            # content hashes and results remain, ids do not.
+            dump = artifact.model_dump(mode="json", exclude={
+                "artifact_id", "checkpoint_id"})
+            return {k: v for k, v in dump.items() if v is not None}
+
+        payload = {
+            "model_id": record.model_id,
+            "config_hash": record.config_hash,
+            "plan": record.plan.model_dump(mode="json"),
+            "status": record.status.value,
+            "failed_stage_id": record.failed_stage_id,
+            "stages": [{
+                "stage_id": s.stage_id,
+                "type": s.type.value,
+                "executed": s.executed,
+                "skipped": s.skipped,
+                "artifact": semantic(s.artifact),
+            } for s in record.stages],
+            "transitions": [t.model_dump(mode="json") for t in record.transitions],
+        }
+        blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+
+    def _persist(self, record: WorkflowRecord) -> None:
+        """Write one immutable workflow run (atomic; never rewritten)."""
+        wdir = self._workflow_dir(record.model_id, record.workflow_id)
+        wdir.mkdir(parents=True, exist_ok=False)
+        atomic_write_json(wdir / WORKFLOW_MANIFEST,
+                          record.model_dump(mode="json"))
+
+    def _require_model(self, model_id: str):
+        try:
+            return self.storage.load_record(model_id)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"model '{model_id}' not found") from None

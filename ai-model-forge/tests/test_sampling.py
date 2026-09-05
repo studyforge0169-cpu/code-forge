@@ -1,0 +1,590 @@
+"""Milestone 15 tests: deterministic checkpoint sampling (generation).
+
+Engine tests use a module-scoped environment (dataset + two tokenizers + a
+trained main model with checkpoints + a small-vocab model with its own
+checkpoint for mismatch coverage), mirroring the M12/M14 test style; API
+coverage runs over the shared HTTP TestClient root with per-test HTTP setup
+(dataset + tokenizer + model + one short training run to produce a
+checkpoint — generation always binds an explicit immutable checkpoint).
+
+Covered: strict strategy schema rules (greedy forbids temperature/seed;
+temperature requires both, temperature=0 is never reinterpreted as greedy);
+greedy determinism (byte-identical repeats, ids + output + result_hash);
+seeded-temperature determinism with the explicit seed; result-hash
+sensitivity (prompt / strategy / parameters / checkpoint weights / tokenizer
+participate) and exclusions (sample id / timestamps); context-window and
+token-limit preflight; unknown model/checkpoint/tokenizer -> 404-class
+FileNotFoundError; corrupt checkpoint -> integrity error; tokenizer/model
+vocabulary mismatch -> rejection — all with ZERO writes; exactly one
+manifest per successful request and nothing else (no weight copies, no
+extra files, no .tmp); list/get semantics read-only and deterministic;
+decode runs under no_grad through the existing forward/KV-cache path; full
+HTTP lifecycle + OpenAPI exposure. M1–M14 behavior is untouched.
+"""
+from __future__ import annotations
+
+import json
+import random
+
+import pytest
+import torch
+from pydantic import ValidationError
+
+from app.sampling import SamplingEngine
+from app.schemas import (
+    ModelCreateRequest,
+    SampleGenerateRequest,
+    TokenizerConfig,
+    TrainingConfig,
+    TransformerConfig,
+)
+
+_WORDS = ("river mountain cloud forest desert ocean valley island meadow "
+          "canyon table chair lamp desk shelf couch rug clock mirror "
+          "vase").split()
+
+
+def _corpus(n: int, tag: str) -> bytes:
+    rng = random.Random(hash(tag) & 0xFFFF)
+    lines = []
+    for i in range(n):
+        k = rng.randint(10, 22)
+        lines.append(" ".join(rng.choices(_WORDS, k=k)) + f" number {i}")
+    return ("\n\n".join(lines) + "\n").encode("utf-8")
+
+
+def _tiny_model(name: str, vocab: int, seed: int = 1) -> TransformerConfig:
+    return TransformerConfig(name=name, vocab_size=vocab,
+                             context_length=64, hidden_size=64,
+                             n_layers=2, n_heads=4, n_kv_heads=2,
+                             intermediate_size=128, seed=seed)
+
+
+class Env:
+    """One temp root: dataset, big + small tokenizers, trained models."""
+
+    def __init__(self, root):
+        from app.engine import ModelForge
+
+        self.forge = ModelForge(root=root)
+        self.samples = SamplingEngine(self.forge.storage)
+
+    def prepare(self):
+        f = self.forge
+        up = f.upload_dataset([("a.txt", _corpus(220, "m15-dom"))],
+                              name="m15-dom")
+        self.ds = up["dataset_id"]
+        # big tokenizer: actual vocab must exceed the SMALL model's vocab so
+        # the mismatch rejection is real
+        self.tok_big = f.train_tokenizer(
+            TokenizerConfig(name="m15-tok-big", vocab_size=600),
+            dataset_id=self.ds)
+        self.tok_small = f.train_tokenizer(
+            TokenizerConfig(name="m15-tok-small", vocab_size=300),
+            dataset_id=self.ds)
+        assert self.tok_big.actual_vocab_size > 300
+        assert self.tok_small.actual_vocab_size <= 300
+        for tok in (self.tok_big, self.tok_small):
+            f.tokenize_dataset(self.ds, tok.id)
+
+        self.big_model = f.create_model(ModelCreateRequest(
+            config=_tiny_model("m15-main", 640)))[0].id
+        rep = f.run_training(TrainingConfig(
+            name="m15-train-big", method="continued_pretraining",
+            model_id=self.big_model, dataset_id=self.ds,
+            tokenizer_id=self.tok_big.id, learning_rate=3e-3, batch_size=8,
+            max_seq_len=32, steps=8, eval_every_steps=4, keep_best=False,
+            seed=3))
+        self.big_ckpts = [c["checkpoint_id"] for c in rep.checkpoints]
+        assert len(self.big_ckpts) == 2
+
+        self.small_model = f.create_model(ModelCreateRequest(
+            config=_tiny_model("m15-small", 300, seed=7)))[0].id
+        rep = f.run_training(TrainingConfig(
+            name="m15-train-small", method="continued_pretraining",
+            model_id=self.small_model, dataset_id=self.ds,
+            tokenizer_id=self.tok_small.id, learning_rate=3e-3, batch_size=8,
+            max_seq_len=32, steps=6, eval_every_steps=3, keep_best=False,
+            seed=5))
+        self.small_ckpt = rep.checkpoints[0]["checkpoint_id"]
+
+    def ckpt_sha(self, model_id: str, ckpt_id: str) -> str:
+        return self.forge.get_checkpoint(model_id, ckpt_id).weights_sha256
+
+    def file_snapshot(self) -> dict[str, bytes]:
+        root = self.forge.storage.root
+        return {p.relative_to(root).as_posix(): p.read_bytes()
+                for p in root.rglob("*") if p.is_file()}
+
+    def no_tmp(self) -> None:
+        leftovers = [p for p in self.forge.storage.root.rglob("*")
+                     if p.is_file() and ".tmp" in p.name]
+        assert leftovers == []
+
+
+@pytest.fixture(scope="module")
+def env(tmp_path_factory):
+    e = Env(tmp_path_factory.mktemp("m15-root"))
+    e.prepare()
+    return e
+
+
+PROMPT = "river mountain cloud forest ocean desert valley island"
+
+def _req(**overrides) -> SampleGenerateRequest:
+    base = dict(model_id="m", checkpoint_id="c", tokenizer_id="t",
+                prompt=PROMPT, strategy="greedy", max_new_tokens=8)
+    base.update(overrides)
+    return SampleGenerateRequest(**base)
+
+
+def _g(env, **overrides):
+    base = dict(model_id=env.big_model, checkpoint_id=env.big_ckpts[0],
+                tokenizer_id=env.tok_big.id, prompt=PROMPT,
+                strategy="greedy", max_new_tokens=8)
+    base.update(overrides)
+    return SampleGenerateRequest(**base)
+
+
+# =========================================================================== #
+# Schema: strict strategy rules
+# =========================================================================== #
+
+def test_strategy_schema_rules():
+    _req(strategy="temperature", temperature=0.8, seed=5)  # valid shape
+    # greedy forbids temperature and seed (never reinterpreted)
+    with pytest.raises(ValidationError, match="takes no temperature"):
+        _req(strategy="greedy", temperature=0.8)
+    with pytest.raises(ValidationError, match="takes no seed"):
+        _req(strategy="greedy", seed=5)
+    # temperature REQUIRES both temperature in (0,1] and an explicit seed
+    with pytest.raises(ValidationError, match="requires an explicit "
+                       "temperature"):
+        _req(strategy="temperature", seed=5)
+    with pytest.raises(ValidationError, match="requires an explicit integer "
+                       "seed"):
+        _req(strategy="temperature", temperature=0.8)
+    # temperature bounds: 0 is rejected (NOT greedy), >1 rejected
+    with pytest.raises(ValidationError, match="greater than 0"):
+        _req(strategy="temperature", temperature=0.0, seed=5)
+    with pytest.raises(ValidationError, match="less than or equal to 1"):
+        _req(strategy="temperature", temperature=1.5, seed=5)
+    # max_new_tokens bounds + strategy required + no extra fields
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        _req(max_new_tokens=0)
+    with pytest.raises(ValidationError, match="less than or equal to 512"):
+        _req(max_new_tokens=513)
+    with pytest.raises(ValidationError, match="Input should be 'greedy' or "
+                       "'temperature'"):
+        _req(strategy=None)
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        SampleGenerateRequest(**_req().model_dump(), extra=1)
+    with pytest.raises(ValidationError, match="at least 1 character"):
+        SampleGenerateRequest(**{**_req().model_dump(), "prompt": ""})
+
+
+# =========================================================================== #
+# Greedy determinism + record shape
+# =========================================================================== #
+
+def test_greedy_deterministic_byte_identical_repeats(env):
+    r1 = env.samples.run(_g(env))
+    r2 = env.samples.run(_g(env))
+    assert r1.sample_id != r2.sample_id            # distinct records
+    assert r1.generated_token_ids == r2.generated_token_ids
+    assert r1.output_text == r2.output_text
+    assert r1.result_hash == r2.result_hash
+    assert len(r1.generated_token_ids) == 8 == r1.generated_token_count
+    assert r1.strategy.value == "greedy"
+    assert r1.temperature is None and r1.seed is None
+    # audit fields: verified weights hash + tokenizer content hash
+    assert r1.checkpoint_weights_sha256 == env.ckpt_sha(env.big_model,
+                                                        env.big_ckpts[0])
+    assert r1.tokenizer_hash == env.tok_big.tokenizer_hash
+    assert r1.prompt == PROMPT and len(r1.prompt_token_ids) > 0
+    assert r1.prompt_token_count == len(r1.prompt_token_ids)
+    # manifests on disk round-trip (json serialization of list[int])
+    disk = env.samples.get_sample(env.big_model, r1.sample_id)
+    assert disk.generated_token_ids == r1.generated_token_ids
+    assert disk.result_hash == r1.result_hash
+    # the record's own output decodes from its ids with the same tokenizer
+    hf = env.forge.tokenizers.get_hf(env.tok_big.id)
+    assert hf.decode(r1.generated_token_ids) == r1.output_text
+    env.no_tmp()
+
+
+def test_temperature_same_seed_identical_and_seed_participates(env):
+    def t(seed, temperature=0.8, **kw):
+        return env.samples.run(_g(env, strategy="temperature",
+                                  temperature=temperature, seed=seed, **kw))
+    a, b = t(7), t(7)
+    assert a.generated_token_ids == b.generated_token_ids
+    assert a.output_text == b.output_text and a.result_hash == b.result_hash
+    assert a.seed == 7 and a.temperature == 0.8
+    c = t(8)                        # different seed: allowed to differ
+    assert c.result_hash != a.result_hash   # seed is part of the payload
+    d = t(7, temperature=0.5)
+    assert d.result_hash != a.result_hash   # temperature is part of payload
+    env.no_tmp()
+
+
+def test_result_hash_semantics_and_exclusions(env):
+    base = env.samples.run(_g(env))
+    # every semantic input participates (guaranteed via the payload)
+    assert env.samples.run(_g(env, prompt=PROMPT + " meadow")).result_hash \
+        != base.result_hash                      # prompt changed
+    assert env.samples.run(_g(env, max_new_tokens=4)).result_hash \
+        != base.result_hash                      # parameter changed
+    assert env.samples.run(_g(env, checkpoint_id=env.big_ckpts[1])
+                           ).result_hash != base.result_hash  # checkpoint
+    assert env.samples.run(_g(env, tokenizer_id=env.tok_small.id,
+                              checkpoint_id=env.big_ckpts[1])  # big-model ids
+                          ).result_hash != base.result_hash    # fit? checked
+    # sample id / timestamps / duration are NOT part of the hash: a repeated
+    # identical request has the same hash although those fields differ
+    again = env.samples.run(_g(env))
+    assert again.result_hash == base.result_hash
+    assert again.sample_id != base.sample_id
+    assert again.created_at != base.created_at
+    assert len(base.result_hash) == 64
+    env.no_tmp()
+
+
+# =========================================================================== #
+# Limits / context preflight
+# =========================================================================== #
+
+def test_context_window_and_token_limits(env):
+    one = env.samples.run(_g(env, max_new_tokens=1))
+    assert len(one.generated_token_ids) == 1
+    # context is 64: any prompt+max_new_tokens > 64 is rejected, never
+    # silently truncated (the engine stops at exactly max_new_tokens)
+    with pytest.raises(ValueError, match="exceeds the model's context_length"):
+        env.samples.run(_g(env, max_new_tokens=64))
+    long_prompt = " ".join(["river"] * 60)
+    with pytest.raises(ValueError, match="exceeds the model's context_length"):
+        env.samples.run(_g(env, prompt=long_prompt, max_new_tokens=8))
+    # boundary is accepted: prompt tokens + max_new_tokens == context
+    n = len(env.samples.run(_g(env, max_new_tokens=1)).prompt_token_ids)
+    fit = env.samples.run(_g(env, max_new_tokens=64 - n))
+    assert len(fit.generated_token_ids) == 64 - n
+    env.no_tmp()
+
+
+# =========================================================================== #
+# Compatibility rejections: zero writes every time
+# =========================================================================== #
+
+def test_unknown_model_checkpoint_tokenizer_rejected_no_writes(env):
+    before = env.file_snapshot()
+    with pytest.raises(FileNotFoundError, match="model 'no-such-model' not "
+                       "found"):
+        env.samples.run(SampleGenerateRequest(
+            model_id="no-such-model", checkpoint_id=env.big_ckpts[0],
+            tokenizer_id=env.tok_big.id, prompt=PROMPT, strategy="greedy",
+            max_new_tokens=8))
+    with pytest.raises(FileNotFoundError, match="checkpoint 'no-such-ckpt'"):
+        env.samples.run(SampleGenerateRequest(
+            model_id=env.big_model, checkpoint_id="no-such-ckpt",
+            tokenizer_id=env.tok_big.id, prompt=PROMPT, strategy="greedy",
+            max_new_tokens=8))
+    with pytest.raises(FileNotFoundError, match="tokenizer 'no-such-tok'"):
+        env.samples.run(SampleGenerateRequest(
+            model_id=env.big_model, checkpoint_id=env.big_ckpts[0],
+            tokenizer_id="no-such-tok", prompt=PROMPT, strategy="greedy",
+            max_new_tokens=8))
+    assert env.file_snapshot() == before
+    env.no_tmp()
+
+
+def test_vocabulary_mismatch_rejected_no_writes(env):
+    """Platform compatibility convention (the exact M3/M4 rule): the
+    tokenizer's actual vocab must fit the model's vocab_size. A 300-vocab
+    model cannot be sampled through the 561+-vocab tokenizer."""
+    before = env.file_snapshot()
+    with pytest.raises(ValueError,
+                       match=f"vocab \\({env.tok_big.actual_vocab_size}\\) "
+                             "exceeds the model's vocab_size \\(300\\)"):
+        env.samples.run(SampleGenerateRequest(
+            model_id=env.small_model, checkpoint_id=env.small_ckpt,
+            tokenizer_id=env.tok_big.id, prompt=PROMPT, strategy="greedy",
+            max_new_tokens=8))
+    # the matching small tokenizer works fine on the small model
+    r = env.samples.run(SampleGenerateRequest(
+        model_id=env.small_model, checkpoint_id=env.small_ckpt,
+        tokenizer_id=env.tok_small.id, prompt=PROMPT, strategy="greedy",
+        max_new_tokens=8))
+    assert r.strategy.value == "greedy"
+    assert all(t < env.tok_small.actual_vocab_size
+               for t in r.generated_token_ids)
+    assert env.file_snapshot() != before  # exactly the ONE new manifest
+    new_files = [k for k in env.file_snapshot() if k not in before]
+    assert len(new_files) == 1
+    env.no_tmp()
+
+
+def test_corrupt_checkpoint_refused_no_manifest(env):
+    fresh = env.forge.create_model(ModelCreateRequest(
+        config=_tiny_model("m15-corrupt-model", 640, seed=11)))[0].id
+    rep = env.forge.run_training(TrainingConfig(
+        name="m15-train-corrupt", method="continued_pretraining",
+        model_id=fresh, dataset_id=env.ds, tokenizer_id=env.tok_big.id,
+        learning_rate=3e-3, batch_size=8, max_seq_len=32, steps=4,
+        eval_every_steps=4, keep_best=False, seed=9))
+    ckpt = rep.checkpoints[0]["checkpoint_id"]
+    # tamper the weights archive: content hash no longer matches the manifest
+    wpath = (env.forge.storage.root / "models" / fresh / "checkpoints"
+             / ckpt / "weights.pt")
+    state = torch.load(wpath, map_location="cpu", weights_only=True)
+    first = next(iter(state))
+    tampered = {k: (v.clone().fill_(0.0) if k == first else v.clone())
+                for k, v in state.items()}
+    torch.save(tampered, wpath)
+    before = env.file_snapshot()
+    with pytest.raises(RuntimeError, match="integrity"):
+        env.samples.run(SampleGenerateRequest(
+            model_id=fresh, checkpoint_id=ckpt, tokenizer_id=env.tok_big.id,
+            prompt=PROMPT, strategy="greedy", max_new_tokens=8))
+    assert env.file_snapshot() == before
+    env.no_tmp()
+
+
+# =========================================================================== #
+# Storage discipline
+# =========================================================================== #
+
+def test_one_manifest_per_run_and_zero_extra_files(env):
+    fresh = env.forge.create_model(ModelCreateRequest(
+        config=_tiny_model("m15-storage-model", 640, seed=13)))[0].id
+    rep = env.forge.run_training(TrainingConfig(
+        name="m15-train-storage", method="continued_pretraining",
+        model_id=fresh, dataset_id=env.ds, tokenizer_id=env.tok_big.id,
+        learning_rate=3e-3, batch_size=8, max_seq_len=32, steps=4,
+        eval_every_steps=4, keep_best=False, seed=15))
+    ckpt = rep.checkpoints[0]["checkpoint_id"]
+    before = env.file_snapshot()
+    runs = [env.samples.run(SampleGenerateRequest(
+        model_id=fresh, checkpoint_id=ckpt, tokenizer_id=env.tok_big.id,
+        prompt=PROMPT, strategy="greedy", max_new_tokens=5)) for _ in range(3)]
+    after = env.file_snapshot()
+    new_files = [k for k in after if k not in before]
+    assert len(new_files) == 3            # exactly one manifest per request
+    assert all(k.startswith(f"samples/{fresh}/sample-") and k.endswith(
+        "/manifest.json") for k in new_files)
+    # every sample dir holds ONLY its manifest (no blobs/weights/caches)
+    sroot = env.forge.storage.root / "samples" / fresh
+    dirs = sorted(d for d in sroot.iterdir() if d.is_dir())
+    assert [d.name for d in dirs] == sorted(d.name for d in dirs)
+    assert all(sorted(p.name for p in d.iterdir()) == ["manifest.json"]
+               for d in dirs)
+    # every pre-existing file is byte-identical (no model/checkpoint writes)
+    for k, v in before.items():
+        assert after[k] == v
+    assert [x.sample_id for x in env.samples.list_samples(fresh)] == \
+        [r.sample_id for r in runs]
+    env.no_tmp()
+
+
+def test_list_get_semantics_read_only_deterministic(env):
+    fresh = env.forge.create_model(ModelCreateRequest(
+        config=_tiny_model("m15-list-model", 640, seed=17)))[0].id
+    rep = env.forge.run_training(TrainingConfig(
+        name="m15-train-list", method="continued_pretraining",
+        model_id=fresh, dataset_id=env.ds, tokenizer_id=env.tok_big.id,
+        learning_rate=3e-3, batch_size=8, max_seq_len=32, steps=4,
+        eval_every_steps=4, keep_best=False, seed=21))
+    ckpt = rep.checkpoints[0]["checkpoint_id"]
+    ids = []
+    for seed in (1, 2):
+        ids.append(env.samples.run(SampleGenerateRequest(
+            model_id=fresh, checkpoint_id=ckpt, tokenizer_id=env.tok_big.id,
+            prompt=PROMPT, strategy="temperature", temperature=0.7, seed=seed,
+            max_new_tokens=3)).sample_id)
+    got = env.samples.list_samples(fresh)
+    assert [s.sample_id for s in got] == ids
+    keyed = [(s.created_at, s.sample_id) for s in got]
+    assert keyed == sorted(keyed)
+    assert env.samples.get_sample(fresh, ids[0]).sample_id == ids[0]
+    with pytest.raises(FileNotFoundError):
+        env.samples.list_samples("no-such-model")
+    with pytest.raises(FileNotFoundError):
+        env.samples.get_sample(fresh, "no-such-sample")
+    with pytest.raises(FileNotFoundError):
+        env.samples.get_sample("no-such-model", ids[0])
+    # reads never write
+    before = env.file_snapshot()
+    env.samples.list_samples(fresh)
+    env.samples.get_sample(fresh, ids[1])
+    assert env.file_snapshot() == before
+    env.no_tmp()
+
+
+# =========================================================================== #
+# Inference-only guarantees (no grad, existing forward path)
+# =========================================================================== #
+
+def test_decode_runs_without_grad_through_existing_forward(env, monkeypatch):
+    import app.sampling as sampling_mod
+
+    seen = []
+    orig_build = sampling_mod.build_transformer
+
+    def wrapped(cfg, parent_state=None, device="cpu"):
+        built = orig_build(cfg, parent_state=parent_state, device=device)
+        fwd = built.module.forward
+
+        def guarded(*args, **kwargs):
+            seen.append(torch.is_grad_enabled())
+            return fwd(*args, **kwargs)
+
+        built.module.forward = guarded
+        return built
+
+    monkeypatch.setattr(sampling_mod, "build_transformer", wrapped)
+    r = env.samples.run(_g(env))
+    assert seen and not any(seen), "forward ran with grad enabled"
+    assert len(r.generated_token_ids) == 8
+
+
+# =========================================================================== #
+# HTTP API coverage (shared TestClient root; per-test model setup)
+# =========================================================================== #
+
+import json as _json  # noqa: E402
+
+MODELS = "/api/v1/models"
+GENERATE = "/api/v1/samples/generate"
+PROMPT_API = "river mountain cloud forest ocean desert valley island"
+
+
+def _http_env(api_client, tag: str, vocab: int = 640):
+    """Dataset + tokenizer + model + ONE short training run (checkpoints)."""
+    corpus = _corpus(200, tag)
+    up = api_client.post("/api/v1/datasets/upload",
+                         files=[("files", (f"{tag}.txt", corpus,
+                                           "text/plain"))],
+                         data={"name": f"api15-{tag}-ds"})
+    assert up.status_code == 201, up.text
+    ds = up.json()["dataset_id"]
+    tok = api_client.post("/api/v1/tokenizers/train",
+                          data={"config": _json.dumps(
+                              {"name": f"api15-{tag}-tok",
+                               "vocab_size": 320}),
+                                "dataset_id": ds}).json()["tokenizer"]
+    api_client.post(f"/api/v1/datasets/{ds}/tokenize",
+                    json={"tokenizer_id": tok["id"]})
+    cfg = {"name": f"api15-{tag}-model", "vocab_size": vocab,
+           "context_length": 64, "hidden_size": 64, "n_layers": 2,
+           "n_heads": 4, "n_kv_heads": 2, "intermediate_size": 128,
+           "seed": 1}
+    mid = api_client.post(MODELS, json={"config": cfg}).json()["model"]["id"]
+    rep = api_client.post("/api/v1/training/run", json={
+        "name": f"api15-{tag}-run", "method": "continued_pretraining",
+        "model_id": mid, "dataset_id": ds, "tokenizer_id": tok["id"],
+        "learning_rate": 3e-3, "batch_size": 8, "steps": 8,
+        "max_seq_len": 32, "warmup_steps": 0, "weight_decay": 0.01,
+        "adam_beta1": 0.9, "adam_beta2": 0.999, "lr_schedule": "cosine",
+        "eval_every_steps": 4, "keep_best": True, "seed": 3})
+    assert rep.status_code == 200, rep.text
+    ckpt = rep.json()["checkpoints"][0]["checkpoint_id"]
+    return {"mid": mid, "tok": tok["id"], "ckpt": ckpt}
+
+
+def _gen_body(h, **overrides) -> dict:
+    body = {"model_id": h["mid"], "checkpoint_id": h["ckpt"],
+            "tokenizer_id": h["tok"], "prompt": PROMPT_API,
+            "strategy": "greedy", "max_new_tokens": 6}
+    body.update(overrides)
+    return body
+
+
+def test_api_generate_list_get_determinism(api_client):
+    h = _http_env(api_client, "gen")
+    body = _gen_body(h)
+
+    r1 = api_client.post(GENERATE, json=body)
+    assert r1.status_code == 200, r1.text
+    s1 = r1.json()
+    assert s1["strategy"] == "greedy" and s1["temperature"] is None
+    assert s1["model_id"] == h["mid"] and s1["checkpoint_id"] == h["ckpt"]
+    assert s1["tokenizer_id"] == h["tok"]
+    assert s1["generated_token_count"] == 6
+    assert len(s1["result_hash"]) == 64
+    assert s1["checkpoint_weights_sha256"]
+    assert s1["prompt"] == PROMPT_API
+
+    r2 = api_client.post(GENERATE, json=body)
+    s2 = r2.json()
+    assert s2["generated_token_ids"] == s1["generated_token_ids"]
+    assert s2["output_text"] == s1["output_text"]
+    assert s2["result_hash"] == s1["result_hash"]
+    assert s2["sample_id"] != s1["sample_id"]
+
+    # list: deterministic (created_at, sample_id) order, then get
+    lst1 = api_client.get(f"{MODELS}/{h['mid']}/samples")
+    assert lst1.status_code == 200
+    runs = lst1.json()
+    assert len(runs) == 2
+    keyed = [(x["created_at"], x["sample_id"]) for x in runs]
+    assert keyed == sorted(keyed)
+    assert api_client.get(f"{MODELS}/{h['mid']}/samples").text == lst1.text
+    one = api_client.get(f"{MODELS}/{h['mid']}/samples/{s1['sample_id']}")
+    assert one.status_code == 200
+    assert one.json()["result_hash"] == s1["result_hash"]
+    assert api_client.get(f"{MODELS}/{h['mid']}/samples/no-such").status_code \
+        == 404
+    assert api_client.get(f"{MODELS}/no-such-model/samples").status_code == 404
+    # temperature over HTTP: same seed -> same ids/hash
+    t1 = api_client.post(GENERATE, json=_gen_body(h, strategy="temperature",
+                                                  temperature=0.8, seed=11))
+    t2 = api_client.post(GENERATE, json=_gen_body(h, strategy="temperature",
+                                                  temperature=0.8, seed=11))
+    assert t1.status_code == 200 and t2.status_code == 200
+    assert t1.json()["generated_token_ids"] == \
+        t2.json()["generated_token_ids"]
+    assert t1.json()["result_hash"] == t2.json()["result_hash"]
+    # no update/delete paths exist (405)
+    assert api_client.put(f"{MODELS}/{h['mid']}/samples/{s1['sample_id']}"
+                          ).status_code == 405
+    assert api_client.delete(f"{MODELS}/{h['mid']}/samples/{s1['sample_id']}"
+                             ).status_code == 405
+
+
+def test_api_failure_paths_and_zero_manifest_growth(api_client):
+    h = _http_env(api_client, "fail")
+    body = _gen_body(h)
+    assert api_client.post(GENERATE, json=body).status_code == 200
+    n0 = len(api_client.get(f"{MODELS}/{h['mid']}/samples").json())
+    # unknown checkpoint / tokenizer / model -> 404, nothing written
+    for bad, want in ((dict(body, checkpoint_id="no-such-ckpt"), 404),
+                      (dict(body, tokenizer_id="no-such-tok"), 404),
+                      (dict(body, model_id="no-such-model"), 404)):
+        r = api_client.post(GENERATE, json=bad)
+        assert r.status_code == want, r.text
+    assert len(api_client.get(f"{MODELS}/{h['mid']}/samples").json()) == n0
+    # schema/parameter violations -> 422, nothing written
+    for bad in (dict(body, strategy="greedy", temperature=0.8),
+                dict(body, strategy="temperature", temperature=0.8),
+                dict(body, strategy="temperature", seed=1),
+                dict(body, strategy="temperature", temperature=0.0, seed=1),
+                dict(body, max_new_tokens=0),
+                dict(body, max_new_tokens=513),
+                dict(body, max_new_tokens=100),       # context overflow
+                {"model_id": h["mid"], "checkpoint_id": h["ckpt"],
+                 "tokenizer_id": h["tok"], "prompt": "", "strategy": "greedy",
+                 "max_new_tokens": 4}):
+        r = api_client.post(GENERATE, json=bad)
+        assert r.status_code == 422, (bad, r.text)
+    assert len(api_client.get(f"{MODELS}/{h['mid']}/samples").json()) == n0
+
+
+def test_api_openapi_exposes_sampling(api_client):
+    spec = api_client.get("/openapi.json").json()
+    assert "/api/v1/samples/generate" in spec["paths"]
+    assert "/api/v1/models/{model_id}/samples" in spec["paths"]
+    assert "/api/v1/models/{model_id}/samples/{sample_id}" in spec["paths"]
+    assert "SampleRecord" in spec["components"]["schemas"]
+    assert "SampleGenerateRequest" in spec["components"]["schemas"]
+    strat = [s["enum"] for s in spec["components"]["schemas"].values()
+             if s.get("enum") == ["greedy", "temperature"]]
+    assert len(strat) == 1

@@ -1,0 +1,229 @@
+"""Milestone 4 tests: evaluation REST API (run / list / get + error mapping)."""
+from __future__ import annotations
+
+import io
+import json
+import random
+
+import torch
+
+from app.model_builder import content_hash
+
+UPLOAD = "/api/v1/datasets/upload"
+DATASETS = "/api/v1/datasets"
+TOKENIZERS = "/api/v1/tokenizers"
+MODELS = "/api/v1/models"
+EVAL_RUN = "/api/v1/evaluations/run"
+
+_WORDS = ("river mountain cloud forest desert ocean valley island meadow canyon "
+          "table chair lamp desk shelf couch rug clock mirror vase").split()
+
+
+def _files(name: str, content: bytes):
+    return [("files", (name, content, "text/plain"))]
+
+
+def _corpus(n: int, tag: str) -> bytes:
+    rng = random.Random(hash(tag) % (2**32))
+    lines = []
+    for i in range(n):
+        k = rng.randint(10, 22)
+        lines.append(" ".join(rng.choices(_WORDS, k=k)) + f" number {i}")
+    return ("\n\n".join(lines) + "\n").encode("utf-8")
+
+
+def _weights_sha(client, model_id: str) -> str:
+    dl = client.get(f"{MODELS}/{model_id}/weights")
+    assert dl.status_code == 200
+    return content_hash(torch.load(io.BytesIO(dl.content), map_location="cpu",
+                                   weights_only=True))
+
+
+def _prepare(api_client, tag: str) -> tuple[str, str, str, dict]:
+    """Dataset + tokenizer + tokenized bins + trained model (keep_best=False).
+
+    Returns (ds_id, tok_id, model_id, run_report).
+    """
+    up = api_client.post(UPLOAD, files=_files(f"{tag}.txt", _corpus(220, tag)),
+                         data={"name": f"api4-{tag}-ds"})
+    assert up.status_code == 201, up.text
+    ds_id = up.json()["dataset_id"]
+
+    tr = api_client.post(TOKENIZERS + "/train",
+                         data={"config": json.dumps({"name": f"api4-{tag}-tok",
+                                                     "vocab_size": 320}),
+                               "dataset_id": ds_id})
+    assert tr.status_code == 201, tr.text
+    tok_id = tr.json()["tokenizer"]["id"]
+    assert api_client.post(f"{DATASETS}/{ds_id}/tokenize",
+                           json={"tokenizer_id": tok_id}).status_code == 200
+
+    model_cfg = {"name": f"api4-{tag}-model", "vocab_size": 640,
+                 "context_length": 64, "hidden_size": 64, "n_layers": 2,
+                 "n_heads": 4, "n_kv_heads": 2, "intermediate_size": 128}
+    m = api_client.post(MODELS, json={"config": model_cfg})
+    assert m.status_code == 201, m.text
+    model_id = m.json()["model"]["id"]
+
+    run = api_client.post("/api/v1/training/run", json={
+        "name": f"api4-{tag}-run", "method": "continued_pretraining",
+        "model_id": model_id, "dataset_id": ds_id, "tokenizer_id": tok_id,
+        "learning_rate": 3e-3, "batch_size": 8, "max_seq_len": 32,
+        "steps": 14, "eval_every_steps": 7, "keep_best": False,
+        "lr_schedule": "constant", "seed": 3})
+    assert run.status_code == 200, run.text
+    return ds_id, tok_id, model_id, run.json()
+
+
+def _eval_cfg(model_id: str, ds_id: str, tok_id: str, **overrides) -> dict:
+    cfg = {"model_id": model_id, "dataset_id": ds_id, "split": "validation",
+           "tokenizer_id": tok_id, "batch_size": 8, "max_seq_len": 32,
+           "seed": 11}
+    cfg.update(overrides)
+    return cfg
+
+
+# --------------------------------------------------------------------------- #
+# Success paths
+# --------------------------------------------------------------------------- #
+
+def test_evaluation_run_list_get(api_client):
+    ds_id, tok_id, model_id, run = _prepare(api_client, "flow")
+    ckpts = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    final_val = ckpts[-1]["validation_loss"]
+
+    resp = api_client.post(EVAL_RUN, json=_eval_cfg(model_id, ds_id, tok_id))
+    assert resp.status_code == 200, resp.text
+    rec = resp.json()
+    assert rec["model_id"] == model_id and rec["state_kind"] == "current"
+    assert rec["checkpoint_id"] is None
+    assert rec["split"] == "validation" and rec["dataset_version"] == 1
+    assert abs(rec["loss_nats"] - final_val) < 1e-4      # M3-consistent
+    assert rec["token_count"] > 0 and rec["truncated"] is False
+    assert rec["records_covered"] is not None
+    assert len(rec["result_hash"]) == 64
+    assert rec["state_hash"] == _weights_sha(api_client, model_id)
+
+    # checkpoint state through the API (same schema, correct state hash)
+    resp = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, checkpoint_id=ckpts[0]["checkpoint_id"]))
+    assert resp.status_code == 200, resp.text
+    ck_rec = resp.json()
+    assert ck_rec["state_kind"] == "checkpoint"
+    assert ck_rec["checkpoint_id"] == ckpts[0]["checkpoint_id"]
+    assert ck_rec["state_hash"] == ckpts[0]["weights_sha256"]
+    assert abs(ck_rec["loss_nats"] - ckpts[0]["validation_loss"]) < 1e-4
+
+    # list: both records present, deterministic order; get returns them
+    lst = api_client.get(f"{MODELS}/{model_id}/evaluations")
+    assert lst.status_code == 200
+    body = lst.json()
+    assert len(body) == 2
+    assert {r["state_kind"] for r in body} == {"current", "checkpoint"}
+    assert api_client.get(f"{MODELS}/{model_id}/evaluations").json() == body
+    assert body == sorted(body, key=lambda r: (r["created_at"], r["eval_id"]))
+    got = api_client.get(f"{MODELS}/{model_id}/evaluations/{body[0]['eval_id']}")
+    assert got.status_code == 200
+    assert got.json() == body[0]              # persisted record is immutable
+    assert got.json()["result_hash"] == body[0]["result_hash"]
+
+
+# --------------------------------------------------------------------------- #
+# List/get semantics
+# --------------------------------------------------------------------------- #
+
+def test_evaluation_list_404_and_empty(api_client):
+    assert api_client.get(f"{MODELS}/ghost/evaluations").status_code == 404
+    assert api_client.get(f"{MODELS}/ghost/evaluations/nope").status_code == 404
+    body = {"config": {"name": "api4-norec-model", "vocab_size": 64,
+                       "context_length": 32, "hidden_size": 32, "n_layers": 2,
+                       "n_heads": 4, "n_kv_heads": 2, "intermediate_size": 48}}
+    m = api_client.post(MODELS, json=body)
+    assert m.status_code == 201
+    model_id = m.json()["model"]["id"]
+    assert api_client.get(f"{MODELS}/{model_id}/evaluations").status_code == 200
+    assert api_client.get(f"{MODELS}/{model_id}/evaluations").json() == []
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/nope").status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# Rejections + integrity
+# --------------------------------------------------------------------------- #
+
+def test_evaluation_rejections(api_client):
+    ds_id, tok_id, model_id, _ = _prepare(api_client, "reject")
+    base = _eval_cfg(model_id, ds_id, tok_id)
+
+    cases_404 = [
+        {**base, "model_id": "ghost"},
+        {**base, "dataset_id": "ghost"},
+        {**base, "tokenizer_id": "ghost"},
+        {**base, "dataset_version": 99},
+        {**base, "checkpoint_id": "ghost"},
+    ]
+    for payload in cases_404:
+        assert api_client.post(EVAL_RUN, json=payload).status_code == 404, payload
+
+    cases_422 = [
+        {**base, "split": "trainx"},
+        {**base, "split": "val"},
+        {**base, "split": "validation2"},
+        {**base, "max_seq_len": 128},          # > model context_length
+        {**base, "batch_size": 0},
+        {**base, "max_eval_tokens": 0},
+        {**base, "unknown_field": 1},
+    ]
+    for payload in cases_422:
+        resp = api_client.post(EVAL_RUN, json=payload)
+        assert resp.status_code == 422, (payload, resp.text)
+
+    # dataset without a tokenized artifact -> 404
+    up = api_client.post(UPLOAD, files=_files("raw.txt", _corpus(40, "untok")),
+                         data={"name": "api4-untok-ds"})
+    assert up.status_code == 201
+    resp = api_client.post(EVAL_RUN, json={**base, "dataset_id": up.json()["dataset_id"]})
+    assert resp.status_code == 404
+    assert "tokenized artifact" in resp.json()["detail"]
+
+    # refused runs create no evaluation records
+    lst = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert lst == []
+
+
+def test_corrupt_checkpoint_eval_409_and_read_only(api_client):
+    ds_id, tok_id, model_id, run = _prepare(api_client, "corrupt")
+    ckpts = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    target = ckpts[0]
+    weights_before = _weights_sha(api_client, model_id)
+
+    # corrupt the checkpoint's weights file (valid archive, changed values)
+    root = api_client.get("/api/v1/project").json()["storage_root"]
+    wpath = (f"{root}/models/{model_id}/checkpoints/"
+             f"{target['checkpoint_id']}/weights.pt")
+    state = torch.load(wpath, map_location="cpu", weights_only=True)
+    tampered = {k: v.clone() for k, v in state.items()}
+    next(iter(tampered.values())).fill_(0.0)
+    torch.save(tampered, wpath)
+
+    resp = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, checkpoint_id=target["checkpoint_id"]))
+    assert resp.status_code == 409
+    assert "integrity" in resp.json()["detail"]
+    # refused before any artifact: no new evaluation manifest, weights intact
+    assert api_client.get(f"{MODELS}/{model_id}/evaluations").json() == []
+    assert _weights_sha(api_client, model_id) == weights_before
+    # current-state evaluation still works (untouched)
+    ok = api_client.post(EVAL_RUN, json=_eval_cfg(model_id, ds_id, tok_id))
+    assert ok.status_code == 200
+
+
+def test_evaluation_schema_validation_422(api_client):
+    ds_id, tok_id, model_id, _ = _prepare(api_client, "schema")
+    base = _eval_cfg(model_id, ds_id, tok_id)
+    resp = api_client.post(EVAL_RUN, json={**base, "model_id": ""})
+    assert resp.status_code == 422
+    resp = api_client.post(EVAL_RUN, json={**base, "checkpoint_id": ""})
+    assert resp.status_code == 422
+    resp = api_client.post(EVAL_RUN, json={**base, "split": "test"})
+    assert resp.status_code == 200            # enum valid values accepted
