@@ -306,6 +306,18 @@ def index() -> HTMLResponse:
         -> []; inline-policy decisions never appear). Pure data access —
         no aggregation, no verdicts beyond the persisted ones, zero
         storage growth.</li>
+
+      <li><b>M24 evaluation history by checkpoint</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/evaluations/by-checkpoint/&#123;checkpoint&#125;</code>,
+        answers "which immutable M4 evaluations measured this checkpoint?":
+        the model's authoritative M4 listing filtered by the persisted
+        checkpoint identity recorded in each record, after checkpoint
+        ownership is validated through the M3 registry (full record
+        payloads, exact M4 ordering; unknown model/checkpoint or a
+        checkpoint of another model -> 404; a checkpoint without
+        evaluations -> []; current-state evaluations never appear). Pure
+        data access — no derived statistics, no comparison, zero storage
+        growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -322,6 +334,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/models/&#123;id&#125;/rollback</code> — verified restore of a checkpoint</li>
       <li><code>POST  {prefix}/evaluations/run</code> — read-only evaluation (current state or checkpoint)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations</code> — immutable evaluation history</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-checkpoint/&#123;ckpt&#125;</code> — evaluations recorded under ONE checkpoint (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/&#123;eval&#125;</code> — one evaluation record</li>
       <li><code>POST  {prefix}/comparisons/run</code> — A/B comparison (improved / regressed / unchanged)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons</code> — immutable comparison history</li>
@@ -685,6 +698,32 @@ def list_evaluations(model_id: str) -> list[dict[str, Any]]:
     try:
         return [r.model_dump(mode="json")
                 for r in _forge().list_evaluations(model_id)]
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/evaluations/by-checkpoint/{checkpoint_id}",
+         response_model=list[EvaluationRecord], tags=["evaluation"])
+def list_evaluations_by_checkpoint(model_id: str, checkpoint_id: str
+                                   ) -> list[EvaluationRecord]:
+    """Immutable M4 evaluation records recorded under ONE checkpoint (M24).
+
+    Read-only per-checkpoint grouping: validates the checkpoint through
+    the model's M3 checkpoint registry (an unknown checkpoint, or a
+    checkpoint id belonging to another model, is 404 — checkpoint ids
+    are model-scoped; nothing is inferred from filenames), then returns
+    the model's authoritative M4 listing filtered by the persisted
+    checkpoint_id recorded in each EvaluationRecord — complete verbatim
+    payloads (loss_nats/perplexity included) in the exact M4
+    (created_at, eval_id) order. Current-state evaluations keep
+    checkpoint_id null and never appear; a checkpoint with no
+    evaluations returns []. Answers only which immutable evaluations
+    measured this checkpoint; no derived statistics, no comparison, no
+    writes. (Must stay registered before /evaluations/{eval_id}; the
+    literal "by-checkpoint" segment is not an evaluation id.)"""
+    try:
+        return _forge().list_evaluations_for_checkpoint(model_id,
+                                                        checkpoint_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

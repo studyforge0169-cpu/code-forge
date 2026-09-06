@@ -435,3 +435,119 @@ def test_current_and_checkpoint_states_comparable(env, trained):
     assert cur.state_hash == env.state_hash(mid)          # current canonical
     assert ckp.state_hash == ckpt.weights_sha256          # checkpoint canonical
     assert cur.state_kind.value != ckp.state_kind.value
+
+
+# =========================================================================== #
+# M24: read-only per-checkpoint grouping of the evaluation history
+# =========================================================================== #
+
+def _m24_env(env):
+    """One model with three checkpoints (evals on two of them + one
+    current-state eval) and a second model with its own checkpoint.
+    Built once per module env and cached — every M24 engine test sees the
+    exact same immutable history. Returns (a, b, cks_a, ck_evals, cur,
+    b_ckpt, b_eval).
+    """
+    cached = getattr(env, "_m24_state", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    a = env.new_model("m24-main")
+    env.run_training(a, ds_key="base", steps=30, eval_every_steps=10)
+    cks = f.list_checkpoints(a)
+    assert len(cks) >= 3
+    ck_a, ck_b, ck_c = (c.checkpoint_id for c in cks[:3])
+    e1 = f.run_evaluation(env.eval_cfg(a, checkpoint_id=ck_a, seed=2411))
+    e2 = f.run_evaluation(env.eval_cfg(a, checkpoint_id=ck_a, seed=2412))
+    e3 = f.run_evaluation(env.eval_cfg(a, checkpoint_id=ck_b, seed=2413))
+    cur = f.run_evaluation(env.eval_cfg(a, seed=2414))   # current state
+    b = env.new_model("m24-b", seed=24)
+    env.run_training(b, ds_key="base", steps=10, eval_every_steps=10)
+    b_ckpt = f.list_checkpoints(b)[0].checkpoint_id
+    b_eval = f.run_evaluation(env.eval_cfg(b, checkpoint_id=b_ckpt,
+                                           seed=2415))
+    env._m24_state = (a, b, (ck_a, ck_b, ck_c),
+                      (ck_a, [e1, e2]), ck_b, [e3], cur, b_ckpt, b_eval)
+    return env._m24_state
+
+
+def _m24_eval_files(env, model_ids) -> set[str]:
+    out = set()
+    for mid in model_ids:
+        root = env.forge.storage.model_dir(mid) / "evaluations"
+        if not root.exists():
+            continue
+        for p in root.rglob("*"):
+            if p.is_file():
+                out.add(f"{mid}:{p.relative_to(root).as_posix()}")
+    return out
+
+
+def test_m24_engine_filters_by_persisted_checkpoint_and_model(env):
+    a, b, cks, (ck_a, ck_evals), ck_b, ck_evals_b, cur, b_ckpt, b_eval = \
+        _m24_env(env)
+    f = env.forge
+    got = f.list_evaluations_for_checkpoint(a, ck_a)
+    # every record belongs to the requested model AND checkpoint; ordering
+    # is the exact M4 convention ((created_at, eval_id) ascending)
+    assert [r.eval_id for r in got] == [r.eval_id for r in ck_evals]
+    assert all(r.model_id == a and r.state_kind.value == "checkpoint"
+               and r.checkpoint_id == ck_a for r in got)
+    assert [(r.created_at, r.eval_id) for r in got] == \
+        sorted((r.created_at, r.eval_id) for r in got)
+    # a second checkpoint returns only its own evaluation
+    got_b = f.list_evaluations_for_checkpoint(a, ck_b)
+    assert [r.eval_id for r in got_b] == [r.eval_id for r in ck_evals_b]
+    # payload parity: verbatim EvaluationRecord equality with both the
+    # authoritative M4 listing and the M4 single-record getter
+    listing = {r.eval_id: r for r in f.list_evaluations(a)}
+    for r in got:
+        assert r == listing[r.eval_id]
+        assert r == f.get_evaluation(a, r.eval_id)
+    # the current-state evaluation (checkpoint_id None) never appears
+    assert cur.state_kind.value == "current" and cur.checkpoint_id is None
+    assert cur.eval_id not in {r.eval_id for r in got}
+    assert cur.eval_id not in {r.eval_id for r in got_b}
+
+
+def test_m24_engine_empty_404s_cross_model_and_read_only(env):
+    a, b, cks, (ck_a, ck_evals), ck_b, _, cur, b_ckpt, b_eval = \
+        _m24_env(env)
+    f = env.forge
+    ck_c = cks[2]
+    # valid registered checkpoint with no evaluations -> []
+    assert f.list_evaluations_for_checkpoint(a, ck_c) == []
+    # the other model's checkpoint history stays separate (exactly its
+    # own evaluation, never model a's)
+    got_b = f.list_evaluations_for_checkpoint(b, b_ckpt)
+    assert [r.eval_id for r in got_b] == [b_eval.eval_id]
+    assert {r.eval_id for r in got_b}.isdisjoint(
+        {r.eval_id for r in ck_evals})
+    # cross-model: model a cannot query model b's checkpoint id (M3
+    # registry is model-scoped) and vice versa
+    with pytest.raises(FileNotFoundError):
+        f.list_evaluations_for_checkpoint(a, b_ckpt)
+    with pytest.raises(FileNotFoundError):
+        f.list_evaluations_for_checkpoint(b, ck_a)
+    # unknown model -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_evaluations_for_checkpoint("ghost-model-24", ck_a)
+    # unknown checkpoint -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_evaluations_for_checkpoint(a, "ghost-ck-24")
+    # read-only: the filter never writes evaluation manifests
+    before = _m24_eval_files(env, (a, b))
+    f.list_evaluations_for_checkpoint(a, ck_a)
+    f.list_evaluations_for_checkpoint(a, ck_c)
+    assert _m24_eval_files(env, (a, b)) == before
+
+
+def test_m24_engine_repeated_calls_identical(env):
+    a, _, cks, (ck_a, _), _, _, _, _, _ = _m24_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json")
+             for r in f.list_evaluations_for_checkpoint(a, ck_a)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json")
+                 for r in f.list_evaluations_for_checkpoint(a, ck_a)]
+        assert again == first

@@ -136,6 +136,36 @@ class EvaluationEngine:
         return EvaluationRecord(**read_json(path))
 
     # ------------------------------------------------------------------ #
+    # M24: per-checkpoint access (read-only)
+    # ------------------------------------------------------------------ #
+
+    def list_evaluations_for_checkpoint(
+            self, model_id: str, checkpoint_id: str) -> list[EvaluationRecord]:
+        """Immutable M4 evaluations recorded under ONE checkpoint of ONE
+        model (M24).
+
+        Resolution: unknown model or unregistered checkpoint ->
+        FileNotFoundError; ownership is validated through the model's M3
+        checkpoint registry (``TrainingEngine.get_checkpoint``) — a
+        checkpoint id belonging to another model is not registered under
+        this model and raises FileNotFoundError, exactly like an unknown
+        one (nothing is inferred from filenames). The result is the
+        model's authoritative M4 listing above (the exact engine parse +
+        deterministic (created_at, eval_id) ASCENDING order) filtered by
+        the persisted ``checkpoint_id`` recorded in each
+        EvaluationRecord, so every returned record is a complete
+        verbatim EvaluationRecord and records of other checkpoints or
+        models never appear. Current-state evaluations keep
+        ``checkpoint_id=None`` and therefore never appear. A valid
+        checkpoint with no evaluations returns []. Read-only, never
+        writes.
+        """
+        # existence + ownership: raises FileNotFoundError (404 at the API)
+        self.training.get_checkpoint(model_id, checkpoint_id)
+        return [r for r in self.list_evaluations(model_id)
+                if r.checkpoint_id == checkpoint_id]
+
+    # ------------------------------------------------------------------ #
     # The run (preflight everything before creating any artifact)
     # ------------------------------------------------------------------ #
 

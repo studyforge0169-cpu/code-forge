@@ -227,3 +227,118 @@ def test_evaluation_schema_validation_422(api_client):
     assert resp.status_code == 422
     resp = api_client.post(EVAL_RUN, json={**base, "split": "test"})
     assert resp.status_code == 200            # enum valid values accepted
+
+
+# =========================================================================== #
+# M24: read-only per-checkpoint grouping of the evaluation history (API)
+# =========================================================================== #
+
+BY_CHECKPOINT = "/api/v1/models/{mid}/evaluations/by-checkpoint/{ck}"
+
+
+def test_m24_api_by_checkpoint_grouping_parity_and_determinism(api_client):
+    ds_id, tok_id, model_id, _ = _prepare(api_client, "m24a")
+    ckpts = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    ck_a, ck_b = ckpts[0]["checkpoint_id"], ckpts[1]["checkpoint_id"]
+    # two checkpoint evals on ck_a (different seeds), one on ck_b, one
+    # current-state eval
+    r1 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, checkpoint_id=ck_a, seed=2451)).json()
+    r2 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, checkpoint_id=ck_a, seed=2452)).json()
+    r3 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, checkpoint_id=ck_b, seed=2453)).json()
+    r4 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, seed=2454)).json()      # current state
+    assert r4["checkpoint_id"] is None and r4["state_kind"] == "current"
+    url = BY_CHECKPOINT.format(mid=model_id, ck=ck_a)
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # exactly the two ck_a evaluations, deterministic M4 order, verbatim
+    # payloads equal to the run responses (existing representation)
+    assert [x["eval_id"] for x in recs] == [r1["eval_id"], r2["eval_id"]]
+    assert all(x["model_id"] == model_id and x["state_kind"] == "checkpoint"
+               and x["checkpoint_id"] == ck_a for x in recs)
+    assert [(x["created_at"], x["eval_id"]) for x in recs] == \
+        sorted((x["created_at"], x["eval_id"]) for x in recs)
+    by_id = {x["eval_id"]: x for x in recs}
+    assert by_id[r1["eval_id"]] == r1
+    assert by_id[r2["eval_id"]] == r2
+    # parity with the existing M4 listing filtered by persisted
+    # checkpoint identity
+    listing = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert recs == [x for x in listing if x["checkpoint_id"] == ck_a]
+    # the ck_b evaluation and the current-state evaluation stay outside
+    assert r3["eval_id"] not in {x["eval_id"] for x in recs}
+    assert r4["eval_id"] not in {x["eval_id"] for x in recs}
+    # repeated GET returns identical JSON (and identical raw bytes)
+    raw1 = api_client.get(url).content
+    raw2 = api_client.get(url).content
+    assert raw1 == raw2 and json.loads(raw1) == recs
+    # valid checkpoint with no evaluations -> 200 + [] (later checkpoints
+    # of this fresh model were never evaluated)
+    empty_ck = ckpts[-1]["checkpoint_id"] if len(ckpts) > 2 else ck_b
+    if empty_ck != ck_b:
+        empty = api_client.get(BY_CHECKPOINT.format(mid=model_id,
+                                                    ck=empty_ck))
+        assert empty.status_code == 200 and empty.json() == []
+
+
+def test_m24_api_404s_isolation_and_prior_surfaces(api_client):
+    ds_id, tok_id, model_id, _ = _prepare(api_client, "m24e")
+    ckpts = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    ck_a = ckpts[0]["checkpoint_id"]
+    rec = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, checkpoint_id=ck_a, seed=2461)).json()
+    # a second real model (own weights, no checkpoints of its own needed)
+    cfg = {"name": "api24-iso-b", "vocab_size": 640, "context_length": 64,
+           "hidden_size": 64, "n_layers": 2, "n_heads": 4, "n_kv_heads": 2,
+           "intermediate_size": 128}
+    mid_b = api_client.post(MODELS, json={"config": cfg}).json()["model"]["id"]
+    # unknown model -> 404 (even with a real checkpoint id)
+    assert api_client.get(BY_CHECKPOINT.format(mid="ghost-model-24",
+                                               ck=ck_a)).status_code == 404
+    # unknown checkpoint -> 404 (even with a real model id)
+    assert api_client.get(BY_CHECKPOINT.format(mid=model_id,
+                                               ck="ghost-ck-24")) \
+        .status_code == 404
+    # cross-model isolation: another real model + this real checkpoint id
+    # -> 404 (checkpoint ids are model-scoped through the M3 registry)
+    assert api_client.get(BY_CHECKPOINT.format(mid=mid_b, ck=ck_a)) \
+        .status_code == 404
+    # M4 listing/get unchanged; by-checkpoint never shadows the detail
+    # getter
+    listing = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert rec["eval_id"] in {x["eval_id"] for x in listing}
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/{rec['eval_id']}").json() == rec
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/ghost-eval").status_code == 404
+    # M3 checkpoint registry unchanged
+    one = api_client.get(f"{MODELS}/{model_id}/checkpoints/{ck_a}")
+    assert one.status_code == 200 and one.json()["checkpoint_id"] == ck_a
+    # M20/M23 regression: sample-quality by-checkpoint and gates
+    # by-policy semantics unchanged
+    assert api_client.get(
+        f"{MODELS}/{mid_b}/sample-quality").json() == []
+    assert api_client.get(
+        f"{MODELS}/{mid_b}/sample-quality/by-checkpoint/{ck_a}") \
+        .status_code == 404
+    assert api_client.get(
+        f"{MODELS}/{mid_b}/gates/decisions/by-policy/ghost-pol-24") \
+        .status_code == 404
+    # new route documented correctly in OpenAPI (GET, right tag, schema)
+    spec = api_client.get("/openapi.json").json()
+    path = "/api/v1/models/{model_id}/evaluations/by-checkpoint/{checkpoint_id}"
+    assert path in spec["paths"]
+    ops = spec["paths"][path]
+    assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
+    schema = (ops["get"]["responses"]["200"]["content"]
+              ["application/json"]["schema"])
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/EvaluationRecord"}
+    assert "EvaluationRecord" in spec["components"]["schemas"]
+    # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
+    # + 1 (M21) + 1 (M22) + 1 (M23) + 1 (M24) = 56
+    assert len(spec["paths"]) == 56

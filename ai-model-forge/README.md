@@ -862,11 +862,45 @@ generation never trains, evaluates, scores, ranks or judges output.
   policy registry, the M13 dashboard and the M16–M22 sample-quality /
   suite-run surfaces are byte-identical before and after
 
+### Milestone 24 — evaluation history by checkpoint
+  (`evaluations/by-checkpoint`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/evaluations/by-checkpoint/{checkpoint_id}` — answers
+  "which immutable M4 evaluations measured this checkpoint?" and nothing
+  else: the model's authoritative M4 listing filtered by the persisted
+  `checkpoint_id` recorded in each `EvaluationRecord`
+- **exact filtering**: ownership is validated through the model's M3
+  checkpoint registry first (an unknown checkpoint, or a checkpoint id
+  belonging to another model, is a 404 — checkpoint ids are model-scoped;
+  nothing is inferred from filenames). Returned records are verbatim M4
+  `EvaluationRecord` payloads (all fields incl. `loss_nats` and
+  `perplexity`) in the exact M4 authoritative order
+  ((created_at, eval_id) ASCENDING); current-state evaluations keep
+  `checkpoint_id=null` and never appear; a valid checkpoint with no
+  evaluations is a deterministic `[]`
+- **implementation is a reuse, not a second engine**: the engine method
+  `list_evaluations_for_checkpoint(model_id, checkpoint_id)` validates
+  through the existing M3 `get_checkpoint` registry (the same ownership
+  path M20 uses) and filters the authoritative M4 `list_evaluations()`
+  by the persisted checkpoint identity; the facade and route are thin
+  pass-throughs. No duplicate manifest parsing, no new storage, no
+  caches, indexes or derived statistics — repeated GETs are
+  byte-identical and the endpoint never writes; it answers which
+  evaluations exist under one checkpoint and never compares or judges
+  them
+- **isolation & boundaries**: a model only ever sees its own
+  evaluations; another model's evaluations (even mentioning a matching
+  checkpoint id) are unreachable because ownership resolves through the
+  model-scoped M3 registry. Unknown model/checkpoint -> existing 404s;
+  valid checkpoint without evaluations -> `[]`. M4 (run, listing,
+  getter, hashes, manifests), M3 checkpoint resolution, the M13
+  dashboard and the M16–M23 surfaces are byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 425 tests
+pytest                       # 430 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1358,7 +1392,7 @@ ai-model-forge/
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 425 tests across 20 suites
+  tests/               # 430 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

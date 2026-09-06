@@ -279,6 +279,22 @@ class ModelForge:
     def get_evaluation(self, model_id: str, eval_id: str):
         return self.evaluation.get_evaluation(model_id, eval_id)
 
+    def list_evaluations_for_checkpoint(self, model_id: str,
+                                        checkpoint_id: str):
+        """Immutable M4 evaluation records recorded under ONE checkpoint
+        (M24 read-only access).
+
+        The checkpoint must be registered in the model's M3 checkpoint
+        registry (unknown checkpoint, or a checkpoint id belonging to
+        another model -> FileNotFoundError -> 404). Returns the model's
+        authoritative M4 listing filtered by the persisted checkpoint_id
+        recorded in each record — verbatim records in the M4
+        (created_at, eval_id) order; current-state evaluations
+        (checkpoint_id None) never appear; a checkpoint without
+        evaluations returns []. Read-only, never writes."""
+        return self.evaluation.list_evaluations_for_checkpoint(
+            model_id, checkpoint_id)
+
     # ------------------------------------------------------------------ #
     # Comparison (thin delegation; read-only orchestration over evaluations)
     # ------------------------------------------------------------------ #
