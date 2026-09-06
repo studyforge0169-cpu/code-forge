@@ -965,11 +965,49 @@ generation never trains, evaluates, scores, ranks or judges output.
   checkpoint resolution, the M13 dashboard and the M16–M25 surfaces
   are byte-identical before and after
 
+### Milestone 27 — sample history by checkpoint
+  (`samples/by-checkpoint`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/samples/by-checkpoint/{checkpoint_id}` — answers
+  "which immutable M15 samples were generated from this checkpoint
+  state?" and nothing else
+- **exact filtering**: membership comes from the persisted sample
+  identity ONLY — every `SampleRecord` carries a required non-nullable
+  `checkpoint_id` (M15 generation always binds ONE explicit verified
+  checkpoint; there is no state_kind enum and no current-state sample),
+  and a sample belongs to the request only when that persisted id
+  matches. Nothing is inferred from directory names, timestamps,
+  hashes, prompt text or tokenizer identity. Ownership is validated
+  through the model's M3 checkpoint registry first (an unknown
+  checkpoint, or a checkpoint id belonging to another model, is a 404
+  — checkpoint ids are model-scoped). Returned records are verbatim
+  `SampleRecord` payloads (prompt, token ids, output text, strategy,
+  `result_hash` included) in the exact M15 authoritative order
+  ((created_at, sample_id) ASCENDING); a valid checkpoint with no
+  samples is a deterministic `[]` — never a 404
+- **implementation is a reuse, not a second engine**: the engine method
+  `list_samples_for_checkpoint(model_id, checkpoint_id)` validates
+  through the existing M3 `get_checkpoint` registry (the same ownership
+  path M20/M24/M25/M26 use) and filters the authoritative M15
+  `list_samples()` by the persisted checkpoint identity; the facade
+  and route are thin pass-throughs registered **before** the generic
+  `/samples/{sample_id}` detail getter. No duplicate manifest parsing,
+  no new storage, caches or indexes — repeated GETs are byte-identical
+  and the endpoint never writes; the existing M20
+  `sample-quality/by-checkpoint` surface (M16 quality *measurements*)
+  is a different surface and stays untouched
+- **isolation & boundaries**: a model only ever sees its own samples;
+  another model's samples are unreachable (ownership resolves through
+  the model-scoped M3 registry). Unknown model/checkpoint -> existing
+  404s; valid checkpoint without samples -> `[]`. M15 (generate,
+  listing, getter), M16–M26 surfaces, the M13/M17 dashboards and the
+  M3 checkpoint registry are byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 440 tests
+pytest                       # 445 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1459,10 +1497,11 @@ ai-model-forge/
                        # + read-only by-suite/by-checkpoint grouping (M21/M22/M25)
     recipes.py         # workflow recipes: immutable plans + M14 composition (M12/M14)
     sampling.py         # checkpoint sampling: deterministic generation (M15)
+                       # + read-only by-checkpoint grouping of the history (M27)
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 440 tests across 20 suites
+  tests/               # 445 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

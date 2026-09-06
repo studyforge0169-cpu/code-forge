@@ -588,3 +588,212 @@ def test_api_openapi_exposes_sampling(api_client):
     strat = [s["enum"] for s in spec["components"]["schemas"].values()
              if s.get("enum") == ["greedy", "temperature"]]
     assert len(strat) == 1
+
+
+# =========================================================================== #
+# M27: read-only per-checkpoint grouping of the sample history
+# =========================================================================== #
+
+BY_CKPT = "/api/v1/models/{mid}/samples/by-checkpoint/{ck}"
+
+
+def _m27_state(env):
+    """M27 state on top of the shared module env (cached): samples under
+    BOTH main-model checkpoints plus one on the small model's checkpoint,
+    and a fully trained fresh model whose checkpoint has zero samples.
+    Returns (s_a1, s_a2, s_b1, s_small, empty_model, empty_ck).
+    """
+    cached = getattr(env, "_m27", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    s_a1 = f.generate_sample(_g(env))                                  # ck0
+    s_a2 = f.generate_sample(_g(env, strategy="temperature",
+                                temperature=0.8, seed=27,
+                                max_new_tokens=6))                     # ck0
+    s_b1 = f.generate_sample(_g(env,
+                                checkpoint_id=env.big_ckpts[1]))      # ck1
+    s_small = f.generate_sample(_g(env, model_id=env.small_model,
+                                   checkpoint_id=env.small_ckpt,
+                                   tokenizer_id=env.tok_small.id))
+    empty_model = f.create_model(ModelCreateRequest(
+        config=_tiny_model("m27-empty", 640, seed=27)))[0].id
+    f.run_training(TrainingConfig(
+        name="m27-empty-train", method="continued_pretraining",
+        model_id=empty_model, dataset_id=env.ds,
+        tokenizer_id=env.tok_big.id, learning_rate=3e-3, batch_size=8,
+        max_seq_len=32, steps=4, eval_every_steps=2, keep_best=False,
+        seed=27))
+    empty_ck = f.list_checkpoints(empty_model)[0].checkpoint_id
+    env._m27 = (s_a1, s_a2, s_b1, s_small, empty_model, empty_ck)
+    return env._m27
+
+
+def test_m27_engine_grouping_parity_order_verbatim(env):
+    s_a1, s_a2, s_b1, s_small, empty_model, empty_ck = _m27_state(env)
+    f = env.forge
+    for model_id, ck in ((env.big_model, env.big_ckpts[0]),
+                         (env.big_model, env.big_ckpts[1]),
+                         (env.small_model, env.small_ckpt)):
+        listing = f.list_samples(model_id)
+        got = f.list_samples_for_checkpoint(model_id, ck)
+        # parity with the authoritative M15 listing filtered by the
+        # persisted checkpoint identity; deterministic (created_at,
+        # sample_id) order; membership from the persisted field only
+        assert got == [r for r in listing if r.checkpoint_id == ck]
+        keyed = [(r.created_at, r.sample_id) for r in got]
+        assert keyed == sorted(keyed)
+        assert all(r.checkpoint_id == ck and r.model_id == model_id
+                   for r in got)
+        ids = [r.sample_id for r in got]
+        assert len(ids) == len(set(ids))
+        # verbatim payload parity with the M15 single-record getter
+        for r in got:
+            assert r == f.get_sample(model_id, r.sample_id)
+    # the M27-created samples sit under exactly their own checkpoints
+    ck0_ids = [r.sample_id for r in f.list_samples_for_checkpoint(
+        env.big_model, env.big_ckpts[0])]
+    ck1_ids = [r.sample_id for r in f.list_samples_for_checkpoint(
+        env.big_model, env.big_ckpts[1])]
+    assert ck0_ids.count(s_a1.sample_id) == 1
+    assert ck0_ids.count(s_a2.sample_id) == 1
+    assert ck1_ids.count(s_b1.sample_id) == 1
+    assert s_b1.sample_id not in ck0_ids and s_a1.sample_id not in ck1_ids
+    assert [r.sample_id for r in f.list_samples_for_checkpoint(
+        env.small_model, env.small_ckpt)].count(s_small.sample_id) == 1
+
+
+def test_m27_engine_empty_404s_cross_model_read_only(env):
+    s_a1, s_a2, s_b1, s_small, empty_model, empty_ck = _m27_state(env)
+    f = env.forge
+    # valid registered checkpoint with no samples -> []
+    assert f.list_samples_for_checkpoint(empty_model, empty_ck) == []
+    # cross-model: neither model can resolve the other's checkpoint id
+    with pytest.raises(FileNotFoundError):
+        f.list_samples_for_checkpoint(env.big_model, env.small_ckpt)
+    with pytest.raises(FileNotFoundError):
+        f.list_samples_for_checkpoint(env.small_model, env.big_ckpts[0])
+    # unknown model / unknown checkpoint -> FileNotFoundError (404 at API)
+    with pytest.raises(FileNotFoundError):
+        f.list_samples_for_checkpoint("ghost-model-27", env.big_ckpts[0])
+    with pytest.raises(FileNotFoundError):
+        f.list_samples_for_checkpoint(env.big_model, "ghost-ck-27")
+    # read-only: the filter never writes sample manifests
+    root = f.storage.root / "samples"
+    before = {p.relative_to(root).as_posix()
+              for p in root.rglob("*") if p.is_file()}
+    f.list_samples_for_checkpoint(env.big_model, env.big_ckpts[0])
+    f.list_samples_for_checkpoint(empty_model, empty_ck)
+    f.list_samples_for_checkpoint(env.small_model, env.small_ckpt)
+    after = {p.relative_to(root).as_posix()
+             for p in root.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_m27_engine_repeated_calls_identical(env):
+    s_a1, s_a2, s_b1, s_small, empty_model, empty_ck = _m27_state(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_samples_for_checkpoint(env.big_model,
+                                           env.big_ckpts[0])]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_samples_for_checkpoint(env.big_model,
+                                               env.big_ckpts[0])]
+        assert again == first
+
+
+def test_m27_api_by_checkpoint_grouping_determinism_and_empty(api_client):
+    h = _http_env(api_client, "m27")
+    ckpts = api_client.get(f"{MODELS}/{h['mid']}/checkpoints").json()
+    other_ck = [c["checkpoint_id"] for c in ckpts
+                if c["checkpoint_id"] != h["ckpt"]][0]
+    g1 = api_client.post(GENERATE, json=_gen_body(h)).json()
+    g2 = api_client.post(GENERATE, json=_gen_body(
+        h, strategy="temperature", temperature=0.8, seed=27)).json()
+    url = BY_CKPT.format(mid=h["mid"], ck=h["ckpt"])
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # exactly g1 + g2 under this checkpoint, once each, in the
+    # deterministic M15 order, verbatim equal to the POST responses
+    assert {x["sample_id"] for x in recs} == {g1["sample_id"],
+                                              g2["sample_id"]}
+    assert len(recs) == 2
+    keyed = [(x["created_at"], x["sample_id"]) for x in recs]
+    assert keyed == sorted(keyed)
+    by_id = {x["sample_id"]: x for x in recs}
+    assert by_id[g1["sample_id"]] == g1
+    assert by_id[g2["sample_id"]] == g2
+    # parity with the existing M15 listing filtered by the persisted
+    # checkpoint identity
+    listing = api_client.get(f"{MODELS}/{h['mid']}/samples").json()
+    assert recs == [x for x in listing
+                    if x["checkpoint_id"] == h["ckpt"]]
+    # the model's OTHER valid checkpoint has no samples -> 200 + []
+    empty = api_client.get(BY_CKPT.format(mid=h["mid"], ck=other_ck))
+    assert empty.status_code == 200 and empty.json() == []
+    # repeated GET returns identical raw bytes (3 repeats)
+    raw1 = api_client.get(url).content
+    raw2 = api_client.get(url).content
+    raw3 = api_client.get(url).content
+    assert raw1 == raw2 == raw3 and json.loads(raw1) == recs
+    # the generic sample detail getter is not shadowed
+    assert api_client.get(
+        f"{MODELS}/{h['mid']}/samples/{g1['sample_id']}").json() == g1
+
+
+def test_m27_api_404s_isolation_regressions_openapi(api_client):
+    h = _http_env(api_client, "m27e")
+    # unknown model / unknown checkpoint -> 404
+    assert api_client.get(BY_CKPT.format(mid="ghost-model-27",
+                                         ck=h["ckpt"])).status_code == 404
+    assert api_client.get(BY_CKPT.format(mid=h["mid"],
+                                         ck="ghost-ck-27")).status_code == 404
+    assert api_client.get(
+        f"{MODELS}/{h['mid']}/samples/by-checkpoint/ck%20id%2027!!") \
+        .status_code == 404
+    # cross-model isolation: another real model + this model's real
+    # checkpoint id -> 404 (checkpoint ids are model-scoped through the
+    # M3 registry); each model sees only its own (empty) history
+    h2 = _http_env(api_client, "m27iso")
+    assert api_client.get(BY_CKPT.format(mid=h2["mid"],
+                                         ck=h["ckpt"])).status_code == 404
+    assert api_client.get(BY_CKPT.format(mid=h["mid"],
+                                         ck=h2["ckpt"])).status_code == 404
+    iso = api_client.get(BY_CKPT.format(mid=h2["mid"], ck=h2["ckpt"]))
+    assert iso.status_code == 200 and iso.json() == []
+    # M15 generation/listing/getter regression (unchanged behavior)
+    g = api_client.post(GENERATE, json=_gen_body(h))
+    assert g.status_code == 200 and g.json()["checkpoint_id"] == h["ckpt"]
+    lst = api_client.get(f"{MODELS}/{h['mid']}/samples")
+    assert lst.status_code == 200 and g.json() in lst.json()
+    assert api_client.get(
+        f"{MODELS}/{h['mid']}/samples/{g.json()['sample_id']}") \
+        .json() == g.json()
+    assert api_client.get(
+        f"{MODELS}/{h['mid']}/samples/ghost-sample-27").status_code == 404
+    # M20 sample-quality by-checkpoint (a DIFFERENT surface) intact
+    sq = api_client.get(f"{MODELS}/{h['mid']}/sample-quality/"
+                        f"by-checkpoint/{h['ckpt']}")
+    assert sq.status_code == 200 and sq.json() == []
+    # M26 comparisons by-checkpoint intact
+    cmp_ = api_client.get(f"{MODELS}/{h['mid']}/comparisons/"
+                          f"by-checkpoint/{h['ckpt']}")
+    assert cmp_.status_code == 200 and cmp_.json() == []
+    # OpenAPI: 59 paths, the new path exactly once, GET-only, sampling
+    # tag, array of SampleRecord, registered before the generic route
+    spec = api_client.get("/openapi.json").json()
+    path = "/api/v1/models/{model_id}/samples/by-checkpoint/{checkpoint_id}"
+    generic = "/api/v1/models/{model_id}/samples/{sample_id}"
+    assert len(spec["paths"]) == 59
+    assert list(spec["paths"]).count(path) == 1
+    ops = spec["paths"][path]
+    assert set(ops) == {"get"} and ops["get"]["tags"] == ["sampling"]
+    schema = (ops["get"]["responses"]["200"]["content"]
+              ["application/json"]["schema"])
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/SampleRecord"}
+    assert "SampleRecord" in spec["components"]["schemas"]
+    assert list(spec["paths"]).index(path) < list(spec["paths"]) \
+        .index(generic)

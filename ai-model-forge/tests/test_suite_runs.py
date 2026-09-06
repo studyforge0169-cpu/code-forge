@@ -788,8 +788,9 @@ def test_m21_api_existing_surfaces_and_openapi(api_client):
     # + 1 (M21) + 1 (M22 summary) + 1 (M23 gates by-policy)
     # + 1 (M24 evaluations by-checkpoint)
     # + 1 (M25 suite-runs by-checkpoint)
-    # + 1 (M26 comparisons by-checkpoint) = 58
-    assert len(spec["paths"]) == 58
+    # + 1 (M26 comparisons by-checkpoint)
+    # + 1 (M27 samples by-checkpoint) = 59
+    assert len(spec["paths"]) == 59
 
 
 # =========================================================================== #
@@ -980,8 +981,10 @@ def test_m22_api_openapi_documented(api_client):
     # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
     # + 1 (M21) + 1 (M22) + 1 (M23 gates by-policy)
     # + 1 (M24 evaluations by-checkpoint)
-    # + 1 (M25 suite-runs by-checkpoint) = 57
-    assert len(spec["paths"]) == 58
+    # + 1 (M25 suite-runs by-checkpoint)
+    # + 1 (M26 comparisons by-checkpoint)
+    # + 1 (M27 samples by-checkpoint) = 59
+    assert len(spec["paths"]) == 59
 
 
 # =========================================================================== #
@@ -1226,5 +1229,6 @@ def test_m25_api_404s_isolation_and_prior_surfaces(api_client):
     assert "SuiteRunRecord" in spec["components"]["schemas"]
     # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
     # + 1 (M21) + 1 (M22) + 1 (M23) + 1 (M24) + 1 (M25)
-    # + 1 (M26 comparisons by-checkpoint) = 58
-    assert len(spec["paths"]) == 58
+    # + 1 (M26 comparisons by-checkpoint)
+    # + 1 (M27 samples by-checkpoint) = 59
+    assert len(spec["paths"]) == 59

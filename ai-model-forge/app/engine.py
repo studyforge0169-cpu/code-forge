@@ -521,6 +521,25 @@ class ModelForge:
         """One persisted immutable sample (404 unknown model or sample)."""
         return self.samples.get_sample(model_id, sample_id)
 
+    def list_samples_for_checkpoint(self, model_id: str,
+                                    checkpoint_id: str
+                                    ) -> list[SampleRecord]:
+        """Immutable M15 samples generated from ONE checkpoint (M27
+        read-only access).
+
+        The checkpoint must be registered in the model's M3 checkpoint
+        registry (unknown checkpoint, or a checkpoint id belonging to
+        another model -> FileNotFoundError -> 404). Returns the model's
+        authoritative M15 listing filtered by the persisted sample
+        identity — every sample carries a required non-nullable
+        checkpoint_id and belongs to the request only when that
+        persisted id matches (nothing is inferred from filenames,
+        timestamps or hashes) — in the M15 (created_at, sample_id)
+        order. A checkpoint with no samples returns []. Read-only,
+        never writes."""
+        return self.samples.list_samples_for_checkpoint(
+            model_id, checkpoint_id)
+
     # ------------------------------------------------------------------ #
     # Sample quality (per-sample likelihood measurement; M16)
     # ------------------------------------------------------------------ #

@@ -145,6 +145,39 @@ class SamplingEngine:
         return SampleRecord(**read_json(path))
 
     # ------------------------------------------------------------------ #
+    # M27: per-checkpoint access (read-only)
+    # ------------------------------------------------------------------ #
+
+    def list_samples_for_checkpoint(
+            self, model_id: str, checkpoint_id: str) -> list[SampleRecord]:
+        """Immutable M15 samples generated from ONE checkpoint of ONE
+        model (M27).
+
+        Membership comes from the persisted sample identity ONLY: every
+        ``SampleRecord`` carries a required non-nullable
+        ``checkpoint_id`` (M15 generation always binds ONE explicit
+        verified checkpoint; there is no state_kind enum and no
+        current-state sample), and a sample belongs to the request when
+        its persisted ``checkpoint_id`` equals the requested id — never
+        directory names, timestamps, hashes, prompt text or tokenizer
+        identity. Resolution: unknown model or unregistered checkpoint
+        -> FileNotFoundError; ownership is validated through the M3
+        checkpoint registry (``TrainingEngine.get_checkpoint``) — a
+        checkpoint id belonging to another model is not registered
+        under this model and raises FileNotFoundError, exactly like an
+        unknown one. The result is the model's authoritative M15
+        listing above (the exact engine parse + deterministic
+        (created_at, sample_id) ASCENDING order) filtered by the
+        persisted checkpoint identity; a valid checkpoint with no
+        samples returns []. Read-only, never writes.
+        """
+        # existence + ownership: raises FileNotFoundError (404 at the API)
+        self.training.get_checkpoint(model_id, checkpoint_id)
+        return [r for r in self.list_samples(model_id)
+                if r.checkpoint_id == checkpoint_id]
+
+
+    # ------------------------------------------------------------------ #
     # The run (preflight everything before creating any artifact)
     # ------------------------------------------------------------------ #
 

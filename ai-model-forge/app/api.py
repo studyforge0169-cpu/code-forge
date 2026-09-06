@@ -341,6 +341,19 @@ def index() -> HTMLResponse:
         ordering; unknown model/checkpoint or a checkpoint of another
         model -> 404; a checkpoint with no matching comparisons -> []).
         Pure data access — no new metrics, zero storage growth.</li>
+
+      <li><b>M27 sample history by checkpoint</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/samples/by-checkpoint/&#123;checkpoint&#125;</code>,
+        answers "which immutable M15 samples were generated from this
+        checkpoint?": the model's authoritative M15 listing filtered by
+        the persisted checkpoint identity recorded in every sample
+        (M15 generation always binds one explicit verified checkpoint;
+        membership never comes from filenames, timestamps or hashes),
+        after checkpoint ownership is validated through the M3 registry
+        (full record payloads, exact M15 ordering; unknown
+        model/checkpoint or a checkpoint of another model -> 404; a
+        checkpoint with no samples -> []). Pure data access — no new
+        metrics, zero storage growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -386,6 +399,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/workflows/recipes/&#123;recipe_id&#125;/runs</code> — cross-model run lineage of one recipe (read-only; 404 unknown recipe)</li>
       <li><code>POST  {prefix}/samples/generate</code> — deterministic generation from one explicit verified checkpoint (greedy / seeded temperature; inference only)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples</code> / <code>GET {prefix}/models/&#123;id&#125;/samples/&#123;sample&#125;</code> — immutable sample history</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-checkpoint/&#123;ckpt&#125;</code> — samples generated from ONE checkpoint (read-only, deterministic, persisted identity authoritative)</li>
       <li><code>POST  {prefix}/models/&#123;id&#125;/samples/&#123;sample&#125;/quality</code> — per-sample likelihood measurement (sample-driven state resolution; causal-LM loss over generated targets; no body config)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality</code> / <code>GET {prefix}/models/&#123;id&#125;/sample-quality/&#123;eval&#125;</code> — immutable sample-evaluation history</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/records</code> — full immutable M16 sample-evaluation records (loss/perplexity included; read-only, deterministic, no statistics)</li>
@@ -1236,7 +1250,8 @@ def run_workflow_recipe(recipe_id: str,
 
 
 # --------------------------------------------------------------------------- #
-# Checkpoint sampling (Milestone 15 — deterministic text generation, inference)
+# Checkpoint sampling (Milestone 15 — deterministic text generation, inference;
+# Milestone 27 adds the read-only by-checkpoint grouping of the sample history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/samples/generate", response_model=SampleRecord,
@@ -1275,6 +1290,32 @@ def list_samples(model_id: str) -> list[SampleRecord]:
     (created_at, sample_id) order (404 for unknown models; read-only)."""
     try:
         return _forge().list_samples(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/samples/by-checkpoint/{checkpoint_id}",
+         response_model=list[SampleRecord], tags=["sampling"])
+def list_samples_by_checkpoint(model_id: str, checkpoint_id: str
+                               ) -> list[SampleRecord]:
+    """Immutable M15 samples generated from ONE checkpoint (M27).
+
+    Read-only per-checkpoint grouping: validates the checkpoint through
+    the model's M3 checkpoint registry (an unknown checkpoint, or a
+    checkpoint id belonging to another model, is 404 — checkpoint ids
+    are model-scoped; nothing is inferred from filenames), then returns
+    the model's authoritative M15 listing filtered by the persisted
+    sample identity — every sample carries a required non-nullable
+    checkpoint_id (M15 generation always binds one explicit verified
+    checkpoint; there is no current-state sample) and belongs to the
+    request only when that persisted id matches. Complete verbatim
+    payloads (prompt, token ids, output text, strategy, result_hash
+    included) in the exact M15 (created_at, sample_id) order; a valid
+    checkpoint with no samples returns []. No new metrics, no writes.
+    (Must stay registered before /samples/{sample_id}; the literal
+    "by-checkpoint" segment is not a sample id.)"""
+    try:
+        return _forge().list_samples_for_checkpoint(model_id, checkpoint_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

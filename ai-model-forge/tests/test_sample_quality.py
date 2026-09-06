@@ -827,8 +827,9 @@ def test_api_openapi_exposes_sample_quality(api_client):
     # + 1 (M22 by-suite summary) + 1 (M23 gates by-policy)
     # + 1 (M24 evaluations by-checkpoint)
     # + 1 (M25 suite-runs by-checkpoint)
-    # + 1 (M26 comparisons by-checkpoint) = 58
-    assert len(spec["paths"]) == 58
+    # + 1 (M26 comparisons by-checkpoint)
+    # + 1 (M27 samples by-checkpoint) = 59
+    assert len(spec["paths"]) == 59
 
 
 # =========================================================================== #
@@ -1058,8 +1059,9 @@ def test_api_openapi_records_route(api_client):
     # + 1 (M22 by-suite summary) + 1 (M23 gates by-policy)
     # + 1 (M24 evaluations by-checkpoint)
     # + 1 (M25 suite-runs by-checkpoint)
-    # + 1 (M26 comparisons by-checkpoint) = 58
-    assert len(spec["paths"]) == 58
+    # + 1 (M26 comparisons by-checkpoint)
+    # + 1 (M27 samples by-checkpoint) = 59
+    assert len(spec["paths"]) == 59
 
 
 # =========================================================================== #
@@ -1276,9 +1278,9 @@ def test_api_openapi_by_sample_route(api_client):
     assert "/api/v1/models/{model_id}/sample-quality/records" in spec["paths"]
     assert ("/api/v1/models/{model_id}/sample-quality/{evaluation_id}"
             in spec["paths"])
-    # M19–M25 each added exactly one documented route, and M26 adds
-    # one -> 58
-    assert len(spec["paths"]) == 58
+    # M19–M27 each added exactly one documented route (M27
+    # samples by-checkpoint adds one) -> 59
+    assert len(spec["paths"]) == 59
 
 
 # =========================================================================== #
@@ -1514,5 +1516,5 @@ def test_api_openapi_by_checkpoint_route(api_client):
             in spec["paths"])
     assert ("/api/v1/models/{model_id}/sample-quality/{evaluation_id}"
             in spec["paths"])
-    # M18–M26 each added exactly one documented route -> 58
-    assert len(spec["paths"]) == 58
+    # M18–M27 each added exactly one documented route -> 59
+    assert len(spec["paths"]) == 59
