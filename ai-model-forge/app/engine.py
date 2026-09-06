@@ -315,6 +315,24 @@ class ModelForge:
         return self.evaluation.list_evaluations_for_dataset(
             model_id, dataset_id)
 
+    def list_evaluations_for_tokenizer(self, model_id: str,
+                                       tokenizer_id: str
+                                       ) -> list[EvaluationRecord]:
+        """Immutable M4 evaluation records of ONE model measured with
+        ONE tokenizer (M30 read-only access).
+
+        The tokenizer must exist in the tokenizer registry (unknown
+        tokenizer -> FileNotFoundError -> 404; tokenizers are global —
+        model scoping comes from the model's own M4 listing). Returns
+        the model's authoritative M4 listing filtered by the persisted
+        tokenizer identity (top-level tokenizer_id, matched VERBATIM —
+        never inferred from filenames or substituted with the latest
+        tokenizer) in the M4 (created_at, eval_id) order, as complete
+        verbatim records. A valid tokenizer with no evaluations for
+        the model returns []. Read-only, never writes."""
+        return self.evaluation.list_evaluations_for_tokenizer(
+            model_id, tokenizer_id)
+
     # ------------------------------------------------------------------ #
     # Comparison (thin delegation; read-only orchestration over evaluations)
     # ------------------------------------------------------------------ #

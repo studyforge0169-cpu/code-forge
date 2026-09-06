@@ -344,8 +344,9 @@ def test_m24_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M26 comparisons by-checkpoint)
     # + 1 (M27 samples by-checkpoint)
     # + 1 (M28 evaluations by-dataset)
-    # + 1 (M29 comparisons by-dataset) = 61
-    assert len(spec["paths"]) == 61
+    # + 1 (M29 comparisons by-dataset)
+    # + 1 (M30 evaluations by-tokenizer) = 62
+    assert len(spec["paths"]) == 62
 
 
 # =========================================================================== #
@@ -452,7 +453,7 @@ def test_m28_api_404s_scoping_regressions_openapi(api_client):
     path = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
             "{dataset_id}")
     generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
-    assert len(spec["paths"]) == 61
+    assert len(spec["paths"]) == 62
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
@@ -463,3 +464,130 @@ def test_m28_api_404s_scoping_regressions_openapi(api_client):
     assert "EvaluationRecord" in spec["components"]["schemas"]
     assert list(spec["paths"]).index(path) < list(spec["paths"]) \
         .index(generic)
+
+
+# =========================================================================== #
+# M30: read-only per-tokenizer grouping of the evaluation history (API)
+# =========================================================================== #
+
+BY_TOKENIZER = "/api/v1/models/{mid}/evaluations/by-tokenizer/{tok}"
+
+
+def _m30_second_tokenizer(api_client, tag: str, ds_id: str) -> str:
+    """A second valid tokenizer, trained on the same dataset, with the
+    dataset tokenized for it (so evaluations with it can run)."""
+    tr = api_client.post("/api/v1/tokenizers/train",
+                         data={"config": json.dumps(
+                             {"name": f"api30-{tag}-tok",
+                              "vocab_size": 320}),
+                               "dataset_id": ds_id})
+    assert tr.status_code == 201, tr.text
+    tok2 = tr.json()["tokenizer"]["id"]
+    assert api_client.post(f"{DATASETS}/{ds_id}/tokenize",
+                           json={"tokenizer_id": tok2}).status_code == 200
+    return tok2
+
+
+def test_m30_api_by_tokenizer_grouping_partition_determinism(api_client):
+    ds_id, tok_id, model_id, _ = _prepare(api_client, "m30a")
+    tok2 = _m30_second_tokenizer(api_client, "m30b", ds_id)
+    # two evaluations with tok (distinct seeds), one with tok2
+    e1 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, seed=3011)).json()
+    e2 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, seed=3012)).json()
+    e3 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok2, seed=3013)).json()
+    assert e3["tokenizer_id"] == tok2
+    url = BY_TOKENIZER.format(mid=model_id, tok=tok_id)
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # exactly e1 + e2 under tok, in the deterministic M4 order,
+    # verbatim equal to the run responses (existing representation)
+    assert [x["eval_id"] for x in recs] == [e1["eval_id"], e2["eval_id"]]
+    keyed = [(x["created_at"], x["eval_id"]) for x in recs]
+    assert keyed == sorted(keyed)
+    by_id = {x["eval_id"]: x for x in recs}
+    assert by_id[e1["eval_id"]] == e1
+    assert by_id[e2["eval_id"]] == e2
+    # persisted tokenizer identity travels VERBATIM
+    assert all(x["tokenizer_id"] == tok_id for x in recs)
+    # parity with the M4 listing filtered locally by the persisted
+    # tokenizer identity — no missing, no extra, no duplicates
+    listing = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert recs == [x for x in listing if x["tokenizer_id"] == tok_id]
+    # partition: tok2 holds exactly e3; no cross-tokenizer leakage
+    got2 = api_client.get(BY_TOKENIZER.format(mid=model_id, tok=tok2))
+    assert got2.status_code == 200
+    assert [x["eval_id"] for x in got2.json()] == [e3["eval_id"]]
+    # repeated GET returns identical raw bytes (3 repeats)
+    raw1 = api_client.get(url).content
+    raw2 = api_client.get(url).content
+    raw3 = api_client.get(url).content
+    assert raw1 == raw2 == raw3 and json.loads(raw1) == recs
+
+
+def test_m30_api_404s_scoping_regressions_openapi(api_client):
+    ds_id, tok_id, model_id, rep = _prepare(api_client, "m30e")
+    ck = rep["checkpoints"][0]["checkpoint_id"]
+    # unknown model / unknown tokenizer -> 404 (well-formed + malformed)
+    assert api_client.get(BY_TOKENIZER.format(mid="ghost-model-30",
+                                              tok=tok_id)).status_code == 404
+    assert api_client.get(BY_TOKENIZER.format(mid=model_id,
+                                              tok="ghost-tok-30")).status_code \
+        == 404
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-tokenizer/tok%20id%2030!!") \
+        .status_code == 404
+    # tokenizers are GLOBAL: another real model + this valid tokenizer
+    # is the natural model-scoped EMPTY case (200 + []), and no
+    # evaluation id of model_id leaks into it
+    ds2_id, tok2_id, model2_id, _ = _prepare(api_client, "m30iso")
+    scoped = api_client.get(BY_TOKENIZER.format(mid=model2_id, tok=tok_id))
+    assert scoped.status_code == 200 and scoped.json() == []
+    # M4 regression: run/list/get + validation unchanged
+    e = api_client.post(EVAL_RUN, json=_eval_cfg(model_id, ds_id, tok_id,
+                                                 seed=3014)).json()
+    lst = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert e in lst
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/{e['eval_id']}").json() == e
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/ghost-eval-30").status_code == 404
+    # by-tokenizer does not shadow the M24 by-checkpoint route, the
+    # M28 by-dataset route, nor the generic detail getter
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-checkpoint/{ck}").json() == []
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-dataset/{ds_id}").json() \
+        == [x for x in lst if x["dataset_id"] == ds_id]
+    # M29 comparisons-by-dataset intact
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/by-dataset/{ds_id}").json() == []
+    # existing tokenizer registry behavior unchanged (get + unknown 404)
+    got_tok = api_client.get(f"/api/v1/tokenizers/{tok_id}")
+    assert got_tok.status_code == 200 \
+        and got_tok.json()["id"] == tok_id
+    assert api_client.get("/api/v1/tokenizers/ghost-tok-30").status_code \
+        == 404
+    # OpenAPI: 62 paths, the new path exactly once, GET-only,
+    # evaluation tag, array of EvaluationRecord, after the M28
+    # by-dataset route and before the generic evaluation route
+    spec = api_client.get("/openapi.json").json()
+    path = ("/api/v1/models/{model_id}/evaluations/by-tokenizer/"
+            "{tokenizer_id}")
+    generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
+    m28 = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
+           "{dataset_id}")
+    assert len(spec["paths"]) == 62
+    assert list(spec["paths"]).count(path) == 1
+    ops = spec["paths"][path]
+    assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
+    schema = (ops["get"]["responses"]["200"]["content"]
+              ["application/json"]["schema"])
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/EvaluationRecord"}
+    assert "EvaluationRecord" in spec["components"]["schemas"]
+    assert list(spec["paths"]).index(m28) < list(spec["paths"]).index(path) \
+        < list(spec["paths"]).index(generic)

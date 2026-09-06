@@ -382,6 +382,20 @@ def index() -> HTMLResponse:
         payloads, exact M5 ordering; unknown model/dataset -> 404; a
         dataset with no comparisons for the model -> []). Pure data
         access — no aggregates, zero storage growth.</li>
+
+      <li><b>M30 evaluation history by tokenizer</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/evaluations/by-tokenizer/&#123;tokenizer&#125;</code>,
+        answers "which immutable M4 evaluations of this model measured
+        with this tokenizer?": the model's authoritative M4 listing
+        filtered by the persisted tokenizer identity recorded in every
+        evaluation (matched VERBATIM — never inferred from filenames
+        or substituted with the latest tokenizer), after the tokenizer
+        is validated through the existing registry (full record
+        payloads, exact M4 ordering; tokenizers are global so the
+        model scoping comes from the model's own listing; unknown
+        model/tokenizer -> 404; a tokenizer with no evaluations for
+        the model -> []). Pure data access — no aggregates, zero
+        storage growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -400,6 +414,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations</code> — immutable evaluation history</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-checkpoint/&#123;ckpt&#125;</code> — evaluations recorded under ONE checkpoint (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-dataset/&#123;ds&#125;</code> — evaluations of ONE model over ONE dataset (read-only, deterministic, versions verbatim)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-tokenizer/&#123;tok&#125;</code> — evaluations of ONE model with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/&#123;eval&#125;</code> — one evaluation record</li>
       <li><code>POST  {prefix}/comparisons/run</code> — A/B comparison (improved / regressed / unchanged)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons</code> — immutable comparison history</li>
@@ -740,7 +755,8 @@ def rollback_model(model_id: str, request: RollbackRequest) -> ModelRecord:
 
 # --------------------------------------------------------------------------- #
 # Evaluation routes (Milestone 4 — read-only measurement;
-# Milestone 28 adds the read-only by-dataset grouping of the history)
+# Milestone 28 adds the read-only by-dataset grouping of the history;
+# Milestone 30 adds the read-only by-tokenizer grouping of the history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/evaluations/run", response_model=EvaluationRecord, tags=["evaluation"])
@@ -823,6 +839,36 @@ def list_evaluations_by_dataset(model_id: str, dataset_id: str
     not an evaluation id.)"""
     try:
         return _forge().list_evaluations_for_dataset(model_id, dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/evaluations/by-tokenizer/{tokenizer_id}",
+         response_model=list[EvaluationRecord], tags=["evaluation"])
+def list_evaluations_by_tokenizer(model_id: str, tokenizer_id: str
+                                  ) -> list[EvaluationRecord]:
+    """Immutable M4 evaluations of ONE model measured with ONE
+    tokenizer (M30).
+
+    Read-only per-tokenizer grouping: validates the tokenizer through
+    the existing tokenizer registry (unknown tokenizer -> 404; never a
+    raw filesystem check), then returns the model's authoritative M4
+    listing filtered by the persisted tokenizer identity recorded in
+    each EvaluationRecord (top-level tokenizer_id; membership never
+    comes from filenames, eval ids, checkpoint/dataset identities or a
+    latest-tokenizer substitution — the persisted id is matched
+    VERBATIM and every other persisted field travels unchanged).
+    Complete verbatim payloads (loss_nats/perplexity/state/dataset
+    identity included) in the exact M4 (created_at, eval_id) order;
+    tokenizers are global, so model scoping comes from the model's own
+    listing — a model never sees another model's evaluations. A valid
+    tokenizer with no evaluations for the model returns []. No
+    aggregates, no writes. (Must stay registered before
+    /evaluations/{eval_id}; the literal "by-tokenizer" segment is not
+    an evaluation id.)"""
+    try:
+        return _forge().list_evaluations_for_tokenizer(model_id,
+                                                       tokenizer_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

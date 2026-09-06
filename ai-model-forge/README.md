@@ -1094,11 +1094,53 @@ generation never trains, evaluates, scores, ranks or judges output.
   registry and the M16–M28 surfaces are byte-identical before and
   after
 
+### Milestone 30 — evaluation history by tokenizer
+  (`evaluations/by-tokenizer`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/evaluations/by-tokenizer/{tokenizer_id}` —
+  answers "which immutable M4 evaluations of this model measured with
+  this tokenizer?" and nothing else
+- **exact filtering**: membership comes from the persisted tokenizer
+  identity ONLY — every `EvaluationRecord` carries a top-level
+  `tokenizer_id`, and an evaluation belongs to the request only when
+  that persisted id matches VERBATIM. Nothing is inferred from
+  filenames, eval ids, checkpoint/dataset identities, or the tokenizer
+  currently registered; no latest-tokenizer substitution; tokenizer
+  ids are opaque ids (M2/M4 have no tokenizer versioning and none is
+  introduced)
+- **global tokenizers, model-scoped history**: the tokenizer is
+  validated through the existing registry first
+  (`TokenizerEngine.load` — the same getter `GET /tokenizers/{id}`
+  exposes; unknown tokenizer → 404). Tokenizers are GLOBAL (any model
+  may be evaluated with any tokenizer), so model scoping comes from
+  the model's own authoritative M4 listing — a model never sees
+  another model's evaluations. Returned records are verbatim
+  `EvaluationRecord` payloads (loss/perplexity/state/dataset identity
+  included) in the exact M4 authoritative order ((created_at, eval_id)
+  ASCENDING); a valid tokenizer with no evaluations for the model is a
+  deterministic `[]` — never a 404
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_evaluations_for_tokenizer(model_id, tokenizer_id)`
+  validates through the already-composed tokenizer handle (M4's
+  `__init__` already composes `TokenizerEngine`) and filters the
+  authoritative M4 `list_evaluations()` by the persisted
+  `tokenizer_id`; the facade and route are thin pass-throughs
+  registered after the M28 by-dataset route and **before** the generic
+  `/evaluations/{eval_id}` detail getter (M24 by-checkpoint, M28
+  by-dataset and M30 by-tokenizer are different groupings of the same
+  listing, all intact). No caches, no new storage — repeated GETs are
+  byte-identical and the endpoint never writes
+- **isolation & boundaries**: unknown model/tokenizer -> existing
+  404s; valid tokenizer without evaluations for the model -> `[]`. M4
+  (run, listing, getter), M24 by-checkpoint, M28 by-dataset, the
+  tokenizer registry and the M16–M29 surfaces are byte-identical
+  before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 455 tests
+pytest                       # 460 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1577,7 +1619,7 @@ ai-model-forge/
     tokenizer.py       # byte-level BPE engine
     training.py        # training engine: schedules, streams, run, checkpoints, rollback
     evaluation.py      # evaluation engine: read-only state measurement (M4)
-                       # + read-only by-checkpoint/by-dataset grouping (M24/M28)
+                       # + read-only by-checkpoint/by-dataset/by-tokenizer grouping (M24/M28/M30)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
                        # + read-only by-checkpoint/by-dataset grouping of the history (M26/M29)
     gates.py           # stage gates: policy-driven run decisions (M6)
@@ -1593,7 +1635,7 @@ ai-model-forge/
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 455 tests across 20 suites
+  tests/               # 460 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

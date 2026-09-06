@@ -603,5 +603,6 @@ def test_m23_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M21) + 1 (M22) + 1 (M23) = 55 (pre-M24 ladder); + 1 (M24) + 1 (M25) + 1 (M26)
     # + 1 (M27 samples by-checkpoint)
     # + 1 (M28 evaluations by-dataset)
-    # + 1 (M29 comparisons by-dataset) = 61
-    assert len(spec["paths"]) == 61
+    # + 1 (M29 comparisons by-dataset)
+    # + 1 (M30 evaluations by-tokenizer) = 62
+    assert len(spec["paths"]) == 62

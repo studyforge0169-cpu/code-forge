@@ -648,3 +648,100 @@ def test_m28_engine_repeated_calls_identical(env):
         again = [r.model_dump(mode="json") for r in
                  f.list_evaluations_for_dataset(a, env.datasets["base"])]
         assert again == first
+
+
+# =========================================================================== #
+# M30: read-only per-tokenizer grouping of the evaluation history
+# =========================================================================== #
+
+def _m30_env(env):
+    """M30 state on top of the shared module env (cached): a SECOND
+    tokenizer (tok2, vocab 320) with which the base dataset is
+    tokenized and ONE evaluation of the M28 model runs (partitioning),
+    and a THIRD tokenizer (tok3) with zero evaluations.
+    Returns (a, e_t1, e_t2, tok1, tok2, tok3).
+    """
+    cached = getattr(env, "_m30_state", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    a, b, e_b1, e_b2, e_p1, third_ds = _m28_env(env)
+    tok1 = env.tokenizer.id
+    tok2 = f.train_tokenizer(
+        TokenizerConfig(name="m30-tok2", vocab_size=320),
+        dataset_id=env.datasets["base"]).id
+    f.tokenize_dataset(env.datasets["base"], tok2)
+    e_t2 = f.run_evaluation(env.eval_cfg(a, tokenizer_id=tok2, seed=3011))
+    tok3 = f.train_tokenizer(
+        TokenizerConfig(name="m30-tok3", vocab_size=300),
+        dataset_id=env.datasets["probe"]).id
+    env._m30_state = (a, (e_b1, e_b2, e_p1), e_t2, tok1,
+                      tok2, tok3)
+    return env._m30_state
+
+
+def test_m30_engine_filters_by_persisted_tokenizer_identity(env):
+    a, t1_evals, e_t2, tok1, tok2, tok3 = _m30_env(env)
+    f = env.forge
+    listing = f.list_evaluations(a)
+    for tok, expected in ((tok1, list(t1_evals)),
+                        (tok2, [e_t2]), (tok3, [])):
+        got = f.list_evaluations_for_tokenizer(a, tok)
+        # parity with the authoritative M4 listing filtered by the
+        # persisted tokenizer identity; deterministic (created_at,
+        # eval_id) order; membership from the persisted field only
+        assert got == [r for r in listing if r.tokenizer_id == tok]
+        assert [r.eval_id for r in got] == [r.eval_id for r in expected]
+        keyed = [(r.created_at, r.eval_id) for r in got]
+        assert keyed == sorted(keyed)
+        assert all(r.tokenizer_id == tok and r.model_id == a for r in got)
+        for r in got:
+            assert r == f.get_evaluation(a, r.eval_id)
+    # persisted tokenizer identity VERBATIM on every record (tok2's id
+    # stays exactly tok2 — no substitution, no rewriting)
+    got2 = f.list_evaluations_for_tokenizer(a, tok2)
+    assert all(r.tokenizer_id == tok2 for r in got2)
+    # partition: every evaluation id appears under exactly ONE of the
+    # two populated tokenizers; no tokenizer leaks into the other
+    under1 = {r.eval_id for r in f.list_evaluations_for_tokenizer(a, tok1)}
+    under2 = {r.eval_id for r in f.list_evaluations_for_tokenizer(a, tok2)}
+    assert under1 and under2 and under1.isdisjoint(under2)
+    assert under1 | under2 == {r.eval_id for r in listing}
+
+
+def test_m30_engine_empty_404s_model_scoping_read_only(env):
+    a, t1_evals, e_t2, tok1, tok2, tok3 = _m30_env(env)
+    f = env.forge
+    _, b, *_ = _m28_env(env)
+    # valid tokenizer with zero evaluations for THIS model -> [] (the
+    # model-scoped empty case: tokenizers are global, b has no evals)
+    assert f.list_evaluations_for_tokenizer(b, tok1) == []
+    assert f.list_evaluations_for_tokenizer(a, tok3) == []
+    # unknown model / unknown tokenizer -> FileNotFoundError (404 at API)
+    with pytest.raises(FileNotFoundError):
+        f.list_evaluations_for_tokenizer("ghost-model-30", tok1)
+    with pytest.raises(FileNotFoundError):
+        f.list_evaluations_for_tokenizer(a, "ghost-tok-30")
+    # model scoping: a's evaluation ids never appear under b
+    leak = [r.eval_id for r in f.list_evaluations_for_tokenizer(b, tok1)]
+    assert {e.eval_id for e in t1_evals}.isdisjoint(leak)
+    assert e_t2.eval_id not in leak
+    # read-only: the filter never writes evaluation manifests
+    before = _m24_eval_files(env, (a, b))
+    f.list_evaluations_for_tokenizer(a, tok1)
+    f.list_evaluations_for_tokenizer(a, tok2)
+    f.list_evaluations_for_tokenizer(b, tok1)
+    f.list_evaluations_for_tokenizer(a, tok3)
+    after = _m24_eval_files(env, (a, b))
+    assert after == before
+
+
+def test_m30_engine_repeated_calls_identical(env):
+    a, t1_evals, e_t2, tok1, tok2, tok3 = _m30_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_evaluations_for_tokenizer(a, tok1)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_evaluations_for_tokenizer(a, tok1)]
+        assert again == first

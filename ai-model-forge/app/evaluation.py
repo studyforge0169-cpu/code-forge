@@ -196,6 +196,39 @@ class EvaluationEngine:
         return [r for r in self.list_evaluations(model_id)
                 if r.dataset_id == dataset_id]
 
+    def list_evaluations_for_tokenizer(
+            self, model_id: str, tokenizer_id: str) -> list[EvaluationRecord]:
+        """Immutable M4 evaluations of ONE model measured with ONE
+        tokenizer (M30).
+
+        Membership comes from the persisted tokenizer identity ONLY:
+        every ``EvaluationRecord`` carries a top-level
+        ``tokenizer_id: str`` field, and an evaluation belongs to the
+        request when its persisted ``tokenizer_id`` equals the
+        requested id — never filenames, eval ids, checkpoint ids,
+        dataset identities, the tokenizer currently registered, or a
+        latest-tokenizer substitution. The persisted identity is
+        matched VERBATIM (tokenizer ids are opaque ids; there is no
+        tokenizer versioning in M2/M4 and none is introduced here).
+        Resolution: unknown model or unknown tokenizer ->
+        FileNotFoundError; the tokenizer is validated through the
+        existing tokenizer registry (``TokenizerEngine.load`` — the
+        same registry getter ``GET /tokenizers/{id}`` exposes;
+        tokenizers are GLOBAL, so the model scoping comes from the
+        model's own M4 listing exactly like M28/M29: a model never
+        sees another model's evaluations). The result is the model's
+        authoritative M4 listing above (the exact engine parse +
+        deterministic (created_at, eval_id) ASCENDING order) filtered
+        by the persisted tokenizer identity; complete verbatim
+        ``EvaluationRecord`` payloads, no rewritten fields. A valid
+        tokenizer with no evaluations for the model returns [].
+        Read-only, never writes.
+        """
+        # existence: raises FileNotFoundError (404 at the API)
+        self.tokenizers.load(tokenizer_id)
+        return [r for r in self.list_evaluations(model_id)
+                if r.tokenizer_id == tokenizer_id]
+
     # ------------------------------------------------------------------ #
     # The run (preflight everything before creating any artifact)
     # ------------------------------------------------------------------ #

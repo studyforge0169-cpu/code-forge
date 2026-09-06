@@ -373,8 +373,9 @@ def test_m26_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M26 comparisons by-checkpoint)
     # + 1 (M27 samples by-checkpoint)
     # + 1 (M28 evaluations by-dataset)
-    # + 1 (M29 comparisons by-dataset) = 61
-    assert len(spec["paths"]) == 61
+    # + 1 (M29 comparisons by-dataset)
+    # + 1 (M30 evaluations by-tokenizer) = 62
+    assert len(spec["paths"]) == 62
 
 
 # =========================================================================== #
@@ -505,7 +506,7 @@ def test_m29_api_404s_isolation_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/comparisons/{comparison_id}"
     m26 = ("/api/v1/models/{model_id}/comparisons/by-checkpoint/"
            "{checkpoint_id}")
-    assert len(spec["paths"]) == 61
+    assert len(spec["paths"]) == 62
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["comparison"]
