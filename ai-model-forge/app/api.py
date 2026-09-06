@@ -318,6 +318,17 @@ def index() -> HTMLResponse:
         evaluations -> []; current-state evaluations never appear). Pure
         data access — no derived statistics, no comparison, zero storage
         growth.</li>
+
+      <li><b>M25 suite-run history by checkpoint</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/suite-runs/by-checkpoint/&#123;checkpoint&#125;</code>,
+        answers "which immutable M10 suite runs executed against this
+        checkpoint state?": the model's authoritative M10 listing filtered
+        by the persisted run state recorded in each record, after
+        checkpoint ownership is validated through the M3 registry (full
+        record payloads, exact M10 ordering; unknown model/checkpoint or
+        a checkpoint of another model -> 404; a valid checkpoint without
+        runs -> []; current-state runs never appear). Pure data access —
+        no aggregation, zero storage growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -355,6 +366,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs</code> / <code>GET {prefix}/models/&#123;id&#125;/suite-runs/&#123;run&#125;</code> — immutable suite-run history</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;</code> — suite-run records of ONE named suite (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;/summary</code> — bookkeeping summary of ONE suite's runs (count, ordered ids, earliest/latest; read-only)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-checkpoint/&#123;ckpt&#125;</code> — suite runs executed against ONE checkpoint state (read-only, deterministic, no aggregation)</li>
       <li><code>POST  {prefix}/workflows/recipes</code> — register an immutable workflow recipe (idempotent; conflicts 409)</li>
       <li><code>GET   {prefix}/workflows/recipes</code> / <code>GET {prefix}/workflows/recipes/&#123;recipe_id&#125;</code> — immutable recipes</li>
       <li><code>POST  {prefix}/workflows/recipes/&#123;recipe_id&#125;/runs</code> — execute a recipe against one explicit model (existing M7 engine)</li>
@@ -925,7 +937,9 @@ def get_probe_suite(suite_id: str) -> ProbeSuite:
 
 # --------------------------------------------------------------------------- #
 # Suite runs (Milestone 10 — explicit multi-probe M4 batches over named suites;
-# Milestone 21 adds the read-only by-suite grouping of the immutable history)
+# Milestone 21 adds the read-only by-suite grouping of the immutable history,
+# Milestone 22 its bookkeeping summary and Milestone 25 the by-checkpoint
+# grouping)
 # --------------------------------------------------------------------------- #
 
 @api.post("/suite-runs", response_model=SuiteRunRecord, tags=["suite-runs"])
@@ -1003,6 +1017,32 @@ def summarize_suite_runs_by_suite(model_id: str, suite_id: str
     trends, verdicts or comparisons; never persisted, never writes."""
     try:
         return _forge().list_suite_run_summary_for_suite(model_id, suite_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/suite-runs/by-checkpoint/{checkpoint_id}",
+         response_model=list[SuiteRunRecord], tags=["suite-runs"])
+def list_suite_runs_by_checkpoint(model_id: str, checkpoint_id: str
+                                  ) -> list[SuiteRunRecord]:
+    """Immutable M10 suite runs executed against ONE checkpoint state (M25).
+
+    Read-only per-checkpoint grouping: validates the checkpoint through
+    the model's M3 checkpoint registry (an unknown checkpoint, or a
+    checkpoint id belonging to another model, is 404 — checkpoint ids
+    are model-scoped; nothing is inferred from filenames), then returns
+    the model's authoritative M10 listing filtered by the persisted run
+    state recorded in each SuiteRunRecord (state_kind "checkpoint" with
+    the requested state.checkpoint_id) — complete verbatim payloads in
+    the exact M10 (created_at, suite_run_id) order. Current-state runs
+    keep state.checkpoint_id null and never appear; a valid checkpoint
+    with no suite runs returns []. Answers only which immutable runs
+    executed against this checkpoint; no aggregation, no scores, no
+    writes. (Must stay registered before /suite-runs/{suite_run_id};
+    the literal "by-checkpoint" segment is not a suite-run id.)"""
+    try:
+        return _forge().list_suite_runs_for_checkpoint(model_id,
+                                                       checkpoint_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

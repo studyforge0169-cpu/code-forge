@@ -786,8 +786,9 @@ def test_m21_api_existing_surfaces_and_openapi(api_client):
     assert "SuiteRunRecord" in spec["components"]["schemas"]
     # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
     # + 1 (M21) + 1 (M22 summary) + 1 (M23 gates by-policy)
-    # + 1 (M24 evaluations by-checkpoint) = 56
-    assert len(spec["paths"]) == 56
+    # + 1 (M24 evaluations by-checkpoint)
+    # + 1 (M25 suite-runs by-checkpoint) = 57
+    assert len(spec["paths"]) == 57
 
 
 # =========================================================================== #
@@ -977,5 +978,251 @@ def test_m22_api_openapi_documented(api_client):
     assert "SuiteRunSummary" in spec["components"]["schemas"]
     # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
     # + 1 (M21) + 1 (M22) + 1 (M23 gates by-policy)
-    # + 1 (M24 evaluations by-checkpoint) = 56
-    assert len(spec["paths"]) == 56
+    # + 1 (M24 evaluations by-checkpoint)
+    # + 1 (M25 suite-runs by-checkpoint) = 57
+    assert len(spec["paths"]) == 57
+
+
+# =========================================================================== #
+# M25: read-only per-checkpoint grouping of the suite-run history
+# =========================================================================== #
+
+BY_CHECKPOINT = "/api/v1/models/{mid}/suite-runs/by-checkpoint/{ck}"
+
+
+def _m25_env(env):
+    """M25 state on top of the shared module env (cached): one more
+    checkpoint-state run on ck_b, one CURRENT-state run on model a, and
+    a fresh tiny trained model whose checkpoint has zero runs. Returns
+    (a, m21_b, ck_a, ck_b, r_ck_b, r_cur, empty_model, empty_ck).
+    """
+    cached = getattr(env, "_m25_state", None)
+    if cached is not None:
+        return cached
+    a, m21_b, sx, sy, ra, ra_y, rb1 = _m21_env(env)
+    f = env.forge
+    r_ck_b = env.run(sx, cstate(env.ck_b))                # checkpoint state
+    r_cur = env.run(sx, cstate(current=True))             # current state
+    empty = env.fresh_model("m25-empty", seed=250)
+    f.run_training(TrainingConfig(
+        method="continued_pretraining", model_id=empty, dataset_id=env.ds,
+        tokenizer_id=env.tok, learning_rate=3e-3, batch_size=8,
+        max_seq_len=32, steps=10, eval_every_steps=5, keep_best=False,
+        seed=25))
+    empty_ck = f.list_checkpoints(empty)[0].checkpoint_id
+    env._m25_state = (a, m21_b, env.ck_a, env.ck_b, r_ck_b, r_cur,
+                      empty, empty_ck)
+    return env._m25_state
+
+
+def test_m25_engine_filters_by_persisted_state_and_model(env):
+    a, m21_b, ck_a, ck_b, r_ck_b, r_cur, empty, empty_ck = _m25_env(env)
+    f = env.forge
+    listing = f.list_suite_runs(a)
+    for ck in (ck_a, ck_b):
+        got = f.list_suite_runs_for_checkpoint(a, ck)
+        expected = [r for r in listing
+                    if r.state.state_kind == EvalStateKind.CHECKPOINT
+                    and r.state.checkpoint_id == ck]
+        # parity with the authoritative M10 listing filtered by the
+        # persisted run state; deterministic (created_at, suite_run_id)
+        # order; every record belongs to the model AND checkpoint state
+        assert got == expected
+        assert all(r.model_id == a
+                   and r.state.state_kind == EvalStateKind.CHECKPOINT
+                   and r.state.checkpoint_id == ck for r in got)
+        assert [(r.created_at, r.suite_run_id) for r in got] == \
+            sorted((r.created_at, r.suite_run_id) for r in got)
+        # verbatim payload parity with the M10 single-record getter
+        for r in got:
+            assert r == f.get_suite_run(a, r.suite_run_id)
+    # the new ck_b run is grouped under ck_b, never under ck_a
+    got_a = f.list_suite_runs_for_checkpoint(a, ck_a)
+    got_b = f.list_suite_runs_for_checkpoint(a, ck_b)
+    assert r_ck_b.suite_run_id in {r.suite_run_id for r in got_b}
+    # checkpoint histories are disjoint (one run, one checkpoint state)
+    assert {r.suite_run_id for r in got_a}.isdisjoint(
+        {r.suite_run_id for r in got_b})
+    # the CURRENT-state run (state.checkpoint_id None) never appears
+    assert r_cur.state.state_kind == EvalStateKind.CURRENT
+    assert r_cur.state.checkpoint_id is None
+    assert r_cur.suite_run_id not in {r.suite_run_id for r in got_a}
+    assert r_cur.suite_run_id not in {r.suite_run_id for r in got_b}
+
+
+def test_m25_engine_empty_404s_cross_model_and_read_only(env):
+    a, m21_b, ck_a, ck_b, r_ck_b, r_cur, empty, empty_ck = _m25_env(env)
+    f = env.forge
+    # valid registered checkpoint with zero suite runs -> []
+    assert f.list_suite_runs_for_checkpoint(empty, empty_ck) == []
+    # cross-model: the other model (no checkpoints of its own) cannot
+    # resolve model a's checkpoint id, and vice versa
+    with pytest.raises(FileNotFoundError):
+        f.list_suite_runs_for_checkpoint(m21_b, ck_a)
+    with pytest.raises(FileNotFoundError):
+        f.list_suite_runs_for_checkpoint(a, empty_ck)
+    # unknown model -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_suite_runs_for_checkpoint("ghost-model-25", ck_a)
+    # unknown checkpoint -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_suite_runs_for_checkpoint(a, "ghost-ck-25")
+    # read-only: the filter never writes run manifests
+    before = env.run_files()
+    f.list_suite_runs_for_checkpoint(a, ck_a)
+    f.list_suite_runs_for_checkpoint(empty, empty_ck)
+    assert env.run_files() == before
+
+
+def test_m25_engine_repeated_calls_identical(env):
+    a, _, ck_a, _, _, _, _, _ = _m25_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json")
+             for r in f.list_suite_runs_for_checkpoint(a, ck_a)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json")
+                 for r in f.list_suite_runs_for_checkpoint(a, ck_a)]
+        assert again == first
+
+
+def test_m25_api_by_checkpoint_grouping_parity_and_determinism(api_client):
+    h = _http_env(api_client, "m25api", train=True)
+    mid, ds, tok = h["mid"], h["ds"], h["tok"]
+    ckpts = api_client.get(f"{MODELS}/{mid}/checkpoints").json()
+    ck_a = ckpts[0]["checkpoint_id"]
+    ck_z = ckpts[-1]["checkpoint_id"]
+    probe = {"dataset_id": ds, "split": "validation", "tokenizer_id": tok,
+             "batch_size": 8, "max_seq_len": 32, "seed": 5501}
+    api_client.post("/api/v1/probe-suites",
+                    json={"suite_id": "api25-suite", "probes": [probe]})
+    body_ck = {"model_id": mid, "suite_id": "api25-suite",
+               "state": {"state_kind": "checkpoint", "checkpoint_id": ck_a}}
+    r1 = api_client.post(SUITE_RUNS, json=body_ck).json()
+    r2 = api_client.post(SUITE_RUNS, json=body_ck).json()
+    r_cur = api_client.post(SUITE_RUNS, json={
+        "model_id": mid, "suite_id": "api25-suite",
+        "state": {"state_kind": "current"}}).json()
+    r_z = None
+    if ck_z != ck_a:
+        r_z = api_client.post(SUITE_RUNS, json=dict(
+            body_ck, state={"state_kind": "checkpoint",
+                            "checkpoint_id": ck_z})).json()
+    url = BY_CHECKPOINT.format(mid=mid, ck=ck_a)
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # exactly the two ck_a runs, deterministic M10 order, verbatim
+    # payloads equal to the POST responses (existing representation)
+    assert [x["suite_run_id"] for x in recs] == \
+        [r1["suite_run_id"], r2["suite_run_id"]]
+    assert all(x["model_id"] == mid and x["state"]["state_kind"]
+               == "checkpoint" and x["state"]["checkpoint_id"] == ck_a
+               for x in recs)
+    assert [(x["created_at"], x["suite_run_id"]) for x in recs] == \
+        sorted((x["created_at"], x["suite_run_id"]) for x in recs)
+    by_id = {x["suite_run_id"]: x for x in recs}
+    assert by_id[r1["suite_run_id"]] == r1
+    assert by_id[r2["suite_run_id"]] == r2
+    # parity with the existing M10 listing filtered by persisted state
+    listing = api_client.get(MODEL_SUITE_RUNS.format(mid=mid)).json()
+    assert recs == [x for x in listing
+                    if x["state"]["state_kind"] == "checkpoint"
+                    and x["state"]["checkpoint_id"] == ck_a]
+    # the current-state run (and the other checkpoint's run) stay outside
+    assert r_cur["suite_run_id"] not in {x["suite_run_id"] for x in recs}
+    if r_z is not None:
+        assert r_z["suite_run_id"] not in {x["suite_run_id"] for x in recs}
+        other = api_client.get(BY_CHECKPOINT.format(mid=mid, ck=ck_z))
+        assert other.status_code == 200
+        assert [x["suite_run_id"] for x in other.json()] == \
+            [r_z["suite_run_id"]]
+        assert {x["suite_run_id"] for x in other.json()}.isdisjoint(
+            {x["suite_run_id"] for x in recs})
+    # repeated GET returns identical JSON (and identical raw bytes)
+    raw1 = api_client.get(url).content
+    raw2 = api_client.get(url).content
+    assert raw1 == raw2 and json.loads(raw1) == recs
+    # valid checkpoint with no suite runs -> 200 + [] (a second trained
+    # model whose checkpoints were never suite-run)
+    h2 = _http_env(api_client, "m25empty", train=True)
+    empty = api_client.get(BY_CHECKPOINT.format(mid=h2["mid"],
+                                                ck=h2["ck"]))
+    assert empty.status_code == 200 and empty.json() == []
+
+
+def test_m25_api_404s_isolation_and_prior_surfaces(api_client):
+    h = _http_env(api_client, "m25err", train=True)
+    mid, ds, tok, ck = h["mid"], h["ds"], h["tok"], h["ck"]
+    probe = {"dataset_id": ds, "split": "validation", "tokenizer_id": tok,
+             "batch_size": 8, "max_seq_len": 32, "seed": 5511}
+    api_client.post("/api/v1/probe-suites",
+                    json={"suite_id": "api25-iso-suite", "probes": [probe]})
+    run = api_client.post(SUITE_RUNS, json={
+        "model_id": mid, "suite_id": "api25-iso-suite",
+        "state": {"state_kind": "checkpoint", "checkpoint_id": ck}}).json()
+    # unknown model -> 404 (even with a real checkpoint id)
+    assert api_client.get(BY_CHECKPOINT.format(mid="ghost-model-25",
+                                               ck=ck)).status_code == 404
+    # unknown checkpoint -> 404 (even with a real model id)
+    assert api_client.get(BY_CHECKPOINT.format(mid=mid,
+                                               ck="ghost-ck-25")) \
+        .status_code == 404
+    # cross-model isolation: another real model + this real checkpoint id
+    # -> 404 (checkpoint ids are model-scoped through the M3 registry)
+    cfg = {"name": "api25-iso-b", "vocab_size": 640, "context_length": 64,
+           "hidden_size": 64, "n_layers": 2, "n_heads": 4, "n_kv_heads": 2,
+           "intermediate_size": 128}
+    mid_b = api_client.post(MODELS, json={"config": cfg}).json()["model"]["id"]
+    assert api_client.get(BY_CHECKPOINT.format(mid=mid_b, ck=ck)) \
+        .status_code == 404
+    # M10 listing/detail unchanged; by-checkpoint never shadows the
+    # detail getter
+    listing = api_client.get(MODEL_SUITE_RUNS.format(mid=mid)).json()
+    assert run["suite_run_id"] in {x["suite_run_id"] for x in listing}
+    assert api_client.get(
+        f"{MODEL_SUITE_RUNS.format(mid=mid)}/{run['suite_run_id']}") \
+        .json() == run
+    assert api_client.get(f"{MODEL_SUITE_RUNS.format(mid=mid)}/ghost-run") \
+        .status_code == 404
+    # M21/M22 unchanged: by-suite grouping + summary of the same suite
+    by_suite = api_client.get(
+        BY_SUITE.format(mid=mid, suite="api25-iso-suite")).json()
+    assert [x["suite_run_id"] for x in by_suite] == [run["suite_run_id"]]
+    summary = api_client.get(
+        f"{BY_SUITE.format(mid=mid, suite='api25-iso-suite')}/summary") \
+        .json()
+    assert summary["total_count"] == 1
+    assert summary["run_ids"] == [run["suite_run_id"]]
+    # M24 unchanged: evaluations by-checkpoint (the suite run created
+    # checkpoint evaluations); M23 ghost policy 404; M18-M20 surface
+    evs = api_client.get(f"{MODELS}/{mid}/evaluations/by-checkpoint/{ck}")
+    assert evs.status_code == 200 and len(evs.json()) >= 1
+    assert all(x["checkpoint_id"] == ck for x in evs.json())
+    assert api_client.get(
+        f"{MODELS}/{mid}/gates/decisions/by-policy/ghost-pol-25") \
+        .status_code == 404
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality").status_code == 200
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality/records").status_code == 200
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality/by-sample/no-such-sample") \
+        .status_code == 404
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality/by-checkpoint/no-such-ck") \
+        .status_code == 404
+    # new route documented correctly in OpenAPI (GET, right tag, schema)
+    spec = api_client.get("/openapi.json").json()
+    path = ("/api/v1/models/{model_id}/suite-runs/by-checkpoint/"
+            "{checkpoint_id}")
+    assert path in spec["paths"]
+    ops = spec["paths"][path]
+    assert set(ops) == {"get"} and ops["get"]["tags"] == ["suite-runs"]
+    schema = (ops["get"]["responses"]["200"]["content"]
+              ["application/json"]["schema"])
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/SuiteRunRecord"}
+    assert "SuiteRunRecord" in spec["components"]["schemas"]
+    # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
+    # + 1 (M21) + 1 (M22) + 1 (M23) + 1 (M24) + 1 (M25) = 57
+    assert len(spec["paths"]) == 57

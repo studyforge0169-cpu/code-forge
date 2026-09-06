@@ -423,6 +423,23 @@ class ModelForge:
         return self.suite_runs.list_suite_run_summary_for_suite(
             model_id, suite_id)
 
+    def list_suite_runs_for_checkpoint(self, model_id: str,
+                                       checkpoint_id: str
+                                       ) -> list[SuiteRunRecord]:
+        """Immutable M10 suite-run records executed against ONE checkpoint
+        state (M25 read-only access).
+
+        The checkpoint must be registered in the model's M3 checkpoint
+        registry (unknown checkpoint, or a checkpoint id belonging to
+        another model -> FileNotFoundError -> 404). Returns the model's
+        authoritative M10 listing filtered by the persisted run state
+        (state_kind "checkpoint" + the checkpoint id) — verbatim records
+        in the M10 (created_at, suite_run_id) order; current-state runs
+        (state.checkpoint_id None) never appear; a checkpoint with no
+        suite runs returns []. Read-only, never writes."""
+        return self.suite_runs.list_suite_runs_for_checkpoint(
+            model_id, checkpoint_id)
+
     # ------------------------------------------------------------------ #
     # Workflow recipes (immutable reusable M7 plans; definitions only; M12)
     # ------------------------------------------------------------------ #

@@ -601,4 +601,4 @@ def test_m23_api_404s_isolation_and_prior_surfaces(api_client):
     assert "GateDecision" in spec["components"]["schemas"]
     # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
     # + 1 (M21) + 1 (M22) + 1 (M23) = 55
-    assert len(spec["paths"]) == 56
+    assert len(spec["paths"]) == 57

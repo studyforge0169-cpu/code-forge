@@ -896,11 +896,42 @@ generation never trains, evaluates, scores, ranks or judges output.
   getter, hashes, manifests), M3 checkpoint resolution, the M13
   dashboard and the M16–M23 surfaces are byte-identical before and after
 
+### Milestone 25 — suite-run history by checkpoint
+  (`suite-runs/by-checkpoint`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/suite-runs/by-checkpoint/{checkpoint_id}` — answers
+  "which immutable M10 suite runs executed against this checkpoint
+  state?" and nothing else: the model's authoritative M10 listing
+  filtered by the persisted run state recorded in each `SuiteRunRecord`
+  (`state.state_kind="checkpoint"` + `state.checkpoint_id`)
+- **exact filtering**: ownership is validated through the model's M3
+  checkpoint registry first (an unknown checkpoint, or a checkpoint id
+  belonging to another model, is a 404 — checkpoint ids are
+  model-scoped; nothing is inferred from filenames). Returned records
+  are verbatim `SuiteRunRecord` payloads in the exact M10 authoritative
+  order ((created_at, suite_run_id) ASCENDING); current-state runs keep
+  `state.checkpoint_id=null` and never appear; a valid checkpoint with
+  no suite runs is a deterministic `[]`
+- **implementation is a reuse, not a second engine**: the engine method
+  `list_suite_runs_for_checkpoint(model_id, checkpoint_id)` validates
+  through the existing M3 `get_checkpoint` registry (the same ownership
+  path M20/M24 use) and filters the authoritative M10
+  `list_suite_runs()` by the persisted run state; the facade and route
+  are thin pass-throughs. No duplicate manifest parsing, no new storage,
+  caches or indexes — repeated GETs are byte-identical and the endpoint
+  never writes
+- **isolation & boundaries**: a model only ever sees its own suite
+  runs; another model's runs are unreachable (ownership resolves through
+  the model-scoped M3 registry). Unknown model/checkpoint -> existing
+  404s; valid checkpoint without runs -> `[]`. M10 (run, listing,
+  getter), M21 by-suite, M22 summary, the M13 dashboard and the
+  M16–M24 surfaces are byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 430 tests
+pytest                       # 435 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1386,13 +1417,13 @@ ai-model-forge/
     dashboards.py      # read-only dashboard engine: deterministic views (M8/M13)
     policies.py        # policy registry + probe suites: immutable definitions (M9)
     suite_runs.py      # explicit multi-probe M4 batches over named suites (M10)
-                       # + read-only by-suite grouping & summary (M21/M22)
+                       # + read-only by-suite/by-checkpoint grouping (M21/M22/M25)
     recipes.py         # workflow recipes: immutable plans + M14 composition (M12/M14)
     sampling.py         # checkpoint sampling: deterministic generation (M15)
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 430 tests across 20 suites
+  tests/               # 435 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

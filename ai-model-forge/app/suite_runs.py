@@ -50,6 +50,11 @@ Rules honoured here (tested):
     summary (total_count, ordered run ids, earliest/latest timestamps)
     from the M21 filter — pure recomputation, never persisted, no
     scores/averages/trends, never writes
+  * read-only per-checkpoint history (M25):
+    ``list_suite_runs_for_checkpoint`` filters the same authoritative
+    listing by the persisted run state (state_kind "checkpoint" + the
+    checkpoint id), after M3 registry ownership validation. No new
+    store, index or cache; never writes
 """
 
 from __future__ import annotations
@@ -63,6 +68,7 @@ from pathlib import Path
 from typing import Optional
 
 from .schemas import (
+    EvalStateKind,
     ModelRecord,
     SuiteRunProbeResult,
     SuiteRunRecord,
@@ -76,6 +82,7 @@ from .comparison import ComparisonEngine
 from .dataset import DatasetEngine
 from .evaluation import EvaluationEngine
 from .policies import PolicyEngine
+from .training import TrainingEngine
 
 SUITE_RUNS_DIR = "suite-runs"
 
@@ -91,6 +98,7 @@ class SuiteRunEngine:
         self.evaluation = EvaluationEngine(storage)
         self.comparison = ComparisonEngine(storage)
         self.policies = PolicyEngine(storage)
+        self.training = TrainingEngine(storage)   # M3 registry reuse (M25)
 
     # ------------------------------------------------------------------ #
     # Paths
@@ -286,6 +294,39 @@ class SuiteRunEngine:
             earliest_created_at=records[0].created_at if records else None,
             latest_created_at=records[-1].created_at if records else None,
         )
+
+    # ------------------------------------------------------------------ #
+    # M25: per-checkpoint access (read-only)
+    # ------------------------------------------------------------------ #
+
+    def list_suite_runs_for_checkpoint(self, model_id: str,
+                                       checkpoint_id: str
+                                       ) -> list[SuiteRunRecord]:
+        """Immutable M10 suite runs executed against ONE checkpoint state
+        of ONE model (M25).
+
+        Resolution: unknown model or unregistered checkpoint ->
+        FileNotFoundError; ownership is validated through the model's M3
+        checkpoint registry (``TrainingEngine.get_checkpoint``) — a
+        checkpoint id belonging to another model is not registered under
+        this model and raises FileNotFoundError, exactly like an unknown
+        one (nothing is inferred from filenames). The result is the
+        model's authoritative M10 listing above (the exact engine parse
+        + deterministic (created_at, suite_run_id) ASCENDING order)
+        filtered by the persisted state recorded in each SuiteRunRecord
+        — ``state.state_kind == "checkpoint"`` with the requested
+        ``state.checkpoint_id`` — so every returned record is a complete
+        verbatim SuiteRunRecord and runs against other states or models
+        never appear. Current-state runs keep
+        ``state.checkpoint_id=None`` and therefore never appear. A valid
+        checkpoint with no suite runs returns []. Read-only, never
+        writes.
+        """
+        # existence + ownership: raises FileNotFoundError (404 at the API)
+        self.training.get_checkpoint(model_id, checkpoint_id)
+        return [r for r in self.list_suite_runs(model_id)
+                if r.state.state_kind == EvalStateKind.CHECKPOINT
+                and r.state.checkpoint_id == checkpoint_id]
 
     # ------------------------------------------------------------------ #
     # Deterministic hashing
