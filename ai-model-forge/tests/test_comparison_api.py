@@ -375,8 +375,9 @@ def test_m26_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M28 evaluations by-dataset)
     # + 1 (M29 comparisons by-dataset)
     # + 1 (M30 evaluations by-tokenizer)
-    # + 1 (M31 comparisons by-tokenizer) = 63
-    assert len(spec["paths"]) == 63
+    # + 1 (M31 comparisons by-tokenizer)
+    # + 1 (M32 samples by-tokenizer) = 64
+    assert len(spec["paths"]) == 64
 
 
 # =========================================================================== #
@@ -507,7 +508,7 @@ def test_m29_api_404s_isolation_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/comparisons/{comparison_id}"
     m26 = ("/api/v1/models/{model_id}/comparisons/by-checkpoint/"
            "{checkpoint_id}")
-    assert len(spec["paths"]) == 63
+    assert len(spec["paths"]) == 64
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["comparison"]
@@ -650,8 +651,9 @@ def test_m31_by_tokenizer_404s_isolation_regressions_openapi(api_client):
     spec = api_client.get("/openapi.json").json()
     # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
     # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
-    # + 1 (M31 comparisons by-tokenizer) = 63
-    assert len(spec["paths"]) == 63
+    # + 1 (M31 comparisons by-tokenizer)
+    # + 1 (M32 samples by-tokenizer) = 64
+    assert len(spec["paths"]) == 64
     path = ("/api/v1/models/{model_id}/comparisons/by-tokenizer"
             "/{tokenizer_id}")
     keys = list(spec["paths"])

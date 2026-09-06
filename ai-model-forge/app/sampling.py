@@ -176,6 +176,41 @@ class SamplingEngine:
         return [r for r in self.list_samples(model_id)
                 if r.checkpoint_id == checkpoint_id]
 
+    def list_samples_for_tokenizer(
+            self, model_id: str, tokenizer_id: str) -> list[SampleRecord]:
+        """Immutable M15 samples of ONE model generated with ONE
+        tokenizer (M32).
+
+        Membership comes from the persisted sample tokenizer identity
+        ONLY: every ``SampleRecord`` carries a required non-nullable
+        top-level ``tokenizer_id`` (M15 generation always takes ONE
+        explicit tokenizer from the request; the record also persists
+        the matching ``tokenizer_hash`` audit field, which is
+        preserved verbatim and never re-derived), and a sample belongs
+        to the request when its persisted ``tokenizer_id`` equals the
+        requested id, matched VERBATIM — never filenames, paths,
+        checkpoint metadata, prompt text, generated tokens, hashes or
+        the tokenizer currently registered, and never a
+        latest-tokenizer substitution (tokenizer ids are opaque ids;
+        M2/M15 have no tokenizer versioning and none is introduced
+        here; no M15 schema change is made for this endpoint). Each
+        sample appears EXACTLY ONCE (the authoritative listing holds
+        each record exactly once). Resolution: unknown model or
+        unknown tokenizer -> FileNotFoundError; the tokenizer is
+        validated through the existing registry
+        (``TokenizerEngine.load`` — the same registry getter
+        ``GET /tokenizers/{id}`` exposes; tokenizers are GLOBAL, so
+        the model scoping comes from the model's own M15 listing — a
+        model never sees another model's samples). The result keeps
+        the authoritative M15 (created_at, sample_id) ASCENDING order.
+        A valid tokenizer with no samples for the model returns [].
+        Read-only, never writes.
+        """
+        # existence: raises FileNotFoundError (404 at the API)
+        self.tokenizers.load(tokenizer_id)
+        return [r for r in self.list_samples(model_id)
+                if r.tokenizer_id == tokenizer_id]
+
 
     # ------------------------------------------------------------------ #
     # The run (preflight everything before creating any artifact)

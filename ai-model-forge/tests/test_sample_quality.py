@@ -832,8 +832,9 @@ def test_api_openapi_exposes_sample_quality(api_client):
     # + 1 (M28 evaluations by-dataset)
     # + 1 (M29 comparisons by-dataset)
     # + 1 (M30 evaluations by-tokenizer)
-    # + 1 (M31 comparisons by-tokenizer) = 63
-    assert len(spec["paths"]) == 63
+    # + 1 (M31 comparisons by-tokenizer)
+    # + 1 (M32 samples by-tokenizer) = 64
+    assert len(spec["paths"]) == 64
 
 
 # =========================================================================== #
@@ -1068,8 +1069,9 @@ def test_api_openapi_records_route(api_client):
     # + 1 (M28 evaluations by-dataset)
     # + 1 (M29 comparisons by-dataset)
     # + 1 (M30 evaluations by-tokenizer)
-    # + 1 (M31 comparisons by-tokenizer) = 63
-    assert len(spec["paths"]) == 63
+    # + 1 (M31 comparisons by-tokenizer)
+    # + 1 (M32 samples by-tokenizer) = 64
+    assert len(spec["paths"]) == 64
 
 
 # =========================================================================== #
@@ -1291,8 +1293,9 @@ def test_api_openapi_by_sample_route(api_client):
     # + 1 (M28 evaluations by-dataset)
     # + 1 (M29 comparisons by-dataset)
     # + 1 (M30 evaluations by-tokenizer)
-    # + 1 (M31 comparisons by-tokenizer) -> 63
-    assert len(spec["paths"]) == 63
+    # + 1 (M31 comparisons by-tokenizer)
+    # + 1 (M32 samples by-tokenizer) -> 64
+    assert len(spec["paths"]) == 64
 
 
 # =========================================================================== #
@@ -1529,4 +1532,4 @@ def test_api_openapi_by_checkpoint_route(api_client):
     assert ("/api/v1/models/{model_id}/sample-quality/{evaluation_id}"
             in spec["paths"])
     # M18–M28 each added exactly one documented route -> 60
-    assert len(spec["paths"]) == 63
+    assert len(spec["paths"]) == 64

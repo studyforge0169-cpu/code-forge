@@ -781,12 +781,12 @@ def test_m27_api_404s_isolation_regressions_openapi(api_client):
     cmp_ = api_client.get(f"{MODELS}/{h['mid']}/comparisons/"
                           f"by-checkpoint/{h['ckpt']}")
     assert cmp_.status_code == 200 and cmp_.json() == []
-    # OpenAPI: 63 paths, the new path exactly once, GET-only, sampling
+    # OpenAPI: 64 paths, the new path exactly once, GET-only, sampling
     # tag, array of SampleRecord, registered before the generic route
     spec = api_client.get("/openapi.json").json()
     path = "/api/v1/models/{model_id}/samples/by-checkpoint/{checkpoint_id}"
     generic = "/api/v1/models/{model_id}/samples/{sample_id}"
-    assert len(spec["paths"]) == 63
+    assert len(spec["paths"]) == 64
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["sampling"]
@@ -797,3 +797,281 @@ def test_m27_api_404s_isolation_regressions_openapi(api_client):
     assert "SampleRecord" in spec["components"]["schemas"]
     assert list(spec["paths"]).index(path) < list(spec["paths"]) \
         .index(generic)
+
+
+# =========================================================================== #
+# M32: read-only per-tokenizer grouping of the sample history
+# =========================================================================== #
+
+BY_TOK = "/api/v1/models/{mid}/samples/by-tokenizer/{tok}"
+
+
+def _m32_state(env):
+    """M32 state on top of the shared module env (cached): two samples
+    under the env's ORIGINAL tokenizer, one under a fresh second
+    tokenizer (m32-tok2, vocab 500 — fits the big model), plus a third
+    tokenizer (m32-tok3) with ZERO samples anywhere. Returns
+    (s_a, s_b, s_c, tok2, tok3).
+    """
+    cached = getattr(env, "_m32", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    s_a = f.generate_sample(_g(env))
+    s_b = f.generate_sample(_g(env, strategy="temperature",
+                                temperature=0.8, seed=32,
+                                max_new_tokens=6))
+    tok2 = f.train_tokenizer(
+        TokenizerConfig(name="m32-tok2", vocab_size=500),
+        dataset_id=env.ds).id
+    s_c = f.generate_sample(_g(env, tokenizer_id=tok2))
+    tok3 = f.train_tokenizer(
+        TokenizerConfig(name="m32-tok3", vocab_size=450),
+        dataset_id=env.ds).id
+    env._m32 = (s_a, s_b, s_c, tok2, tok3)
+    return env._m32
+
+
+def test_m32_engine_grouping_parity_order_verbatim(env):
+    s_a, s_b, s_c, tok2, tok3 = _m32_state(env)
+    f = env.forge
+    tok1 = env.tok_big.id
+    for model_id, tok in ((env.big_model, tok1),
+                          (env.big_model, tok2),
+                          (env.small_model, env.tok_small.id)):
+        listing = f.list_samples(model_id)
+        got = f.list_samples_for_tokenizer(model_id, tok)
+        # parity with the authoritative M15 listing filtered by the
+        # persisted sample tokenizer identity; deterministic
+        # (created_at, sample_id) order; membership from the persisted
+        # field only; each sample EXACTLY ONCE
+        assert got == [r for r in listing if r.tokenizer_id == tok]
+        keyed = [(r.created_at, r.sample_id) for r in got]
+        assert keyed == sorted(keyed)
+        ids = [r.sample_id for r in got]
+        assert len(ids) == len(set(ids))
+        assert all(r.tokenizer_id == tok and r.model_id == model_id
+                   for r in got)
+        # verbatim payload parity with the M15 single-record getter
+        for r in got:
+            assert r == f.get_sample(model_id, r.sample_id)
+    # tok2 holds exactly the one sample generated with it; the
+    # persisted tokenizer identity travels VERBATIM (the paired
+    # tokenizer_hash audit field is preserved, never re-derived)
+    got2 = f.list_samples_for_tokenizer(env.big_model, tok2)
+    assert [r.sample_id for r in got2] == [s_c.sample_id]
+    assert all(r.tokenizer_id == tok2 for r in got2)
+    # explicit partition: groups over EVERY tokenizer that actually
+    # has samples under the big model are pairwise disjoint and cover
+    # the full listing exactly once (other tests may add samples with
+    # the small tokenizer — discovery, not fixed pairs)
+    listing_ids = {r.sample_id for r in f.list_samples(env.big_model)}
+    groups = {t: {r.sample_id for r in
+                  f.list_samples_for_tokenizer(env.big_model, t)}
+              for t in {r.tokenizer_id
+                        for r in f.list_samples(env.big_model)}}
+    flat = [i for g in groups.values() for i in g]
+    assert set(flat) == listing_ids
+    assert len(flat) == len(set(flat)) == len(listing_ids)
+    assert tok1 in groups and {s_a.sample_id, s_b.sample_id} <= groups[tok1]
+    assert groups[tok2] == {s_c.sample_id}
+
+
+def test_m32_engine_empty_404s_cross_model_read_only(env):
+    s_a, s_b, s_c, tok2, tok3 = _m32_state(env)
+    f = env.forge
+    # fresh tokenizer with zero samples anywhere -> []
+    assert f.list_samples_for_tokenizer(env.big_model, tok3) == []
+    # model-scoped empty: tok2 is globally valid (it generated one of
+    # the big model's samples) but the small model has none with it
+    assert f.list_samples_for_tokenizer(env.small_model, tok2) == []
+    # cross-model isolation: the two listings are disjoint and no
+    # model's group ever contains the other's sample ids
+    small_ids = {r.sample_id
+                 for r in f.list_samples(env.small_model)}
+    big_ids = {r.sample_id for r in f.list_samples(env.big_model)}
+    assert small_ids.isdisjoint(big_ids)
+    for tok in (tok2, tok3, env.tok_big.id, env.tok_small.id):
+        big_group = {r.sample_id for r in
+                     f.list_samples_for_tokenizer(env.big_model, tok)}
+        small_group = {r.sample_id for r in
+                       f.list_samples_for_tokenizer(env.small_model, tok)}
+        assert big_group <= big_ids and small_group <= small_ids
+        assert big_group.isdisjoint(small_group)
+    # unknown model / unknown tokenizer -> FileNotFoundError (404 at API)
+    with pytest.raises(FileNotFoundError):
+        f.list_samples_for_tokenizer("ghost-model-32", env.tok_big.id)
+    with pytest.raises(FileNotFoundError):
+        f.list_samples_for_tokenizer(env.big_model, "ghost-tok-32")
+    # read-only: the filter never writes sample manifests
+    root = f.storage.root / "samples"
+    before = {p.relative_to(root).as_posix()
+              for p in root.rglob("*") if p.is_file()}
+    f.list_samples_for_tokenizer(env.big_model, env.tok_big.id)
+    f.list_samples_for_tokenizer(env.big_model, tok2)
+    f.list_samples_for_tokenizer(env.big_model, tok3)
+    f.list_samples_for_tokenizer(env.small_model, env.tok_small.id)
+    after = {p.relative_to(root).as_posix()
+             for p in root.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_m32_engine_repeated_calls_identical(env):
+    s_a, s_b, s_c, tok2, tok3 = _m32_state(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_samples_for_tokenizer(env.big_model,
+                                          env.tok_big.id)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_samples_for_tokenizer(env.big_model,
+                                              env.tok_big.id)]
+        assert again == first
+
+
+def _train_extra_tokenizer(api_client, tag: str, ds_id: str,
+                           vocab: int) -> str:
+    tr = api_client.post("/api/v1/tokenizers/train",
+                         data={"config": json.dumps(
+                             {"name": f"api15-{tag}-tok",
+                              "vocab_size": vocab}),
+                               "dataset_id": ds_id})
+    assert tr.status_code == 201, tr.text
+    return tr.json()["tokenizer"]["id"]
+
+
+def test_m32_api_by_tokenizer_grouping_partition_determinism(api_client):
+    h = _http_env(api_client, "m32a")
+    # a fresh dataset hosts two extra tokenizers: tok2 (with samples)
+    # and tok3 (zero samples anywhere); both fit the model vocab 640
+    up = api_client.post("/api/v1/datasets/upload",
+                         files=[("files", ("m32a2.txt", _corpus(120, "m32a2"),
+                                           "text/plain"))],
+                         data={"name": "api15-m32a2-ds"})
+    assert up.status_code == 201, up.text
+    ds2 = up.json()["dataset_id"]
+    tok2 = _train_extra_tokenizer(api_client, "m32a2", ds2, 500)
+    tok3 = _train_extra_tokenizer(api_client, "m32a3", ds2, 450)
+
+    g1 = api_client.post(GENERATE, json=_gen_body(h)).json()
+    g2 = api_client.post(GENERATE, json=_gen_body(
+        h, strategy="temperature", temperature=0.8, seed=7)).json()
+    g3 = api_client.post(GENERATE, json=_gen_body(
+        h, tokenizer_id=tok2)).json()
+    g4 = api_client.post(GENERATE, json=_gen_body(
+        h, tokenizer_id=tok2, strategy="temperature", temperature=0.8,
+        seed=13)).json()
+
+    url = BY_TOK.format(mid=h["mid"], tok=h["tok"])
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # authoritative-filter parity: exact subset of the M15 listing
+    # whose persisted tokenizer_id matches, in the same order
+    listing = api_client.get(f"{MODELS}/{h['mid']}/samples").json()
+    assert recs == [x for x in listing
+                    if x["tokenizer_id"] == h["tok"]]
+    assert {x["sample_id"] for x in recs} == {g1["sample_id"],
+                                              g2["sample_id"]}
+    keyed = [(x["created_at"], x["sample_id"]) for x in recs]
+    assert keyed == sorted(keyed)
+    # verbatim: each element is byte-equal to its detail-getter payload
+    by_id = {x["sample_id"]: x for x in recs}
+    assert by_id[g1["sample_id"]] == g1
+    assert by_id[g2["sample_id"]] == g2
+    for x in recs:
+        one = api_client.get(
+            f"{MODELS}/{h['mid']}/samples/{x['sample_id']}")
+        assert one.status_code == 200 and one.json() == x
+    # deterministic: three repeats return identical raw bytes
+    raws = {api_client.get(url).content for _ in range(3)}
+    assert len(raws) == 1
+    # partition: tok2 holds exactly its own two samples, disjoint from
+    # the original tokenizer's group, together the full listing
+    recs2 = api_client.get(BY_TOK.format(mid=h["mid"], tok=tok2)).json()
+    assert {x["sample_id"] for x in recs2} == {g3["sample_id"],
+                                               g4["sample_id"]}
+    ids1 = {x["sample_id"] for x in recs}
+    ids2 = {x["sample_id"] for x in recs2}
+    assert ids1.isdisjoint(ids2)
+    assert ids1 | ids2 == {x["sample_id"] for x in listing}
+    # valid tokenizer with zero samples for the model -> [] (200)
+    empty = api_client.get(BY_TOK.format(mid=h["mid"], tok=tok3))
+    assert empty.status_code == 200 and empty.json() == []
+    # no side effects: the filter itself added no records
+    assert len(api_client.get(
+        f"{MODELS}/{h['mid']}/samples").json()) == 4
+
+
+def test_m32_api_404s_isolation_regressions_openapi(api_client):
+    h = _http_env(api_client, "m32b")
+    h2 = _http_env(api_client, "m32c")     # second real model
+    g1 = api_client.post(GENERATE, json=_gen_body(h)).json()
+
+    # 404s: unknown model / unknown tokenizer (two ghost forms)
+    assert api_client.get(BY_TOK.format(mid="ghost-model-32",
+                                        tok=h["tok"])).status_code == 404
+    assert api_client.get(BY_TOK.format(mid=h["mid"],
+                                        tok="ghost-tok-32")).status_code == 404
+    assert api_client.get(
+        f"{MODELS}/{h['mid']}/samples/by-tokenizer/"
+        "m32--not-a-real-tokenizer-id").status_code == 404
+    assert api_client.get(BY_TOK.format(mid="ghost-model-32",
+                                        tok="ghost-tok-32")).status_code == 404
+
+    # cross-model isolation: tokenizers are global, but the other
+    # model's group is empty (scoping from the model's own listing)
+    iso = api_client.get(BY_TOK.format(mid=h2["mid"], tok=h["tok"]))
+    assert iso.status_code == 200 and iso.json() == []
+
+    # M15 listing/getter intact
+    listing = api_client.get(f"{MODELS}/{h['mid']}/samples").json()
+    assert [x["sample_id"] for x in listing] == [g1["sample_id"]]
+    got = api_client.get(f"{MODELS}/{h['mid']}/samples/{g1['sample_id']}")
+    assert got.status_code == 200 and got.json() == g1
+
+    # M27 by-checkpoint regression: same listing, other grouping
+    byck = api_client.get(f"{MODELS}/{h['mid']}/samples/by-checkpoint/"
+                          f"{h['ckpt']}").json()
+    assert [x["sample_id"] for x in byck] == [g1["sample_id"]]
+    # generic detail getter still 404s ghost ids (no route capture)
+    assert api_client.get(
+        f"{MODELS}/{h['mid']}/samples/ghost-sample-32").status_code == 404
+
+    # M30 evaluation-by-tokenizer regression (training produced evals
+    # with h's tokenizer): parity with the M4 listing filtered
+    evs = api_client.get(f"{MODELS}/{h['mid']}/evaluations").json()
+    evt = api_client.get(f"{MODELS}/{h['mid']}/evaluations/by-tokenizer/"
+                         f"{h['tok']}").json()
+    assert evt == [e for e in evs if e["tokenizer_id"] == h["tok"]]
+    # M31 comparison-by-tokenizer regression: route intact (no
+    # comparisons exist for this fresh model -> 200 + [])
+    cmp_t = api_client.get(f"{MODELS}/{h['mid']}/comparisons/by-tokenizer/"
+                           f"{h['tok']}")
+    assert cmp_t.status_code == 200 and cmp_t.json() == []
+
+    # OpenAPI: 64 paths, the new path exactly once, GET-only, tag
+    # sampling, SampleRecord items; route order M27 by-checkpoint <
+    # by-tokenizer < generic detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
+    # = 64
+    assert len(spec["paths"]) == 64
+    path = ("/api/v1/models/{model_id}/samples/by-tokenizer"
+            "/{tokenizer_id}")
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["sampling"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/SampleRecord"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/samples/by-checkpoint/"
+                      "{checkpoint_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/samples/{sample_id}")

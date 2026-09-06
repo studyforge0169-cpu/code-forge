@@ -618,6 +618,27 @@ class ModelForge:
         return self.samples.list_samples_for_checkpoint(
             model_id, checkpoint_id)
 
+    def list_samples_for_tokenizer(self, model_id: str,
+                                   tokenizer_id: str
+                                   ) -> list[SampleRecord]:
+        """Immutable M15 samples of ONE model generated with ONE
+        tokenizer (M32 read-only access).
+
+        The tokenizer must exist in the GLOBAL M2 tokenizer registry
+        (unknown tokenizer -> FileNotFoundError -> 404); model scoping
+        comes from the model's own M15 listing. Returns the
+        authoritative M15 listing filtered by the persisted sample
+        tokenizer identity — every sample carries a required
+        non-nullable top-level tokenizer_id (plus its matching
+        tokenizer_hash, preserved verbatim) and belongs to the request
+        only when that persisted id matches VERBATIM (nothing is
+        inferred from filenames, checkpoints or hashes; no
+        latest-tokenizer substitution) — in the M15 (created_at,
+        sample_id) order. A valid tokenizer with no samples for the
+        model returns []. Read-only, never writes."""
+        return self.samples.list_samples_for_tokenizer(
+            model_id, tokenizer_id)
+
     # ------------------------------------------------------------------ #
     # Sample quality (per-sample likelihood measurement; M16)
     # ------------------------------------------------------------------ #

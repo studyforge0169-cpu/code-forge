@@ -410,6 +410,21 @@ def index() -> HTMLResponse:
         exact M5 ordering; unknown model/tokenizer -> 404; a tokenizer
         with no comparisons for the model -> []). Pure data access —
         no aggregates, zero storage growth.</li>
+
+      <li><b>M32 sample history by tokenizer</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/samples/by-tokenizer/&#123;tokenizer&#125;</code>,
+        answers "which immutable M15 samples of this model were
+        generated with this tokenizer?": the model's authoritative M15
+        listing filtered by the persisted sample tokenizer identity
+        (every sample carries a required non-nullable top-level
+        tokenizer_id plus its matching tokenizer_hash, preserved
+        verbatim), each matching sample EXACTLY ONCE, the persisted id
+        matched VERBATIM, after the tokenizer is validated through the
+        existing GLOBAL registry (model scoping from the model's own
+        listing; full record payloads, exact M15 ordering; unknown
+        model/tokenizer -> 404; a tokenizer with no samples for the
+        model -> []). Pure data access — no aggregates, no generation,
+        zero storage growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -435,6 +450,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-checkpoint/&#123;ckpt&#125;</code> — comparisons involving ONE checkpoint on either side (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-dataset/&#123;ds&#125;</code> — comparisons of ONE model over ONE dataset (read-only, deterministic, versions verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-tokenizer/&#123;tok&#125;</code> — comparisons of ONE model with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-tokenizer/&#123;tok&#125;</code> — samples of ONE model generated with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/&#123;comp&#125;</code> — one comparison record</li>
       <li><code>POST  {prefix}/gates/evaluate</code> — stage gate: policy + candidate → passed / failed decision</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions</code> — immutable gate decision history</li>
@@ -1440,7 +1456,8 @@ def run_workflow_recipe(recipe_id: str,
 
 # --------------------------------------------------------------------------- #
 # Checkpoint sampling (Milestone 15 — deterministic text generation, inference;
-# Milestone 27 adds the read-only by-checkpoint grouping of the sample history)
+# Milestone 27 adds the read-only by-checkpoint grouping of the sample history;
+# Milestone 32 adds the read-only by-tokenizer grouping of the sample history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/samples/generate", response_model=SampleRecord,
@@ -1505,6 +1522,36 @@ def list_samples_by_checkpoint(model_id: str, checkpoint_id: str
     "by-checkpoint" segment is not a sample id.)"""
     try:
         return _forge().list_samples_for_checkpoint(model_id, checkpoint_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/samples/by-tokenizer/{tokenizer_id}",
+         response_model=list[SampleRecord], tags=["sampling"])
+def list_samples_by_tokenizer(model_id: str, tokenizer_id: str
+                              ) -> list[SampleRecord]:
+    """Immutable M15 samples generated with ONE tokenizer (M32).
+
+    Read-only per-tokenizer grouping: validates the tokenizer through
+    the GLOBAL M2 tokenizer registry (an unknown tokenizer is 404 —
+    the same registry getter GET /tokenizers/{id} exposes; model
+    scoping comes from the model's own M15 listing, so a model never
+    sees another model's samples; nothing is inferred from filenames),
+    then returns the model's authoritative M15 listing filtered by the
+    persisted sample tokenizer identity — every sample carries a
+    required non-nullable top-level tokenizer_id (plus its matching
+    tokenizer_hash, preserved verbatim; no M15 schema change) and
+    belongs to the request only when that persisted id matches
+    VERBATIM (never a latest-tokenizer substitution; M2/M15 have no
+    tokenizer versioning). Complete verbatim payloads (prompt, token
+    ids, output text, strategy, result_hash included) in the exact M15
+    (created_at, sample_id) order; a valid tokenizer with no samples
+    for the model returns [] (never 404). No new metrics, no
+    generation, no writes. (Must stay registered before
+    /samples/{sample_id}; the literal "by-tokenizer" segment is not a
+    sample id.)"""
+    try:
+        return _forge().list_samples_for_tokenizer(model_id, tokenizer_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
