@@ -24,6 +24,7 @@ from .recipes import RecipeEngine
 from .sampling import SamplingEngine
 from .sample_quality import SampleQualityEngine
 from .schemas import (
+    ComparisonRecord,
     ModelCreateRequest,
     ModelRecord,
     PolicyCreateRequest,
@@ -307,6 +308,25 @@ class ModelForge:
 
     def get_comparison(self, model_id: str, comparison_id: str):
         return self.comparison.get_comparison(model_id, comparison_id)
+
+    def list_comparisons_for_checkpoint(self, model_id: str,
+                                        checkpoint_id: str
+                                        ) -> list[ComparisonRecord]:
+        """Immutable M5 comparison records involving ONE checkpoint (M26
+        read-only access).
+
+        The checkpoint must be registered in the model's M3 checkpoint
+        registry (unknown checkpoint, or a checkpoint id belonging to
+        another model -> FileNotFoundError -> 404). Returns the model's
+        authoritative M5 listing filtered by the persisted side states
+        — a comparison is included when EITHER side records
+        state_kind "checkpoint" with the requested checkpoint_id
+        (current-state sides never match); each record appears exactly
+        once even when both sides match (unique comparison identities)
+        in the M5 (created_at, comparison_id) order. A checkpoint with
+        no matching comparisons returns []. Read-only, never writes."""
+        return self.comparison.list_comparisons_for_checkpoint(
+            model_id, checkpoint_id)
 
     # ------------------------------------------------------------------ #
     # Stage gates (thin delegation; M6)

@@ -128,6 +128,46 @@ class ComparisonEngine:
         return ComparisonRecord(**read_json(path))
 
     # ------------------------------------------------------------------ #
+    # M26: per-checkpoint access (read-only)
+    # ------------------------------------------------------------------ #
+
+    def list_comparisons_for_checkpoint(
+            self, model_id: str, checkpoint_id: str) -> list[ComparisonRecord]:
+        """Immutable M5 comparisons involving ONE checkpoint of ONE model
+        (M26).
+
+        A comparison involves the checkpoint when EITHER persisted side
+        records ``state_kind == "checkpoint"`` with that
+        ``checkpoint_id`` (current-state sides keep ``checkpoint_id``
+        None and never match — nothing is inferred from hashes,
+        timestamps or filenames). Resolution: unknown model or
+        unregistered checkpoint -> FileNotFoundError; ownership is
+        validated through the model's M3 checkpoint registry
+        (``TrainingEngine.get_checkpoint``) — a checkpoint id belonging
+        to another model is not registered under this model and raises
+        FileNotFoundError, exactly like an unknown one. The result is
+        the model's authoritative M5 listing above (the exact engine
+        parse + deterministic (created_at, comparison_id) ASCENDING
+        order) filtered by the persisted side states; because the
+        listing holds each record exactly once, a comparison matching on
+        BOTH sides (A = B = checkpoint) appears exactly once — the
+        response is a unique list of comparison identities. A valid
+        checkpoint with no matching comparisons returns []. Read-only,
+        never writes.
+        """
+        # existence + ownership: raises FileNotFoundError (404 at the API)
+        self.training.get_checkpoint(model_id, checkpoint_id)
+
+        def involves(rec: ComparisonRecord) -> bool:
+            for side in (rec.state_a, rec.state_b):
+                if (side.state_kind == EvalStateKind.CHECKPOINT
+                        and side.checkpoint_id == checkpoint_id):
+                    return True
+            return False
+
+        return [r for r in self.list_comparisons(model_id) if involves(r)]
+
+    # ------------------------------------------------------------------ #
     # Canonical flow (API): one model, one shared probe, two states
     # ------------------------------------------------------------------ #
 

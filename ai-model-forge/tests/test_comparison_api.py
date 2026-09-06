@@ -225,3 +225,150 @@ def test_corrupt_checkpoint_comparison_409(api_client):
     assert api_client.get(f"{MODELS}/{model_id}/evaluations").json() == []
     dl = api_client.get(f"{MODELS}/{model_id}/weights")
     assert dl.status_code == 200
+
+
+# =========================================================================== #
+# M26: read-only per-checkpoint grouping of the comparison history (API)
+# =========================================================================== #
+
+BY_CHECKPOINT = "/api/v1/models/{mid}/comparisons/by-checkpoint/{ck}"
+
+
+def test_m26_api_by_checkpoint_grouping_dedup_and_determinism(api_client):
+    ds_id, tok_id, model_id, ckpts = _prepare(api_client, "m26a", TAIL_A,
+                                              epochs=30)
+    ck1 = ckpts[2]["checkpoint_id"]
+    ck2 = ckpts[-1]["checkpoint_id"]
+    # cross-checkpoint A/B, same-checkpoint A=B, current-vs-checkpoint and
+    # current-vs-current comparisons
+    r1 = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                              ck1, ck2, seed=2651)).json()
+    r2 = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                              ck1, ck1, seed=2652)).json()
+    r3 = api_client.post(COMP_RUN, json=_comp(
+        model_id, ds_id, tok_id, ck2, ck2, seed=2653,
+        state_a={"state_kind": "current"})).json()
+    r4 = api_client.post(COMP_RUN, json=_comp(
+        model_id, ds_id, tok_id, ck2, ck2, seed=2654,
+        state_a={"state_kind": "current"},
+        state_b={"state_kind": "current"})).json()
+    url = BY_CHECKPOINT.format(mid=model_id, ck=ck1)
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # exactly r1 + r2 under ck1 — the A=B record appears ONCE — in the
+    # deterministic M5 order, verbatim payloads equal to the run
+    # responses (existing representation)
+    assert [x["comparison_id"] for x in recs] == \
+        [r1["comparison_id"], r2["comparison_id"]]
+    assert len({x["comparison_id"] for x in recs}) == len(recs)
+    assert [(x["created_at"], x["comparison_id"]) for x in recs] == \
+        sorted((x["created_at"], x["comparison_id"]) for x in recs)
+    by_id = {x["comparison_id"]: x for x in recs}
+    assert by_id[r1["comparison_id"]] == r1
+    assert by_id[r2["comparison_id"]] == r2
+    # parity with the existing M5 listing filtered by the persisted sides
+    listing = api_client.get(f"{MODELS}/{model_id}/comparisons").json()
+    assert recs == [x for x in listing
+                    if any(s["state_kind"] == "checkpoint"
+                           and s["checkpoint_id"] == ck1
+                           for s in (x["state_a"], x["state_b"]))]
+    # ck2 history: r1 (side B) + r3 (side B) exactly once each; the
+    # same-checkpoint r2 stays under ck1 only; the current-vs-current r4
+    # and the current side of r3 never match anything
+    got2 = api_client.get(BY_CHECKPOINT.format(mid=model_id, ck=ck2))
+    assert got2.status_code == 200
+    assert [x["comparison_id"] for x in got2.json()] == \
+        [r1["comparison_id"], r3["comparison_id"]]
+    assert all(r4["comparison_id"] not in
+               {x["comparison_id"] for x in body} for body in
+               (recs, got2.json()))
+    # repeated GET returns identical JSON (and identical raw bytes)
+    raw1 = api_client.get(url).content
+    raw2 = api_client.get(url).content
+    assert raw1 == raw2 and json.loads(raw1) == recs
+    # valid checkpoint with no comparisons -> 200 + [] (a fresh model's
+    # checkpoint)
+    ds2, tok2, mid2, ck2b = _prepare(api_client, "m26empty", TAIL_B,
+                                     epochs=8)
+    empty = api_client.get(BY_CHECKPOINT.format(mid=mid2,
+                                                ck=ck2b[-1]["checkpoint_id"]))
+    assert empty.status_code == 200 and empty.json() == []
+
+
+def test_m26_api_404s_isolation_and_prior_surfaces(api_client):
+    ds_id, tok_id, model_id, ckpts = _prepare(api_client, "m26e", TAIL_A,
+                                              epochs=8)
+    ck = ckpts[-1]["checkpoint_id"]
+    rec = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                               ckpts[0]["checkpoint_id"],
+                                               ck, seed=2661)).json()
+    # unknown model -> 404 (even with a real checkpoint id)
+    assert api_client.get(BY_CHECKPOINT.format(mid="ghost-model-26",
+                                               ck=ck)).status_code == 404
+    # unknown checkpoint -> 404 (even with a real model id)
+    assert api_client.get(BY_CHECKPOINT.format(mid=model_id,
+                                               ck="ghost-ck-26")) \
+        .status_code == 404
+    # cross-model isolation: another real model + this real checkpoint id
+    # -> 404 (checkpoint ids are model-scoped through the M3 registry)
+    cfg = {"name": "api26-iso-b", "vocab_size": 640, "context_length": 64,
+           "hidden_size": 64, "n_layers": 2, "n_heads": 4, "n_kv_heads": 2,
+           "intermediate_size": 128}
+    mid_b = api_client.post(MODELS, json={"config": cfg}).json()["model"]["id"]
+    assert api_client.get(BY_CHECKPOINT.format(mid=mid_b, ck=ck)) \
+        .status_code == 404
+    # M5 listing/detail unchanged; by-checkpoint never shadows the detail
+    # getter
+    listing = api_client.get(f"{MODELS}/{model_id}/comparisons").json()
+    assert rec["comparison_id"] in {x["comparison_id"] for x in listing}
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/{rec['comparison_id']}") \
+        .json() == rec
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/ghost-comp") \
+        .status_code == 404
+    # M6 gate surface intact (decisions listing + by-policy ghost 404)
+    assert api_client.get(
+        f"{MODELS}/{model_id}/gates/decisions").status_code == 200
+    assert api_client.get(
+        f"{MODELS}/{model_id}/gates/decisions/by-policy/ghost-pol-26") \
+        .status_code == 404
+    # M20/M24/M25 checkpoint-history surfaces intact on the same model
+    assert api_client.get(
+        f"{MODELS}/{model_id}/sample-quality/by-checkpoint/{ck}") \
+        .status_code == 200
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-checkpoint/{ck}") \
+        .status_code == 200
+    assert api_client.get(
+        f"{MODELS}/{model_id}/suite-runs/by-checkpoint/{ck}") \
+        .status_code == 200
+    # M21/M22 intact (registered suite, no runs)
+    probe = {"dataset_id": ds_id, "split": "validation",
+             "tokenizer_id": tok_id, "batch_size": 8, "max_seq_len": 32,
+             "seed": 2671}
+    assert api_client.post("/api/v1/probe-suites",
+                           json={"suite_id": "api26-suite",
+                                 "probes": [probe]}).status_code == 201
+    assert api_client.get(
+        f"{MODELS}/{model_id}/suite-runs/by-suite/api26-suite").json() == []
+    assert api_client.get(
+        f"{MODELS}/{model_id}/suite-runs/by-suite/api26-suite/summary") \
+        .json()["total_count"] == 0
+    # new route documented correctly in OpenAPI (GET, right tag, schema)
+    spec = api_client.get("/openapi.json").json()
+    path = ("/api/v1/models/{model_id}/comparisons/by-checkpoint/"
+            "{checkpoint_id}")
+    assert path in spec["paths"]
+    ops = spec["paths"][path]
+    assert set(ops) == {"get"} and ops["get"]["tags"] == ["comparison"]
+    schema = (ops["get"]["responses"]["200"]["content"]
+              ["application/json"]["schema"])
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/ComparisonRecord"}
+    assert "ComparisonRecord" in spec["components"]["schemas"]
+    # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
+    # + 1 (M21) + 1 (M22) + 1 (M23) + 1 (M24) + 1 (M25)
+    # + 1 (M26 comparisons by-checkpoint) = 58
+    assert len(spec["paths"]) == 58

@@ -340,5 +340,6 @@ def test_m24_api_404s_isolation_and_prior_surfaces(api_client):
         "$ref": "#/components/schemas/EvaluationRecord"}
     assert "EvaluationRecord" in spec["components"]["schemas"]
     # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
-    # + 1 (M21) + 1 (M22) + 1 (M23) + 1 (M24) + 1 (M25) = 57
-    assert len(spec["paths"]) == 57
+    # + 1 (M21) + 1 (M22) + 1 (M23) + 1 (M24) + 1 (M25)
+    # + 1 (M26 comparisons by-checkpoint) = 58
+    assert len(spec["paths"]) == 58

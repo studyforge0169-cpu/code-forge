@@ -329,6 +329,18 @@ def index() -> HTMLResponse:
         a checkpoint of another model -> 404; a valid checkpoint without
         runs -> []; current-state runs never appear). Pure data access —
         no aggregation, zero storage growth.</li>
+
+      <li><b>M26 comparison history by checkpoint</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/comparisons/by-checkpoint/&#123;checkpoint&#125;</code>,
+        answers "which immutable M5 comparisons involve this checkpoint on
+        either side?": the model's authoritative M5 listing filtered by
+        the persisted side states recorded in each record (both sides
+        examined; a same-checkpoint A=B comparison appears exactly once;
+        current-state sides never match), after checkpoint ownership is
+        validated through the M3 registry (full record payloads, exact M5
+        ordering; unknown model/checkpoint or a checkpoint of another
+        model -> 404; a checkpoint with no matching comparisons -> []).
+        Pure data access — no new metrics, zero storage growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -349,6 +361,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/&#123;eval&#125;</code> — one evaluation record</li>
       <li><code>POST  {prefix}/comparisons/run</code> — A/B comparison (improved / regressed / unchanged)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons</code> — immutable comparison history</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-checkpoint/&#123;ckpt&#125;</code> — comparisons involving ONE checkpoint on either side (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/&#123;comp&#125;</code> — one comparison record</li>
       <li><code>POST  {prefix}/gates/evaluate</code> — stage gate: policy + candidate → passed / failed decision</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions</code> — immutable gate decision history</li>
@@ -751,7 +764,8 @@ def get_evaluation(model_id: str, eval_id: str) -> EvaluationRecord:
 
 
 # --------------------------------------------------------------------------- #
-# Comparison routes (Milestone 5 — evidence-based A/B state comparison)
+# Comparison routes (Milestone 5 — evidence-based A/B state comparison;
+# Milestone 26 adds the read-only by-checkpoint grouping of the immutable history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/comparisons/run", response_model=ComparisonRecord, tags=["comparison"])
@@ -779,6 +793,34 @@ def list_comparisons(model_id: str) -> list[dict[str, Any]]:
     try:
         return [r.model_dump(mode="json")
                 for r in _forge().list_comparisons(model_id)]
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/comparisons/by-checkpoint/{checkpoint_id}",
+         response_model=list[ComparisonRecord], tags=["comparison"])
+def list_comparisons_by_checkpoint(model_id: str, checkpoint_id: str
+                                   ) -> list[ComparisonRecord]:
+    """Immutable M5 comparisons involving ONE checkpoint (M26).
+
+    Read-only per-checkpoint grouping: validates the checkpoint through
+    the model's M3 checkpoint registry (an unknown checkpoint, or a
+    checkpoint id belonging to another model, is 404 — checkpoint ids
+    are model-scoped; nothing is inferred from filenames), then returns
+    the model's authoritative M5 listing filtered by the persisted side
+    states — a comparison is included when EITHER side records
+    state_kind "checkpoint" with the requested checkpoint_id
+    (current-state sides keep checkpoint_id null and never match).
+    Complete verbatim payloads (verdict/losses included) in the exact
+    M5 (created_at, comparison_id) order; each comparison appears
+    exactly once even when BOTH sides match (A = B = checkpoint — the
+    response is records, not matching sides). A valid checkpoint with
+    no matching comparisons returns []. No new metrics, no writes.
+    (Must stay registered before /comparisons/{comparison_id}; the
+    literal "by-checkpoint" segment is not a comparison id.)"""
+    try:
+        return _forge().list_comparisons_for_checkpoint(model_id,
+                                                        checkpoint_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

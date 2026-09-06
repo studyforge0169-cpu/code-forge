@@ -20,6 +20,7 @@ from app.schemas import (
     ComparisonRequest,
     ComparisonState,
     EvaluationConfig,
+    EvalStateKind,
     ModelCreateRequest,
     TokenizerConfig,
     TrainingConfig,
@@ -516,3 +517,130 @@ def test_current_vs_checkpoint_comparison(env):
     assert rec.state_b.state_kind.value == "checkpoint"
     assert rec.state_a.state_hash == rec.state_b.state_hash
     assert rec.verdict.value == "unchanged"
+
+
+# =========================================================================== #
+# M26: read-only per-checkpoint grouping of the comparison history
+# =========================================================================== #
+
+def _m26_env(env):
+    """M26 state on top of the shared module env (cached): comparisons
+    spread over three checkpoints — a cross-checkpoint A/B, a
+    same-checkpoint A=B, a current-vs-checkpoint and a current-vs-current
+    — plus a second trained model whose checkpoint has zero comparisons.
+    Returns (ckE, ckF, ckR, c_x, c_same, c_cur_ck, c_cur_cur, b, b_ck).
+    """
+    cached = getattr(env, "_m26_state", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    ckE = env.imp_early.checkpoint_id
+    ckF = env.imp_final.checkpoint_id
+    ckR = env.reg_final.checkpoint_id
+    c_x = f.run_comparison(env.cmp(ckE, ckF, seed=2601))
+    c_same = f.run_comparison(env.cmp(ckE, ckE, seed=2602))    # A = B
+    c_cur_ck = f.run_comparison(env.cmp(ckR, ckR, seed=2603).model_copy(
+        update={"state_a": ComparisonState(state_kind="current")}))
+    c_cur_cur = f.run_comparison(env.cmp(ckF, ckF, seed=2604).model_copy(
+        update={"state_a": ComparisonState(state_kind="current"),
+                "state_b": ComparisonState(state_kind="current")}))
+    b = f.create_model(ModelCreateRequest(config=TransformerConfig(
+        name="m26-b", vocab_size=640, context_length=64, hidden_size=64,
+        n_layers=2, n_heads=4, n_kv_heads=2, intermediate_size=128,
+        seed=26)))[0].id
+    up = f.upload_dataset([("m26b.txt", _domain_bytes(TAIL_A, 240))],
+                          name="m26-b-ds")
+    tb = f.train_tokenizer(TokenizerConfig(name="m26-b-tok", vocab_size=600),
+                           dataset_id=up["dataset_id"])
+    f.tokenize_dataset(up["dataset_id"], tb.id)
+    f.run_training(TrainingConfig(
+        method="continued_pretraining", model_id=b, dataset_id=up["dataset_id"],
+        tokenizer_id=tb.id, learning_rate=3e-3, batch_size=8, max_seq_len=32,
+        steps=8, eval_every_steps=4, keep_best=False, seed=26))
+    b_ck = f.list_checkpoints(b)[0].checkpoint_id
+    env._m26_state = (ckE, ckF, ckR, c_x, c_same, c_cur_ck, c_cur_cur,
+                      b, b_ck)
+    return env._m26_state
+
+
+def test_m26_engine_filters_by_persisted_sides_and_model(env):
+    ckE, ckF, ckR, c_x, c_same, c_cur_ck, c_cur_cur, b, b_ck = _m26_env(env)
+    f = env.forge
+    listing = f.list_comparisons(env.model_id)
+
+    def expected(ck):
+        return [r for r in listing
+                if any(s.state_kind == EvalStateKind.CHECKPOINT
+                       and s.checkpoint_id == ck
+                       for s in (r.state_a, r.state_b))]
+
+    for ck in (ckE, ckF, ckR):
+        got = f.list_comparisons_for_checkpoint(env.model_id, ck)
+        # parity with the authoritative M5 listing filtered by the
+        # persisted side states; deterministic (created_at, comparison_id)
+        # order; every record involves the checkpoint on >= 1 side
+        assert got == expected(ck)
+        assert [(r.created_at, r.comparison_id) for r in got] == \
+            sorted((r.created_at, r.comparison_id) for r in got)
+        assert all(any(s.state_kind == EvalStateKind.CHECKPOINT
+                       and s.checkpoint_id == ck
+                       for s in (r.state_a, r.state_b)) for r in got)
+        assert all(r.model_id == env.model_id for r in got)
+        # unique comparison identities (a record never appears twice)
+        ids = [r.comparison_id for r in got]
+        assert len(ids) == len(set(ids))
+        # verbatim payload parity with the M5 single-record getter
+        for r in got:
+            assert r == f.get_comparison(env.model_id, r.comparison_id)
+    # same-checkpoint A=B comparison appears EXACTLY ONCE under ckE
+    got_e = f.list_comparisons_for_checkpoint(env.model_id, ckE)
+    assert [r.comparison_id for r in got_e].count(c_same.comparison_id) == 1
+    # current-vs-checkpoint: appears under ckR exactly once (its current
+    # side never matches anything; earlier module tests may have added
+    # further ckR records, hence the count-based check)
+    got_r = f.list_comparisons_for_checkpoint(env.model_id, ckR)
+    assert [r.comparison_id for r in got_r].count(
+        c_cur_ck.comparison_id) == 1
+    # current-vs-current comparison appears under NO checkpoint
+    for ck in (ckE, ckF, ckR):
+        assert c_cur_cur.comparison_id not in \
+            [r.comparison_id for r in
+             f.list_comparisons_for_checkpoint(env.model_id, ck)]
+
+
+def test_m26_engine_empty_404s_cross_model_and_read_only(env):
+    ckE, ckF, ckR, c_x, c_same, c_cur_ck, c_cur_cur, b, b_ck = _m26_env(env)
+    f = env.forge
+    # valid registered checkpoint with no comparisons -> []
+    assert f.list_comparisons_for_checkpoint(b, b_ck) == []
+    # cross-model: neither model can resolve the other's checkpoint id
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_checkpoint(b, ckE)
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_checkpoint(env.model_id, b_ck)
+    # unknown model -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_checkpoint("ghost-model-26", ckE)
+    # unknown checkpoint -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_checkpoint(env.model_id, "ghost-ck-26")
+    # read-only: the filter never writes comparison manifests
+    root = f.storage.model_dir(env.model_id) / "comparisons"
+    before = {p.relative_to(root).as_posix()
+              for p in root.rglob("*") if p.is_file()}
+    f.list_comparisons_for_checkpoint(env.model_id, ckE)
+    f.list_comparisons_for_checkpoint(b, b_ck)
+    after = {p.relative_to(root).as_posix()
+             for p in root.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_m26_engine_repeated_calls_identical(env):
+    ckE, _, _, _, _, _, _, _, _ = _m26_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_comparisons_for_checkpoint(env.model_id, ckE)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_comparisons_for_checkpoint(env.model_id, ckE)]
+        assert again == first

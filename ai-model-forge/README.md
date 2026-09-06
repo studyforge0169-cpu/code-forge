@@ -927,11 +927,49 @@ generation never trains, evaluates, scores, ranks or judges output.
   getter), M21 by-suite, M22 summary, the M13 dashboard and the
   M16–M24 surfaces are byte-identical before and after
 
+### Milestone 26 — comparison history by checkpoint
+  (`comparisons/by-checkpoint`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/comparisons/by-checkpoint/{checkpoint_id}` —
+  answers "which immutable M5 comparisons involve this checkpoint
+  state?" and nothing else
+- **two-sided semantics**: a comparison has `state_a` and `state_b`,
+  each a persisted `ComparisonSide`; a record belongs to the
+  checkpoint when **either** side records
+  `state_kind="checkpoint"` with the requested id. Same-checkpoint
+  A=B comparisons appear **exactly once** (dedup by comparison
+  identity, never by hash/timestamp/side combinations); current-state
+  sides (`checkpoint_id=null`) never match — nothing is inferred from
+  hashes, timestamps or filenames
+- **exact filtering**: ownership is validated through the model's M3
+  checkpoint registry first (an unknown checkpoint, or a checkpoint id
+  belonging to another model, is a 404 — checkpoint ids are
+  model-scoped). Returned records are verbatim `ComparisonRecord`
+  payloads (verdict and per-side losses included) in the exact M5
+  authoritative order ((created_at, comparison_id) ASCENDING); a valid
+  checkpoint with no comparisons is a deterministic `[]` — never a 404
+- **implementation is a reuse, not a second engine**: the engine method
+  `list_comparisons_for_checkpoint(model_id, checkpoint_id)` validates
+  through the existing M3 `get_checkpoint` registry (the same
+  ownership path M20/M24/M25 use) and filters the authoritative M5
+  `list_comparisons()` by the persisted side states; the facade and
+  route are thin pass-throughs registered **before** the generic
+  `/comparisons/{comparison_id}` detail getter. No duplicate manifest
+  parsing, no new storage, caches or indexes — repeated GETs are
+  byte-identical and the endpoint never writes
+- **isolation & boundaries**: a model only ever sees its own
+  comparisons; another model's comparisons are unreachable (ownership
+  resolves through the model-scoped M3 registry). Unknown
+  model/checkpoint -> existing 404s; valid checkpoint without
+  comparisons -> `[]`. M5 (run, listing, getter), M6 gates, M3
+  checkpoint resolution, the M13 dashboard and the M16–M25 surfaces
+  are byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 435 tests
+pytest                       # 440 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1411,6 +1449,7 @@ ai-model-forge/
     training.py        # training engine: schedules, streams, run, checkpoints, rollback
     evaluation.py      # evaluation engine: read-only state measurement (M4)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
+                       # + read-only by-checkpoint grouping of the history (M26)
     gates.py           # stage gates: policy-driven run decisions (M6)
                        # + read-only by-policy grouping of the history (M23)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
@@ -1423,7 +1462,7 @@ ai-model-forge/
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 435 tests across 20 suites
+  tests/               # 440 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
