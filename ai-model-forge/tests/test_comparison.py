@@ -761,3 +761,113 @@ def test_m29_engine_repeated_calls_identical(env):
         again = [r.model_dump(mode="json") for r in
                  f.list_comparisons_for_dataset(env.model_id, env.ds_b)]
         assert again == first
+
+
+# =========================================================================== #
+# M31: read-only per-tokenizer grouping of the comparison history
+# =========================================================================== #
+
+def _m31_env(env):
+    """M31 state on top of the shared module env (cached): a SECOND
+    tokenizer (m31-tok2, vocab 320) with which ds_a is tokenized and
+    ONE comparison runs (partitioning), plus a THIRD tokenizer
+    (m31-tok3) with zero comparisons. Returns (c_t2, tok2, tok3).
+    """
+    cached = getattr(env, "_m31_state", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    ckE, ckF = env.imp_early.checkpoint_id, env.imp_final.checkpoint_id
+    # one fresh record under the env's ORIGINAL tokenizer so the
+    # partition assertions hold even when earlier (deselected) tests
+    # have not run yet
+    f.run_comparison(env.cmp(ckE, ckF, tokenizer_id=env.tok_id,
+                             seed=3100))
+    tok2 = f.train_tokenizer(
+        TokenizerConfig(name="m31-tok2", vocab_size=320),
+        dataset_id=env.ds_a).id
+    f.tokenize_dataset(env.ds_a, tok2)
+    c_t2 = f.run_comparison(env.cmp(ckE, ckF, tokenizer_id=tok2,
+                                    seed=3101))
+    tok3 = f.train_tokenizer(
+        TokenizerConfig(name="m31-tok3", vocab_size=300),
+        dataset_id=env.ds_b).id
+    env._m31_state = (c_t2, tok2, tok3)
+    return env._m31_state
+
+
+def test_m31_engine_filters_by_persisted_tokenizer_identity(env):
+    c_t2, tok2, tok3 = _m31_env(env)
+    f = env.forge
+    tok1 = env.tok_id
+    listing = f.list_comparisons(env.model_id)
+    for tok in (tok1, tok2, tok3):
+        got = f.list_comparisons_for_tokenizer(env.model_id, tok)
+        # parity with the authoritative M5 listing filtered by the
+        # persisted shared-probe tokenizer identity; deterministic
+        # (created_at, comparison_id) order; unique comparison ids
+        assert got == [r for r in listing if r.tokenizer_id == tok]
+        keyed = [(r.created_at, r.comparison_id) for r in got]
+        assert keyed == sorted(keyed)
+        ids = [r.comparison_id for r in got]
+        assert len(ids) == len(set(ids))
+        assert all(r.tokenizer_id == tok and r.model_id == env.model_id
+                   for r in got)
+        for r in got:
+            assert r == f.get_comparison(env.model_id, r.comparison_id)
+    # tok2 holds exactly the one comparison run with it; the persisted
+    # tokenizer identity travels VERBATIM (no substitution/rewriting)
+    got2 = f.list_comparisons_for_tokenizer(env.model_id, tok2)
+    assert [r.comparison_id for r in got2] == [c_t2.comparison_id]
+    assert all(r.tokenizer_id == tok2 for r in got2)
+    # explicit partition: disjoint groups over the two populated
+    # tokenizers whose union is the full listing
+    under1 = {r.comparison_id for r in
+              f.list_comparisons_for_tokenizer(env.model_id, tok1)}
+    under2 = {r.comparison_id for r in got2}
+    assert under1 and under2 and under1.isdisjoint(under2)
+    assert under1 | under2 == {r.comparison_id for r in listing}
+
+
+def test_m31_engine_empty_404s_model_scoping_read_only(env):
+    c_t2, tok2, tok3 = _m31_env(env)
+    f = env.forge
+    _, _, _, _, _, _, _, b, b_ck = _m26_env(env)
+    # valid tokenizer with zero comparisons -> [] (fresh tok3; and the
+    # model-scoped empty case: tokenizers are global, b has none)
+    assert f.list_comparisons_for_tokenizer(env.model_id, tok3) == []
+    assert f.list_comparisons_for_tokenizer(b, env.tok_id) == []
+    # unknown model / unknown tokenizer -> FileNotFoundError (404 at API)
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_tokenizer("ghost-model-31", env.tok_id)
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_tokenizer(env.model_id, "ghost-tok-31")
+    # cross-model isolation: a's comparison ids never appear under b
+    leak = [r.comparison_id for r in
+            f.list_comparisons_for_tokenizer(b, env.tok_id)]
+    assert c_t2.comparison_id not in leak
+    # read-only: the filter never writes comparison manifests
+    def comp_files(mid):
+        root = f.storage.model_dir(mid) / "comparisons"
+        if not root.exists():
+            return set()
+        return {p.relative_to(root).as_posix()
+                for p in root.rglob("*") if p.is_file()}
+    before = (comp_files(env.model_id), comp_files(b))
+    f.list_comparisons_for_tokenizer(env.model_id, env.tok_id)
+    f.list_comparisons_for_tokenizer(env.model_id, tok2)
+    f.list_comparisons_for_tokenizer(b, env.tok_id)
+    f.list_comparisons_for_tokenizer(env.model_id, tok3)
+    assert (comp_files(env.model_id), comp_files(b)) == before
+
+
+def test_m31_engine_repeated_calls_identical(env):
+    c_t2, tok2, tok3 = _m31_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_comparisons_for_tokenizer(env.model_id, env.tok_id)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_comparisons_for_tokenizer(env.model_id,
+                                                 env.tok_id)]
+        assert again == first

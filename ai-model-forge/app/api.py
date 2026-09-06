@@ -396,6 +396,20 @@ def index() -> HTMLResponse:
         model/tokenizer -> 404; a tokenizer with no evaluations for
         the model -> []). Pure data access — no aggregates, zero
         storage growth.</li>
+
+      <li><b>M31 comparison history by tokenizer</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/comparisons/by-tokenizer/&#123;tokenizer&#125;</code>,
+        answers "which immutable M5 comparisons of this model measured
+        with this tokenizer?": the model's authoritative M5 listing
+        filtered by the persisted shared-probe tokenizer identity (a
+        comparison persists exactly ONE tokenizer_id — both sides
+        measure the same probe by construction), each matching
+        comparison EXACTLY ONCE (dedup by comparison identity), the
+        persisted id matched VERBATIM, after the tokenizer is
+        validated through the existing registry (full record payloads,
+        exact M5 ordering; unknown model/tokenizer -> 404; a tokenizer
+        with no comparisons for the model -> []). Pure data access —
+        no aggregates, zero storage growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -420,6 +434,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons</code> — immutable comparison history</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-checkpoint/&#123;ckpt&#125;</code> — comparisons involving ONE checkpoint on either side (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-dataset/&#123;ds&#125;</code> — comparisons of ONE model over ONE dataset (read-only, deterministic, versions verbatim)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-tokenizer/&#123;tok&#125;</code> — comparisons of ONE model with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/&#123;comp&#125;</code> — one comparison record</li>
       <li><code>POST  {prefix}/gates/evaluate</code> — stage gate: policy + candidate → passed / failed decision</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions</code> — immutable gate decision history</li>
@@ -886,7 +901,8 @@ def get_evaluation(model_id: str, eval_id: str) -> EvaluationRecord:
 # --------------------------------------------------------------------------- #
 # Comparison routes (Milestone 5 — evidence-based A/B state comparison;
 # Milestone 26 adds the read-only by-checkpoint grouping of the immutable history;
-# Milestone 29 adds the read-only by-dataset grouping of the immutable history)
+# Milestone 29 adds the read-only by-dataset grouping of the immutable history;
+# Milestone 31 adds the read-only by-tokenizer grouping of the immutable history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/comparisons/run", response_model=ComparisonRecord, tags=["comparison"])
@@ -975,6 +991,39 @@ def list_comparisons_by_dataset(model_id: str, dataset_id: str
     literal "by-dataset" segment is not a comparison id.)"""
     try:
         return _forge().list_comparisons_for_dataset(model_id, dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/comparisons/by-tokenizer/{tokenizer_id}",
+         response_model=list[ComparisonRecord], tags=["comparison"])
+def list_comparisons_by_tokenizer(model_id: str, tokenizer_id: str
+                                  ) -> list[ComparisonRecord]:
+    """Immutable M5 comparisons of ONE model measured with ONE
+    tokenizer (M31).
+
+    Read-only per-tokenizer grouping: validates the tokenizer through
+    the existing registry (unknown tokenizer -> 404; never a raw
+    filesystem check), then returns the model's authoritative M5
+    listing filtered by the persisted shared-probe tokenizer identity
+    recorded in each ComparisonRecord — a comparison persists exactly
+    ONE top-level tokenizer_id (both sides measure the same probe by
+    construction; M5 refuses cross-probe requests with 422; membership
+    never comes from filenames, checkpoint ids, dataset identities or
+    hashes; the persisted id is matched VERBATIM, never substituted
+    with the latest tokenizer). Each matching comparison appears
+    EXACTLY ONCE (dedup by comparison identity, not side
+    combinations). Complete verbatim payloads (verdict/per-side losses
+    included) in the exact M5 (created_at, comparison_id) order;
+    tokenizers are global, so model scoping comes from the model's own
+    listing — a model never sees another model's comparisons. A valid
+    tokenizer with no comparisons for the model returns []. No
+    aggregates, no writes. (Must stay registered before
+    /comparisons/{comparison_id}; the literal "by-tokenizer" segment
+    is not a comparison id.)"""
+    try:
+        return _forge().list_comparisons_for_tokenizer(model_id,
+                                                       tokenizer_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

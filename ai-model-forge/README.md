@@ -1136,11 +1136,60 @@ generation never trains, evaluates, scores, ranks or judges output.
   tokenizer registry and the M16–M29 surfaces are byte-identical
   before and after
 
+### Milestone 31 — comparison history by tokenizer
+  (`comparisons/by-tokenizer`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/comparisons/by-tokenizer/{tokenizer_id}` —
+  answers "which immutable M5 comparisons of this model measured with
+  this tokenizer?" and nothing else
+- **exact filtering (shared-probe identity)**: a comparison is valid
+  only when BOTH sides measure the SAME probe, so `ComparisonRecord`
+  persists exactly ONE top-level `tokenizer_id` — the tokenizer
+  identity of the shared probe both sides measured by construction
+  (M5 refuses cross-probe requests with 422; per-side tokenizer
+  identities cannot occur; `ComparisonSide` carries no tokenizer
+  fields). Membership matches the persisted `tokenizer_id` VERBATIM —
+  never filenames, checkpoint ids, dataset identities, hashes, the
+  tokenizer currently registered, or a latest-tokenizer substitution;
+  no tokenizer versioning exists and none is introduced
+- **once per comparison**: because the comparison (not the side) is
+  the unit of grouping and the authoritative M5 listing holds each
+  record exactly once, every matching comparison — including
+  same-checkpoint A=B records (both sides measured the requested
+  tokenizer by the shared-probe rule) — appears EXACTLY ONCE (dedup
+  by comparison identity)
+- **global tokenizers, model-scoped history**: the tokenizer is
+  validated through the existing registry first
+  (`TokenizerEngine.load` — the same getter `GET /tokenizers/{id}`
+  exposes; unknown tokenizer → 404). Tokenizers are GLOBAL, so model
+  scoping comes from the model's own authoritative M5 listing — a
+  model never sees another model's comparisons. Returned records are
+  verbatim `ComparisonRecord` payloads (verdict/per-side losses
+  included) in the exact M5 authoritative order ((created_at,
+  comparison_id) ASCENDING); a valid tokenizer with no comparisons
+  for the model is a deterministic `[]` — never a 404
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_comparisons_for_tokenizer(model_id, tokenizer_id)`
+  validates through the tokenizer registry handle (composed once in
+  `ComparisonEngine.__init__`, following the existing style) and
+  filters the authoritative M5 `list_comparisons()` by the persisted
+  `tokenizer_id`; the facade and route are thin pass-throughs
+  registered after the M29 by-dataset route and **before** the
+  generic `/comparisons/{comparison_id}` detail getter (M26/M29/M31
+  are different groupings of the same listing, all intact). No
+  caches, no new storage — repeated GETs are byte-identical and the
+  endpoint never writes
+- **isolation & boundaries**: unknown model/tokenizer -> existing
+  404s; valid tokenizer without comparisons for the model -> `[]`. M5
+  (run, listing, getter), M26 by-checkpoint, M29 by-dataset, M30
+  by-tokenizer, the tokenizer registry and the M16–M30 surfaces are
+  byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 460 tests
+pytest                       # 465 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1621,7 +1670,7 @@ ai-model-forge/
     evaluation.py      # evaluation engine: read-only state measurement (M4)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer grouping (M24/M28/M30)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
-                       # + read-only by-checkpoint/by-dataset grouping of the history (M26/M29)
+                       # + read-only by-checkpoint/by-dataset/by-tokenizer grouping (M26/M29/M31)
     gates.py           # stage gates: policy-driven run decisions (M6)
                        # + read-only by-policy grouping of the history (M23)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
@@ -1635,7 +1684,7 @@ ai-model-forge/
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 460 tests across 20 suites
+  tests/               # 465 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

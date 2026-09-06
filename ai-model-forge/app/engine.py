@@ -386,6 +386,26 @@ class ModelForge:
         return self.comparison.list_comparisons_for_dataset(
             model_id, dataset_id)
 
+    def list_comparisons_for_tokenizer(self, model_id: str,
+                                       tokenizer_id: str
+                                       ) -> list[ComparisonRecord]:
+        """Immutable M5 comparison records of ONE model measured with
+        ONE tokenizer (M31 read-only access).
+
+        The tokenizer must exist in the tokenizer registry (unknown
+        tokenizer -> FileNotFoundError -> 404; tokenizers are global —
+        model scoping comes from the model's own M5 listing). Returns
+        the model's authoritative M5 listing filtered by the persisted
+        shared-probe tokenizer identity (a comparison persists exactly
+        ONE top-level tokenizer_id — both sides measure the same probe
+        by construction; matched VERBATIM, never substituted with the
+        latest tokenizer), each record exactly once, in the M5
+        (created_at, comparison_id) order. A valid tokenizer with no
+        comparisons for the model returns []. Read-only, never
+        writes."""
+        return self.comparison.list_comparisons_for_tokenizer(
+            model_id, tokenizer_id)
+
     # ------------------------------------------------------------------ #
     # Stage gates (thin delegation; M6)
     # ------------------------------------------------------------------ #

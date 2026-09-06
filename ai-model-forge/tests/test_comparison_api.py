@@ -374,8 +374,9 @@ def test_m26_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M27 samples by-checkpoint)
     # + 1 (M28 evaluations by-dataset)
     # + 1 (M29 comparisons by-dataset)
-    # + 1 (M30 evaluations by-tokenizer) = 62
-    assert len(spec["paths"]) == 62
+    # + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer) = 63
+    assert len(spec["paths"]) == 63
 
 
 # =========================================================================== #
@@ -506,7 +507,7 @@ def test_m29_api_404s_isolation_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/comparisons/{comparison_id}"
     m26 = ("/api/v1/models/{model_id}/comparisons/by-checkpoint/"
            "{checkpoint_id}")
-    assert len(spec["paths"]) == 62
+    assert len(spec["paths"]) == 63
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["comparison"]
@@ -517,3 +518,153 @@ def test_m29_api_404s_isolation_regressions_openapi(api_client):
     assert "ComparisonRecord" in spec["components"]["schemas"]
     assert list(spec["paths"]).index(m26) < list(spec["paths"]).index(path) \
         < list(spec["paths"]).index(generic)
+
+
+# --------------------------------------------------------------------------- #
+# M31: comparison history by tokenizer (read-only grouping)
+# --------------------------------------------------------------------------- #
+
+def _train_extra_tokenizer(api_client, tag: str, ds_id: str,
+                           vocab: int) -> str:
+    tr = api_client.post(TOKENIZERS + "/train",
+                         data={"config": json.dumps(
+                             {"name": f"api5-{tag}-tok", "vocab_size": vocab}),
+                             "dataset_id": ds_id})
+    assert tr.status_code == 201, tr.text
+    tok_id = tr.json()["tokenizer"]["id"]
+    assert api_client.post(f"{DATASETS}/{ds_id}/tokenize",
+                           json={"tokenizer_id": tok_id}).status_code == 200
+    return tok_id
+
+
+def test_m31_by_tokenizer_grouping_partition_determinism(api_client):
+    ds_id, tok1, model_id, ckpts = _prepare(api_client, "m31a", TAIL_A,
+                                            epochs=30)
+    early, final = ckpts[2]["checkpoint_id"], ckpts[-1]["checkpoint_id"]
+    tok2 = _train_extra_tokenizer(api_client, "m31a2", ds_id, 500)
+    tok3 = _train_extra_tokenizer(api_client, "m31a3", ds_id, 450)
+
+    url = f"{MODELS}/{model_id}/comparisons/by-tokenizer"
+    c1 = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok1,
+                                              early, final)).json()
+    c2 = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok1,
+                                              early, final,
+                                              seed=7)).json()
+    c3 = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok2,
+                                              early, final,
+                                              seed=11)).json()
+    # same-checkpoint A=B record still measured the shared probe of
+    # tok2 -> must appear EXACTLY once in the tok2 group
+    c4 = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok2,
+                                              final, final,
+                                              seed=13)).json()
+
+    g1 = api_client.get(f"{url}/{tok1}")
+    assert g1.status_code == 200, g1.text
+    body1 = g1.json()
+    # authoritative-filter parity: exact subset of the M5 listing whose
+    # persisted top-level tokenizer_id matches, in the same order
+    listing = api_client.get(f"{MODELS}/{model_id}/comparisons").json()
+    assert body1 == [r for r in listing if r["tokenizer_id"] == tok1]
+    assert [r["comparison_id"] for r in body1] == [c1["comparison_id"],
+                                                   c2["comparison_id"]]
+    # verbatim: each element is byte-equal to its detail-getter payload
+    for r in body1:
+        got = api_client.get(
+            f"{MODELS}/{model_id}/comparisons/{r['comparison_id']}")
+        assert got.status_code == 200 and got.json() == r
+    # deterministic: three repeats return identical raw bytes
+    raws = {api_client.get(f"{url}/{tok1}").content for _ in range(3)}
+    assert len(raws) == 1
+    # partition: groups are disjoint, tok2 holds exactly its own runs
+    g2 = api_client.get(f"{url}/{tok2}").json()
+    assert [r["comparison_id"] for r in g2] == [c3["comparison_id"],
+                                                c4["comparison_id"]]
+    ids1 = {r["comparison_id"] for r in body1}
+    ids2 = {r["comparison_id"] for r in g2}
+    assert ids1.isdisjoint(ids2)
+    assert ids1 | ids2 == {r["comparison_id"] for r in listing}
+    # valid tokenizer with zero comparisons for the model -> [] (200)
+    g3 = api_client.get(f"{url}/{tok3}")
+    assert g3.status_code == 200 and g3.json() == []
+    # no execution side effects: the filter itself added no records
+    assert len(api_client.get(
+        f"{MODELS}/{model_id}/comparisons").json()) == 4
+
+
+def test_m31_by_tokenizer_404s_isolation_regressions_openapi(api_client):
+    ds_id, tok1, model_id, ckpts = _prepare(api_client, "m31b", TAIL_A,
+                                            epochs=24)
+    early, final = ckpts[2]["checkpoint_id"], ckpts[-1]["checkpoint_id"]
+    _, _, other_model, _ = _prepare(api_client, "m31c", TAIL_B,
+                                    epochs=24)
+    url = f"{MODELS}/{model_id}/comparisons/by-tokenizer/"
+
+    c = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok1,
+                                             early, final)).json()
+
+    # 404s: unknown model / unknown tokenizer (two ghost forms); the
+    # unknown MODEL 404 wins even for an unknown tokenizer
+    assert api_client.get(
+        f"{MODELS}/ghost-model-31/comparisons/by-tokenizer/{tok1}"
+    ).status_code == 404
+    assert api_client.get(url + "ghost-tok-31").status_code == 404
+    assert api_client.get(
+        url + "m31--not-a-real-tokenizer-id").status_code == 404
+    assert api_client.get(
+        f"{MODELS}/ghost-model-31/comparisons/by-tokenizer/ghost-tok-31"
+    ).status_code == 404
+
+    # cross-model isolation: tokenizers are global, but the other
+    # model's group is empty (scoping from the model's own listing)
+    iso = api_client.get(f"{MODELS}/{other_model}/comparisons/by-tokenizer/"
+                         f"{tok1}")
+    assert iso.status_code == 200 and iso.json() == []
+
+    # M5 listing/getter intact
+    listing = api_client.get(f"{MODELS}/{model_id}/comparisons").json()
+    assert [r["comparison_id"] for r in listing] == [c["comparison_id"]]
+    got = api_client.get(f"{MODELS}/{model_id}/comparisons/"
+                         f"{c['comparison_id']}")
+    assert got.status_code == 200 and got.json() == c
+
+    # M26 by-checkpoint / M29 by-dataset / M30 evaluations-by-tokenizer
+    # regressions: same listing, other groupings, unconfused
+    byck = api_client.get(f"{MODELS}/{model_id}/comparisons/by-checkpoint/"
+                          f"{early}").json()
+    assert [r["comparison_id"] for r in byck] == [c["comparison_id"]]
+    byds = api_client.get(f"{MODELS}/{model_id}/comparisons/by-dataset/"
+                          f"{ds_id}").json()
+    assert [r["comparison_id"] for r in byds] == [c["comparison_id"]]
+    evs = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    evt = api_client.get(f"{MODELS}/{model_id}/evaluations/by-tokenizer/"
+                         f"{tok1}").json()
+    assert evt == [e for e in evs if e["tokenizer_id"] == tok1]
+    # generic detail getter still 404s ghost ids (no route capture)
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/ghost-comp-31").status_code == 404
+
+    # OpenAPI: 63 paths, the new path exactly once, GET-only, tag
+    # comparison, ComparisonRecord items; route order M29 by-dataset <
+    # by-tokenizer < generic detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer) = 63
+    assert len(spec["paths"]) == 63
+    path = ("/api/v1/models/{model_id}/comparisons/by-tokenizer"
+            "/{tokenizer_id}")
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["comparison"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/ComparisonRecord"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/comparisons/"
+                      "by-dataset/{dataset_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/comparisons/{comparison_id}")

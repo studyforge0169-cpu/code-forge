@@ -63,6 +63,7 @@ from .schemas import (
     ModelRecord,
 )
 from .storage import Storage, atomic_write_json, read_json
+from .tokenizer import TokenizerEngine
 from .training import TrainingEngine
 
 log = forge_cfg.get_logger("comparison")
@@ -77,6 +78,7 @@ class ComparisonEngine:
     def __init__(self, storage: Storage):
         self.storage = storage
         self.datasets = DatasetEngine(storage)
+        self.tokenizers = TokenizerEngine(storage)   # registry validation (M31)
         self.training = TrainingEngine(storage)
         self.evaluation = EvaluationEngine(storage)
 
@@ -205,6 +207,44 @@ class ComparisonEngine:
         self.datasets.load_meta(dataset_id)
         return [r for r in self.list_comparisons(model_id)
                 if r.dataset_id == dataset_id]
+
+    def list_comparisons_for_tokenizer(
+            self, model_id: str, tokenizer_id: str) -> list[ComparisonRecord]:
+        """Immutable M5 comparisons of ONE model measured with ONE
+        tokenizer (M31).
+
+        Membership comes from the persisted shared-probe tokenizer
+        identity ONLY: a comparison is valid only when BOTH sides
+        measure the SAME probe, so ``ComparisonRecord`` persists
+        exactly ONE top-level ``tokenizer_id: str`` (per-side
+        tokenizer identities cannot occur by construction; M5 refuses
+        cross-probe requests — different dataset/version/split/
+        tokenizer/window/seed — with 422 before any artifact exists).
+        A comparison belongs to the request when its persisted
+        ``tokenizer_id`` equals the requested id, matched VERBATIM —
+        never filenames, checkpoint ids, dataset identities, hashes or
+        the tokenizer currently registered, and never a
+        latest-tokenizer substitution (tokenizer ids are opaque ids;
+        M2/M5 have no tokenizer versioning and none is introduced
+        here). Because the comparison (not the side) is the unit of
+        grouping and the listing above holds each record exactly once,
+        every matching comparison appears EXACTLY ONCE — including
+        same-checkpoint A=B records (both sides measured the requested
+        tokenizer by the shared-probe rule). Resolution: unknown model
+        or unknown tokenizer -> FileNotFoundError; the tokenizer is
+        validated through the existing registry
+        (``TokenizerEngine.load`` — the same registry getter
+        ``GET /tokenizers/{id}`` exposes; tokenizers are GLOBAL, so
+        the model scoping comes from the model's own M5 listing — a
+        model never sees another model's comparisons). The result
+        keeps the authoritative M5 (created_at, comparison_id)
+        ASCENDING order. A valid tokenizer with no comparisons for
+        the model returns []. Read-only, never writes.
+        """
+        # existence: raises FileNotFoundError (404 at the API)
+        self.tokenizers.load(tokenizer_id)
+        return [r for r in self.list_comparisons(model_id)
+                if r.tokenizer_id == tokenizer_id]
 
     # ------------------------------------------------------------------ #
     # Canonical flow (API): one model, one shared probe, two states
