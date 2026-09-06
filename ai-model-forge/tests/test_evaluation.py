@@ -551,3 +551,100 @@ def test_m24_engine_repeated_calls_identical(env):
         again = [r.model_dump(mode="json")
                  for r in f.list_evaluations_for_checkpoint(a, ck_a)]
         assert again == first
+
+
+# =========================================================================== #
+# M28: read-only per-dataset grouping of the evaluation history
+# =========================================================================== #
+
+def _m28_env(env):
+    """M28 state on top of the shared module env (cached): a model with
+    evaluations over TWO datasets (two on 'base', one on 'probe'), a
+    second model with NO evaluations (model-scoped empty), and a third
+    freshly uploaded dataset with zero evaluations.
+    Returns (a, b, e_b1, e_b2, e_p1, third_ds).
+    """
+    cached = getattr(env, "_m28_state", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    a = env.new_model("m28-main", seed=28)
+    e_b1 = f.run_evaluation(env.eval_cfg(a, ds_key="base", seed=2811))
+    e_b2 = f.run_evaluation(env.eval_cfg(a, ds_key="base", seed=2812))
+    e_p1 = f.run_evaluation(env.eval_cfg(a, ds_key="probe", seed=2813))
+    b = env.new_model("m28-b", seed=29)          # NO evaluations at all
+    third = f.upload_dataset(
+        [("third.txt", _bytes(_word_soup(200, 28000)))], name="m28-third")
+    f.tokenize_dataset(third["dataset_id"], env.tokenizer.id)
+    env._m28_state = (a, b, e_b1, e_b2, e_p1, third["dataset_id"])
+    return env._m28_state
+
+
+def test_m28_engine_filters_by_persisted_dataset_identity(env):
+    a, b, e_b1, e_b2, e_p1, third_ds = _m28_env(env)
+    f = env.forge
+    base_id, probe_id = env.datasets["base"], env.datasets["probe"]
+    listing = f.list_evaluations(a)
+    for ds_id, expected in ((base_id, [e_b1, e_b2]),
+                            (probe_id, [e_p1]),
+                            (third_ds, [])):
+        got = f.list_evaluations_for_dataset(a, ds_id)
+        # parity with the authoritative M4 listing filtered by the
+        # persisted dataset identity; deterministic (created_at,
+        # eval_id) order; membership from the persisted field only
+        assert got == [r for r in listing if r.dataset_id == ds_id]
+        assert [r.eval_id for r in got] == [r.eval_id for r in expected]
+        keyed = [(r.created_at, r.eval_id) for r in got]
+        assert keyed == sorted(keyed)
+        assert all(r.dataset_id == ds_id and r.model_id == a for r in got)
+        # persisted dataset_version travels VERBATIM (never rewritten)
+        # and every payload equals the M4 single-record getter verbatim
+        for r, orig in zip(got, expected):
+            assert r.dataset_version == orig.dataset_version
+            assert r == f.get_evaluation(a, r.eval_id)
+    # no cross-dataset leakage: each evaluation appears under exactly
+    # its own dataset and under no other
+    for ds_id in (base_id, probe_id):
+        other = probe_id if ds_id == base_id else base_id
+        under = [r.eval_id for r in
+                 f.list_evaluations_for_dataset(a, ds_id)]
+        under_other = [r.eval_id for r in
+                       f.list_evaluations_for_dataset(a, other)]
+        assert not (set(under) & set(under_other))
+
+
+def test_m28_engine_empty_404s_model_scoping_read_only(env):
+    a, b, e_b1, e_b2, e_p1, third_ds = _m28_env(env)
+    f = env.forge
+    base_id = env.datasets["base"]
+    # valid dataset with zero evaluations for THIS model -> [] (the
+    # model-scoped empty case: the dataset is global, b has no evals)
+    assert f.list_evaluations_for_dataset(b, base_id) == []
+    assert f.list_evaluations_for_dataset(b, third_ds) == []
+    # unknown model / unknown dataset -> FileNotFoundError (404 at API)
+    with pytest.raises(FileNotFoundError):
+        f.list_evaluations_for_dataset("ghost-model-28", base_id)
+    with pytest.raises(FileNotFoundError):
+        f.list_evaluations_for_dataset(a, "ghost-ds-28")
+    # model scoping: a's evaluation ids never appear under b
+    leak = [r.eval_id for r in
+            f.list_evaluations_for_dataset(b, base_id)]
+    assert {e_b1.eval_id, e_b2.eval_id}.isdisjoint(leak)
+    # read-only: the filter never writes evaluation manifests
+    before = _m24_eval_files(env, (a, b))
+    f.list_evaluations_for_dataset(a, base_id)
+    f.list_evaluations_for_dataset(b, base_id)
+    f.list_evaluations_for_dataset(a, third_ds)
+    after = _m24_eval_files(env, (a, b))
+    assert after == before
+
+
+def test_m28_engine_repeated_calls_identical(env):
+    a, b, e_b1, e_b2, e_p1, third_ds = _m28_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_evaluations_for_dataset(a, env.datasets["base"])]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_evaluations_for_dataset(a, env.datasets["base"])]
+        assert again == first

@@ -25,6 +25,7 @@ from .sampling import SamplingEngine
 from .sample_quality import SampleQualityEngine
 from .schemas import (
     ComparisonRecord,
+    EvaluationRecord,
     ModelCreateRequest,
     ModelRecord,
     PolicyCreateRequest,
@@ -295,6 +296,24 @@ class ModelForge:
         evaluations returns []. Read-only, never writes."""
         return self.evaluation.list_evaluations_for_checkpoint(
             model_id, checkpoint_id)
+
+    def list_evaluations_for_dataset(self, model_id: str,
+                                     dataset_id: str
+                                     ) -> list[EvaluationRecord]:
+        """Immutable M4 evaluation records of ONE model over ONE dataset
+        (M28 read-only access).
+
+        The dataset must exist in the M2 registry (unknown dataset ->
+        FileNotFoundError -> 404; datasets are global — model scoping
+        comes from the model's own M4 listing). Returns the model's
+        authoritative M4 listing filtered by the persisted dataset
+        identity (top-level dataset_id; the persisted dataset_version
+        travels VERBATIM inside each record — all versions returned,
+        never collapsed/resolved/rewritten) in the M4 (created_at,
+        eval_id) order. A valid dataset with no evaluations for the
+        model returns []. Read-only, never writes."""
+        return self.evaluation.list_evaluations_for_dataset(
+            model_id, dataset_id)
 
     # ------------------------------------------------------------------ #
     # Comparison (thin delegation; read-only orchestration over evaluations)

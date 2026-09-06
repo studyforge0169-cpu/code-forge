@@ -342,5 +342,123 @@ def test_m24_api_404s_isolation_and_prior_surfaces(api_client):
     # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
     # + 1 (M21) + 1 (M22) + 1 (M23) + 1 (M24) + 1 (M25)
     # + 1 (M26 comparisons by-checkpoint)
-    # + 1 (M27 samples by-checkpoint) = 59
-    assert len(spec["paths"]) == 59
+    # + 1 (M27 samples by-checkpoint)
+    # + 1 (M28 evaluations by-dataset) = 60
+    assert len(spec["paths"]) == 60
+
+
+# =========================================================================== #
+# M28: read-only per-dataset grouping of the evaluation history (API)
+# =========================================================================== #
+
+BY_DATASET = "/api/v1/models/{mid}/evaluations/by-dataset/{ds}"
+
+
+def _m28_second_dataset(api_client, tag: str, tok_id: str) -> str:
+    """A second valid tokenized dataset for cross-dataset coverage."""
+    up = api_client.post(UPLOAD, files=_files(f"{tag}.txt",
+                                              _corpus(180, tag)),
+                         data={"name": f"api28-{tag}-ds"})
+    assert up.status_code == 201, up.text
+    ds2 = up.json()["dataset_id"]
+    assert api_client.post(f"{DATASETS}/{ds2}/tokenize",
+                           json={"tokenizer_id": tok_id}).status_code == 200
+    return ds2
+
+
+def test_m28_api_by_dataset_grouping_versions_determinism(api_client):
+    ds_id, tok_id, model_id, _ = _prepare(api_client, "m28a")
+    ds2 = _m28_second_dataset(api_client, "m28b", tok_id)
+    # two evaluations on ds (distinct seeds), one on the second dataset
+    e1 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, seed=2811)).json()
+    e2 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, seed=2812)).json()
+    e3 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds2, tok_id, seed=2813)).json()
+    url = BY_DATASET.format(mid=model_id, ds=ds_id)
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # exactly e1 + e2 under ds, in the deterministic M4 order, verbatim
+    # equal to the run responses (existing representation)
+    assert [x["eval_id"] for x in recs] == [e1["eval_id"], e2["eval_id"]]
+    keyed = [(x["created_at"], x["eval_id"]) for x in recs]
+    assert keyed == sorted(keyed)
+    by_id = {x["eval_id"]: x for x in recs}
+    assert by_id[e1["eval_id"]] == e1
+    assert by_id[e2["eval_id"]] == e2
+    # persisted dataset identity + version travel VERBATIM (no
+    # normalization, no version rewriting)
+    assert all(x["dataset_id"] == ds_id and x["dataset_version"]
+               == e1["dataset_version"] for x in recs)
+    # parity with the M4 listing filtered locally by the persisted
+    # dataset identity — no missing, no extra, no duplicates
+    listing = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert recs == [x for x in listing if x["dataset_id"] == ds_id]
+    # the second dataset holds exactly e3; no cross-dataset leakage
+    got2 = api_client.get(BY_DATASET.format(mid=model_id, ds=ds2))
+    assert got2.status_code == 200
+    assert [x["eval_id"] for x in got2.json()] == [e3["eval_id"]]
+    # repeated GET returns identical raw bytes (3 repeats)
+    raw1 = api_client.get(url).content
+    raw2 = api_client.get(url).content
+    raw3 = api_client.get(url).content
+    assert raw1 == raw2 == raw3 and json.loads(raw1) == recs
+
+
+def test_m28_api_404s_scoping_regressions_openapi(api_client):
+    ds_id, tok_id, model_id, rep = _prepare(api_client, "m28e")
+    ck = rep["checkpoints"][0]["checkpoint_id"]
+    # unknown model / unknown dataset -> 404 (well-formed + malformed)
+    assert api_client.get(BY_DATASET.format(mid="ghost-model-28",
+                                            ds=ds_id)).status_code == 404
+    assert api_client.get(BY_DATASET.format(mid=model_id,
+                                            ds="ghost-ds-28")).status_code \
+        == 404
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-dataset/ds%20id%2028!!") \
+        .status_code == 404
+    # model scoping: datasets are GLOBAL, so another real model + this
+    # valid dataset is the natural model-scoped EMPTY case (200 + []),
+    # and no evaluation id of model_id leaks into it
+    ds2_id, tok2_id, model2_id, _ = _prepare(api_client, "m28iso")
+    scoped = api_client.get(BY_DATASET.format(mid=model2_id, ds=ds_id))
+    assert scoped.status_code == 200 and scoped.json() == []
+    # M4 regression: run/list/get + validation unchanged
+    e = api_client.post(EVAL_RUN, json=_eval_cfg(model_id, ds_id, tok_id,
+                                                 seed=2814)).json()
+    assert e["dataset_id"] == ds_id
+    lst = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert e in lst
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/{e['eval_id']}").json() == e
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/ghost-eval-28").status_code == 404
+    # by-dataset does not shadow the generic detail getter NOR the M24
+    # by-checkpoint route (a different grouping of the same listing)
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-checkpoint/{ck}").json() == []
+    # M27 samples-by-checkpoint + M26 comparisons-by-checkpoint intact
+    assert api_client.get(
+        f"{MODELS}/{model_id}/samples/by-checkpoint/{ck}").json() == []
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/by-checkpoint/{ck}").json() == []
+    # OpenAPI: 60 paths, the new path exactly once, GET-only,
+    # evaluation tag, array of EvaluationRecord, before the generic
+    # evaluation route
+    spec = api_client.get("/openapi.json").json()
+    path = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
+            "{dataset_id}")
+    generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
+    assert len(spec["paths"]) == 60
+    assert list(spec["paths"]).count(path) == 1
+    ops = spec["paths"][path]
+    assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
+    schema = (ops["get"]["responses"]["200"]["content"]
+              ["application/json"]["schema"])
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/EvaluationRecord"}
+    assert "EvaluationRecord" in spec["components"]["schemas"]
+    assert list(spec["paths"]).index(path) < list(spec["paths"]) \
+        .index(generic)

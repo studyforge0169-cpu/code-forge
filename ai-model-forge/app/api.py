@@ -354,6 +354,20 @@ def index() -> HTMLResponse:
         model/checkpoint or a checkpoint of another model -> 404; a
         checkpoint with no samples -> []). Pure data access — no new
         metrics, zero storage growth.</li>
+
+      <li><b>M28 evaluation history by dataset</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/evaluations/by-dataset/&#123;dataset&#125;</code>,
+        answers "which immutable M4 evaluations of this model measured
+        this dataset?": the model's authoritative M4 listing filtered by
+        the persisted dataset identity recorded in every evaluation
+        (top-level dataset_id + dataset_version travelling VERBATIM in
+        each record — versions never collapsed or rewritten), after the
+        dataset is validated through the M2 registry (full record
+        payloads, exact M4 ordering; datasets are global so the model
+        scoping comes from the model's own listing; unknown
+        model/dataset -> 404; a dataset with no evaluations for the
+        model -> []). Pure data access — no aggregates, zero storage
+        growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -371,6 +385,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/evaluations/run</code> — read-only evaluation (current state or checkpoint)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations</code> — immutable evaluation history</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-checkpoint/&#123;ckpt&#125;</code> — evaluations recorded under ONE checkpoint (read-only, deterministic, no aggregation)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-dataset/&#123;ds&#125;</code> — evaluations of ONE model over ONE dataset (read-only, deterministic, versions verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/&#123;eval&#125;</code> — one evaluation record</li>
       <li><code>POST  {prefix}/comparisons/run</code> — A/B comparison (improved / regressed / unchanged)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons</code> — immutable comparison history</li>
@@ -709,7 +724,8 @@ def rollback_model(model_id: str, request: RollbackRequest) -> ModelRecord:
 
 
 # --------------------------------------------------------------------------- #
-# Evaluation routes (Milestone 4 — read-only measurement)
+# Evaluation routes (Milestone 4 — read-only measurement;
+# Milestone 28 adds the read-only by-dataset grouping of the history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/evaluations/run", response_model=EvaluationRecord, tags=["evaluation"])
@@ -763,6 +779,35 @@ def list_evaluations_by_checkpoint(model_id: str, checkpoint_id: str
     try:
         return _forge().list_evaluations_for_checkpoint(model_id,
                                                         checkpoint_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/evaluations/by-dataset/{dataset_id}",
+         response_model=list[EvaluationRecord], tags=["evaluation"])
+def list_evaluations_by_dataset(model_id: str, dataset_id: str
+                                ) -> list[EvaluationRecord]:
+    """Immutable M4 evaluations of ONE model over ONE dataset (M28).
+
+    Read-only per-dataset grouping: validates the dataset through the
+    M2 registry (unknown dataset -> 404; never a raw filesystem check),
+    then returns the model's authoritative M4 listing filtered by the
+    persisted dataset identity recorded in each EvaluationRecord
+    (top-level dataset_id; membership never comes from filenames,
+    tokenizer ids, eval ids, checkpoint ids, hashes or timestamps).
+    The persisted dataset_version travels VERBATIM inside every
+    returned record — all versions of the dataset are returned, each
+    exactly as persisted (versions are neither collapsed, nor resolved
+    to the latest, nor rewritten). Complete verbatim payloads
+    (loss_nats/perplexity/state identity included) in the exact M4
+    (created_at, eval_id) order; datasets are global, so model scoping
+    comes from the model's own listing — a model never sees another
+    model's evaluations. A valid dataset with no evaluations for the
+    model returns []. No aggregates, no writes. (Must stay registered
+    before /evaluations/{eval_id}; the literal "by-dataset" segment is
+    not an evaluation id.)"""
+    try:
+        return _forge().list_evaluations_for_dataset(model_id, dataset_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

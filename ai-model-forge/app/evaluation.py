@@ -165,6 +165,37 @@ class EvaluationEngine:
         return [r for r in self.list_evaluations(model_id)
                 if r.checkpoint_id == checkpoint_id]
 
+    def list_evaluations_for_dataset(
+            self, model_id: str, dataset_id: str) -> list[EvaluationRecord]:
+        """Immutable M4 evaluations of ONE model over ONE dataset (M28).
+
+        Membership comes from the persisted dataset identity ONLY: every
+        ``EvaluationRecord`` carries top-level ``dataset_id: str`` and
+        ``dataset_version: int`` fields, and an evaluation belongs to
+        the request when its persisted ``dataset_id`` equals the
+        requested id — never filenames, dataset directory names,
+        tokenizer ids, eval ids, checkpoint ids, hashes or timestamps.
+        The persisted ``dataset_version`` travels VERBATIM inside each
+        returned record (all versions of the dataset are returned, each
+        exactly as persisted — versions are neither collapsed, nor
+        resolved to the latest, nor rewritten). Resolution: unknown
+        model or unknown dataset -> FileNotFoundError; the dataset is
+        validated through the M2 registry
+        (``DatasetEngine.load_meta`` — the same registry call M4's own
+        run preflight uses; datasets are GLOBAL, so the model scoping
+        comes from the model's own M4 listing exactly like M24/M27: a
+        model never sees another model's evaluations). The result is
+        the model's authoritative M4 listing above (the exact engine
+        parse + deterministic (created_at, eval_id) ASCENDING order)
+        filtered by the persisted dataset identity. A valid dataset
+        with no evaluations for the model returns []. Read-only, never
+        writes.
+        """
+        # existence: raises FileNotFoundError (404 at the API)
+        self.datasets.load_meta(dataset_id)
+        return [r for r in self.list_evaluations(model_id)
+                if r.dataset_id == dataset_id]
+
     # ------------------------------------------------------------------ #
     # The run (preflight everything before creating any artifact)
     # ------------------------------------------------------------------ #

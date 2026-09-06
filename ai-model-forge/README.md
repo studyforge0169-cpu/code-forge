@@ -1003,11 +1003,52 @@ generation never trains, evaluates, scores, ranks or judges output.
   listing, getter), M16–M26 surfaces, the M13/M17 dashboards and the
   M3 checkpoint registry are byte-identical before and after
 
+### Milestone 28 — evaluation history by dataset
+  (`evaluations/by-dataset`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/evaluations/by-dataset/{dataset_id}` — answers
+  "which immutable M4 evaluations of this model measured this
+  dataset?" and nothing else
+- **exact filtering**: membership comes from the persisted dataset
+  identity ONLY — every `EvaluationRecord` carries top-level
+  `dataset_id` and `dataset_version`, and an evaluation belongs to
+  the request only when its persisted `dataset_id` matches. Nothing
+  is inferred from filenames, dataset directory names, tokenizer ids,
+  eval ids, checkpoint ids, hashes or timestamps. The persisted
+  `dataset_version` travels VERBATIM inside every returned record:
+  all versions of the dataset are returned, each exactly as persisted
+  — versions are never collapsed, resolved to the latest, or rewritten
+- **global datasets, model-scoped history**: the dataset is validated
+  through the M2 registry first (`DatasetEngine.load_meta` — the same
+  registry call M4's own run preflight uses; unknown dataset → 404).
+  Datasets are GLOBAL (any model may be evaluated on any dataset), so
+  model scoping comes from the model's own authoritative M4 listing —
+  a model never sees another model's evaluations. Returned records
+  are verbatim `EvaluationRecord` payloads (loss/perplexity/state
+  identity included) in the exact M4 authoritative order
+  ((created_at, eval_id) ASCENDING); a valid dataset with no
+  evaluations for the model is a deterministic `[]` — never a 404
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_evaluations_for_dataset(model_id, dataset_id)`
+  validates through the already-composed M2 dataset handle and
+  filters the authoritative M4 `list_evaluations()` by the persisted
+  dataset identity; the facade and route are thin pass-throughs
+  registered **before** the generic `/evaluations/{eval_id}` detail
+  getter (and after the M24 by-checkpoint route — a different
+  grouping of the same listing, both intact). No dataset-evaluation
+  index, no caches, no new storage — repeated GETs are byte-identical
+  and the endpoint never writes
+- **isolation & boundaries**: unknown model/dataset -> existing 404s;
+  valid dataset without evaluations for the model -> `[]`. M4 (run,
+  listing, getter), M24 by-checkpoint, M2 dataset registry, the
+  M13/M17 dashboards and the M16–M27 surfaces are byte-identical
+  before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 445 tests
+pytest                       # 450 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1486,6 +1527,7 @@ ai-model-forge/
     tokenizer.py       # byte-level BPE engine
     training.py        # training engine: schedules, streams, run, checkpoints, rollback
     evaluation.py      # evaluation engine: read-only state measurement (M4)
+                       # + read-only by-checkpoint/by-dataset grouping (M24/M28)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
                        # + read-only by-checkpoint grouping of the history (M26)
     gates.py           # stage gates: policy-driven run decisions (M6)
@@ -1501,7 +1543,7 @@ ai-model-forge/
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 445 tests across 20 suites
+  tests/               # 450 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
