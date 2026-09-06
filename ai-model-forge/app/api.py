@@ -425,6 +425,22 @@ def index() -> HTMLResponse:
         model/tokenizer -> 404; a tokenizer with no samples for the
         model -> []). Pure data access — no aggregates, no generation,
         zero storage growth.</li>
+
+      <li><b>M33 sample-quality history by tokenizer</b> — one read-only
+        access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
+        answers "which immutable M16 sample-quality measurements of
+        this model measured samples generated with this
+        tokenizer?": the model's authoritative M16 listing filtered by
+        the persisted measurement tokenizer identity (every
+        SampleEvaluationRecord carries a required non-nullable
+        top-level tokenizer_id — the measured sample's recorded
+        state), each matching record EXACTLY ONCE, the persisted id
+        matched VERBATIM, after the tokenizer is validated through the
+        existing GLOBAL registry (model scoping from the model's own
+        listing; full record payloads incl. loss/perplexity, exact M16
+        ordering; unknown model/tokenizer -> 404; a tokenizer with no
+        measurements for the model -> []). Pure data access — no
+        aggregates, no new scoring, zero storage growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -451,6 +467,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-dataset/&#123;ds&#125;</code> — comparisons of ONE model over ONE dataset (read-only, deterministic, versions verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-tokenizer/&#123;tok&#125;</code> — comparisons of ONE model with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-tokenizer/&#123;tok&#125;</code> — samples of ONE model generated with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tok&#125;</code> — M16 sample-quality measurements of ONE model under ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/&#123;comp&#125;</code> — one comparison record</li>
       <li><code>POST  {prefix}/gates/evaluate</code> — stage gate: policy + candidate → passed / failed decision</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions</code> — immutable gate decision history</li>
@@ -1567,7 +1584,8 @@ def get_sample(model_id: str, sample_id: str) -> SampleRecord:
 
 
 # --------------------------------------------------------------------------- #
-# Sample quality (Milestone 16 — per-sample likelihood measurement, read-only)
+# Sample quality (Milestone 16 — per-sample likelihood measurement, read-only;
+# Milestone 33 adds the read-only by-tokenizer grouping of the measurement history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/models/{model_id}/samples/{sample_id}/quality",
@@ -1693,6 +1711,40 @@ def list_sample_quality_by_checkpoint(model_id: str, checkpoint_id: str
     try:
         return _forge().list_sample_evaluations_for_checkpoint(
             model_id, checkpoint_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/sample-quality/by-tokenizer/{tokenizer_id}",
+         response_model=list[SampleEvaluationRecord],
+         tags=["sample-quality"])
+def list_sample_quality_by_tokenizer(model_id: str, tokenizer_id: str
+                                     ) -> list[SampleEvaluationRecord]:
+    """Immutable M16 measurements whose samples used ONE tokenizer (M33).
+
+    Read-only per-tokenizer grouping: validates the tokenizer through
+    the GLOBAL M2 tokenizer registry (an unknown tokenizer is 404 —
+    the same registry getter GET /tokenizers/{id} exposes; model
+    scoping comes from the model's own M16 listing, so a model never
+    sees another model's measurements; nothing is inferred from
+    filenames), then returns the model's authoritative M16 listing
+    filtered by the persisted measurement tokenizer identity — every
+    SampleEvaluationRecord carries a required non-nullable top-level
+    tokenizer_id (M16 measures an immutable M15 sample under its own
+    RECORDED state; the record persists that state's tokenizer
+    identity) and belongs to the request only when that persisted id
+    matches VERBATIM (never inferred from sample/checkpoint ids or
+    hashes; never a latest-tokenizer substitution; M2/M16 have no
+    tokenizer versioning). Complete verbatim payloads
+    (loss_nats/perplexity included) in the exact M16 (created_at,
+    evaluation_id) order; a valid tokenizer with no measurements for
+    the model returns [] (never 404). No new metrics, no aggregation,
+    no ranking, no writes. (Must stay registered before
+    /sample-quality/{evaluation_id}; the literal "by-tokenizer"
+    segment is not an evaluation id.)"""
+    try:
+        return _forge().list_sample_evaluations_for_tokenizer(
+            model_id, tokenizer_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

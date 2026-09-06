@@ -242,6 +242,42 @@ class SampleQualityEngine:
         return [r for r in self.list_sample_evaluations(model_id)
                 if r.checkpoint_id == checkpoint_id]
 
+    def list_sample_evaluations_for_tokenizer(
+            self, model_id: str, tokenizer_id: str
+    ) -> list[SampleEvaluationRecord]:
+        """Immutable M16 sample-quality measurements of ONE model whose
+        measured samples were generated with ONE tokenizer (M33).
+
+        Membership comes from the persisted measurement tokenizer
+        identity ONLY: every ``SampleEvaluationRecord`` carries a
+        required non-nullable top-level ``tokenizer_id`` (M16 measures
+        an immutable M15 sample under its own RECORDED state — the
+        record persists the sample's tokenizer identity verbatim as
+        part of that recorded state), and a measurement belongs to the
+        request when its persisted ``tokenizer_id`` equals the
+        requested id, matched VERBATIM — never filenames, paths,
+        sample ids, checkpoint ids, tokenizer contents or hashes, the
+        tokenizer currently registered, or a latest-tokenizer
+        substitution (tokenizer ids are opaque ids; M2/M16 have no
+        tokenizer versioning and none is introduced here; the record
+        is NOT altered for this endpoint). Each record appears EXACTLY
+        ONCE (the authoritative listing holds each record exactly
+        once). Resolution: unknown model or unknown tokenizer ->
+        FileNotFoundError; the tokenizer is validated through the
+        existing registry (``TokenizerEngine.load`` — the same
+        registry getter ``GET /tokenizers/{id}`` exposes; tokenizers
+        are GLOBAL, so the model scoping comes from the model's own
+        M16 listing — a model never sees another model's
+        measurements). The result keeps the authoritative M16
+        (created_at, evaluation_id) ASCENDING order. A valid tokenizer
+        with no measurements for the model returns []. Read-only,
+        never writes.
+        """
+        # existence: raises FileNotFoundError (404 at the API)
+        self.tokenizers.load(tokenizer_id)
+        return [r for r in self.list_sample_evaluations(model_id)
+                if r.tokenizer_id == tokenizer_id]
+
     # ------------------------------------------------------------------ #
     # The run (sample-driven; preflight everything before any write)
     # ------------------------------------------------------------------ #

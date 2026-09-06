@@ -833,8 +833,9 @@ def test_api_openapi_exposes_sample_quality(api_client):
     # + 1 (M29 comparisons by-dataset)
     # + 1 (M30 evaluations by-tokenizer)
     # + 1 (M31 comparisons by-tokenizer)
-    # + 1 (M32 samples by-tokenizer) = 64
-    assert len(spec["paths"]) == 64
+    # + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer) = 65
+    assert len(spec["paths"]) == 65
 
 
 # =========================================================================== #
@@ -1070,8 +1071,9 @@ def test_api_openapi_records_route(api_client):
     # + 1 (M29 comparisons by-dataset)
     # + 1 (M30 evaluations by-tokenizer)
     # + 1 (M31 comparisons by-tokenizer)
-    # + 1 (M32 samples by-tokenizer) = 64
-    assert len(spec["paths"]) == 64
+    # + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer) = 65
+    assert len(spec["paths"]) == 65
 
 
 # =========================================================================== #
@@ -1294,8 +1296,9 @@ def test_api_openapi_by_sample_route(api_client):
     # + 1 (M29 comparisons by-dataset)
     # + 1 (M30 evaluations by-tokenizer)
     # + 1 (M31 comparisons by-tokenizer)
-    # + 1 (M32 samples by-tokenizer) -> 64
-    assert len(spec["paths"]) == 64
+    # + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer) -> 65
+    assert len(spec["paths"]) == 65
 
 
 # =========================================================================== #
@@ -1532,4 +1535,326 @@ def test_api_openapi_by_checkpoint_route(api_client):
     assert ("/api/v1/models/{model_id}/sample-quality/{evaluation_id}"
             in spec["paths"])
     # M18–M28 each added exactly one documented route -> 60
-    assert len(spec["paths"]) == 64
+    assert len(spec["paths"]) == 65
+
+
+# =========================================================================== #
+# M33: read-only per-tokenizer grouping of the sample-quality history
+# =========================================================================== #
+
+BY_TOK33 = "/api/v1/models/{mid}/sample-quality/by-tokenizer/{tok}"
+
+
+def _m33_state(env):
+    """M33 state on top of the shared module env (cached): two measured
+    big-model samples under the env's ORIGINAL tokenizer, one measured
+    small-model sample under tok_small, plus a fresh third tokenizer
+    (m33-tok3) with ZERO measurements anywhere. Returns
+    (e1, e2, e3, tok3).
+    """
+    cached = getattr(env, "_m33", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    s1 = _make_sample(env)
+    s2 = _make_sample(env, strategy="temperature", temperature=0.8,
+                      seed=33, max_new_tokens=6)
+    e1 = env.sq.run(env.big_model, s1.sample_id)
+    e2 = env.sq.run(env.big_model, s2.sample_id)
+    s_small = env.samples.run(SampleGenerateRequest(
+        model_id=env.small_model, checkpoint_id=env.small_ckpt,
+        tokenizer_id=env.tok_small.id, prompt=PROMPT,
+        strategy="greedy", max_new_tokens=6))
+    e3 = env.sq.run(env.small_model, s_small.sample_id)
+    tok3 = f.train_tokenizer(
+        TokenizerConfig(name="m33-tok3", vocab_size=450),
+        dataset_id=env.ds).id
+    env._m33 = (e1, e2, e3, tok3)
+    return env._m33
+
+
+def test_m33_engine_grouping_parity_order_verbatim(env):
+    e1, e2, e3, tok3 = _m33_state(env)
+    f = env.forge
+    tok1 = env.tok_big.id
+    for model_id, tok in ((env.big_model, tok1),
+                          (env.small_model, env.tok_small.id)):
+        listing = env.sq.list_sample_evaluations(model_id)
+        got = f.list_sample_evaluations_for_tokenizer(model_id, tok)
+        # parity with the authoritative M16 listing filtered by the
+        # persisted measurement tokenizer identity; deterministic
+        # (created_at, evaluation_id) order; membership from the
+        # persisted field only; each record EXACTLY ONCE
+        assert got == [r for r in listing if r.tokenizer_id == tok]
+        keyed = [(r.created_at, r.evaluation_id) for r in got]
+        assert keyed == sorted(keyed)
+        ids = [r.evaluation_id for r in got]
+        assert len(ids) == len(set(ids))
+        assert all(r.tokenizer_id == tok and r.model_id == model_id
+                   for r in got)
+        # verbatim payload parity with the M16 single-record getter
+        for r in got:
+            assert r == env.sq.get_sample_evaluation(
+                model_id, r.evaluation_id)
+    # the M33-created measurements sit under exactly their tokenizer
+    got1 = f.list_sample_evaluations_for_tokenizer(env.big_model, tok1)
+    assert {e1.evaluation_id, e2.evaluation_id} <= \
+        {r.evaluation_id for r in got1}
+    assert all(r.tokenizer_id == tok1 for r in got1)
+    assert e3.evaluation_id in {r.evaluation_id for r in
+                                f.list_sample_evaluations_for_tokenizer(
+                                    env.small_model, env.tok_small.id)}
+    # explicit partition: groups over EVERY tokenizer that actually has
+    # records under the big model are pairwise disjoint and cover the
+    # listing exactly once (earlier tests may add records — discovery,
+    # not fixed pairs)
+    listing = env.sq.list_sample_evaluations(env.big_model)
+    listing_ids = {r.evaluation_id for r in listing}
+    groups = {t: {r.evaluation_id for r in
+                  f.list_sample_evaluations_for_tokenizer(env.big_model, t)}
+              for t in {r.tokenizer_id for r in listing}}
+    flat = [i for g in groups.values() for i in g]
+    assert set(flat) == listing_ids
+    assert len(flat) == len(set(flat)) == len(listing_ids)
+    assert tok1 in groups
+
+
+def test_m33_engine_empty_404s_cross_model_read_only(env):
+    e1, e2, e3, tok3 = _m33_state(env)
+    f = env.forge
+    # fresh tokenizer with zero measurements anywhere -> []
+    assert f.list_sample_evaluations_for_tokenizer(
+        env.big_model, tok3) == []
+    # model-scoped empty GUARANTEED by the platform vocabulary rule: the
+    # small model (vocab 300) can never hold a tok_big (600) record
+    assert f.list_sample_evaluations_for_tokenizer(
+        env.small_model, env.tok_big.id) == []
+    # cross-model isolation: listings are disjoint and no model's group
+    # ever contains the other's evaluation ids
+    big_ids = {r.evaluation_id
+               for r in env.sq.list_sample_evaluations(env.big_model)}
+    small_ids = {r.evaluation_id
+                 for r in env.sq.list_sample_evaluations(env.small_model)}
+    assert big_ids.isdisjoint(small_ids)
+    for tok in (env.tok_big.id, env.tok_small.id, tok3):
+        bg = {r.evaluation_id for r in
+              f.list_sample_evaluations_for_tokenizer(env.big_model, tok)}
+        sg = {r.evaluation_id for r in
+              f.list_sample_evaluations_for_tokenizer(env.small_model,
+                                                      tok)}
+        assert bg <= big_ids and sg <= small_ids
+        assert bg.isdisjoint(sg)
+    # unknown model / unknown tokenizer -> FileNotFoundError (404 at API)
+    with pytest.raises(FileNotFoundError):
+        f.list_sample_evaluations_for_tokenizer(
+            "ghost-model-33", env.tok_big.id)
+    with pytest.raises(FileNotFoundError):
+        f.list_sample_evaluations_for_tokenizer(
+            env.big_model, "ghost-tok-33")
+    # read-only: the filter never writes anything
+    root = f.storage.root
+    before = {p.relative_to(root).as_posix()
+              for p in root.rglob("*") if p.is_file()}
+    f.list_sample_evaluations_for_tokenizer(env.big_model,
+                                            env.tok_big.id)
+    f.list_sample_evaluations_for_tokenizer(env.big_model, tok3)
+    f.list_sample_evaluations_for_tokenizer(env.small_model,
+                                            env.tok_small.id)
+    f.list_sample_evaluations_for_tokenizer(env.small_model,
+                                            env.tok_big.id)
+    after = {p.relative_to(root).as_posix()
+             for p in root.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_m33_engine_repeated_calls_identical(env):
+    e1, e2, e3, tok3 = _m33_state(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_sample_evaluations_for_tokenizer(env.big_model,
+                                                     env.tok_big.id)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_sample_evaluations_for_tokenizer(
+                     env.big_model, env.tok_big.id)]
+        assert again == first
+
+
+def _gen33(h, **overrides) -> dict:
+    body = {"model_id": h["mid"], "checkpoint_id": h["ckpt"],
+            "tokenizer_id": h["tok"], "prompt": PROMPT,
+            "strategy": "greedy", "max_new_tokens": 6}
+    body.update(overrides)
+    return body
+
+
+def _train_extra_tokenizer33(api_client, tag: str, ds_id: str,
+                             vocab: int) -> str:
+    tr = api_client.post("/api/v1/tokenizers/train",
+                         data={"config": json.dumps(
+                             {"name": f"api16-{tag}-tok",
+                              "vocab_size": vocab}),
+                               "dataset_id": ds_id})
+    assert tr.status_code == 201, tr.text
+    return tr.json()["tokenizer"]["id"]
+
+
+def test_m33_api_by_tokenizer_grouping_partition_determinism(api_client):
+    h = _http_env(api_client, "m33a")
+    # a fresh dataset hosts two extra tokenizers: tok2 (with measured
+    # samples) and tok3 (zero records anywhere); both fit vocab 640
+    up = api_client.post("/api/v1/datasets/upload",
+                         files=[("files", ("m33a2.txt",
+                                           _corpus(120, "m33a2"),
+                                           "text/plain"))],
+                         data={"name": "api16-m33a2-ds"})
+    assert up.status_code == 201, up.text
+    ds2 = up.json()["dataset_id"]
+    tok2 = _train_extra_tokenizer33(api_client, "m33a2", ds2, 500)
+    tok3 = _train_extra_tokenizer33(api_client, "m33a3", ds2, 450)
+
+    s1 = api_client.post(GENERATE, json=_gen33(h)).json()
+    e1 = api_client.post(_quality_url(h["mid"],
+                                      s1["sample_id"])).json()
+    s2 = api_client.post(GENERATE, json=_gen33(
+        h, strategy="temperature", temperature=0.8, seed=7)).json()
+    e2 = api_client.post(_quality_url(h["mid"],
+                                      s2["sample_id"])).json()
+    s3 = api_client.post(GENERATE, json=_gen33(
+        h, tokenizer_id=tok2)).json()
+    e3 = api_client.post(_quality_url(h["mid"],
+                                      s3["sample_id"])).json()
+    e4 = api_client.post(_quality_url(h["mid"],
+                                      s3["sample_id"])).json()
+
+    url = BY_TOK33.format(mid=h["mid"], tok=h["tok"])
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # authoritative-filter parity: exact subset of the M16 listing
+    # whose persisted tokenizer_id matches, in the same order
+    listing = api_client.get(
+        f"{MODELS}/{h['mid']}/sample-quality").json()
+    assert recs == [x for x in listing
+                    if x["tokenizer_id"] == h["tok"]]
+    assert {x["evaluation_id"] for x in recs} == {e1["evaluation_id"],
+                                                  e2["evaluation_id"]}
+    keyed = [(x["created_at"], x["evaluation_id"]) for x in recs]
+    assert keyed == sorted(keyed)
+    # verbatim: each element equals its POST payload and its
+    # detail-getter payload
+    by_id = {x["evaluation_id"]: x for x in recs}
+    assert by_id[e1["evaluation_id"]] == e1
+    assert by_id[e2["evaluation_id"]] == e2
+    for x in recs:
+        one = api_client.get(
+            f"{MODELS}/{h['mid']}/sample-quality/{x['evaluation_id']}")
+        assert one.status_code == 200 and one.json() == x
+    # deterministic: three repeats return identical raw bytes
+    raws = {api_client.get(url).content for _ in range(3)}
+    assert len(raws) == 1
+    # partition: tok2 holds exactly its own two records (one sample
+    # measured twice -> distinct evaluation ids, same tokenizer),
+    # disjoint from the original tokenizer's group, together the full
+    # listing
+    recs2 = api_client.get(
+        BY_TOK33.format(mid=h["mid"], tok=tok2)).json()
+    assert {x["evaluation_id"] for x in recs2} == {e3["evaluation_id"],
+                                                   e4["evaluation_id"]}
+    assert len({x["evaluation_id"] for x in recs2}) == 2
+    ids1 = {x["evaluation_id"] for x in recs}
+    ids2 = {x["evaluation_id"] for x in recs2}
+    assert ids1.isdisjoint(ids2)
+    assert ids1 | ids2 == {x["evaluation_id"] for x in listing}
+    # valid tokenizer with zero records for the model -> [] (200)
+    empty = api_client.get(BY_TOK33.format(mid=h["mid"], tok=tok3))
+    assert empty.status_code == 200 and empty.json() == []
+    # no side effects: the filter itself added no records
+    assert len(api_client.get(
+        f"{MODELS}/{h['mid']}/sample-quality").json()) == 4
+
+
+def test_m33_api_404s_isolation_regressions_openapi(api_client):
+    h = _http_env(api_client, "m33b")
+    h2 = _http_env(api_client, "m33c")     # second real model
+    s1 = api_client.post(GENERATE, json=_gen33(h)).json()
+    e1 = api_client.post(_quality_url(h["mid"],
+                                      s1["sample_id"])).json()
+
+    # 404s: unknown model / unknown tokenizer (two ghost forms)
+    assert api_client.get(BY_TOK33.format(mid="ghost-model-33",
+                                          tok=h["tok"])).status_code == 404
+    assert api_client.get(BY_TOK33.format(mid=h["mid"],
+                                          tok="ghost-tok-33")).status_code == 404
+    assert api_client.get(
+        f"{MODELS}/{h['mid']}/sample-quality/by-tokenizer/"
+        "m33--not-a-real-tokenizer-id").status_code == 404
+    assert api_client.get(BY_TOK33.format(mid="ghost-model-33",
+                                          tok="ghost-tok-33")).status_code == 404
+
+    # cross-model isolation: tokenizers are global, but the other
+    # model's group is empty (scoping from the model's own listing)
+    iso = api_client.get(BY_TOK33.format(mid=h2["mid"], tok=h["tok"]))
+    assert iso.status_code == 200 and iso.json() == []
+
+    # M16 generic listing/getter + M18 records unchanged
+    listing = api_client.get(
+        f"{MODELS}/{h['mid']}/sample-quality").json()
+    assert [x["evaluation_id"] for x in listing] == [e1["evaluation_id"]]
+    got = api_client.get(
+        f"{MODELS}/{h['mid']}/sample-quality/{e1['evaluation_id']}")
+    assert got.status_code == 200 and got.json() == e1
+    records = api_client.get(
+        f"{MODELS}/{h['mid']}/sample-quality/records").json()
+    assert records == listing
+    # M19 by-sample / M20 by-checkpoint regressions: same listing,
+    # other groupings, unconfused
+    bysample = api_client.get(
+        f"{MODELS}/{h['mid']}/sample-quality/by-sample/"
+        f"{s1['sample_id']}").json()
+    assert [x["evaluation_id"] for x in bysample] == [e1["evaluation_id"]]
+    byck = api_client.get(
+        f"{MODELS}/{h['mid']}/sample-quality/by-checkpoint/"
+        f"{h['ckpt']}").json()
+    assert [x["evaluation_id"] for x in byck] == [e1["evaluation_id"]]
+    # generic detail getter still 404s ghost ids (no route capture)
+    assert api_client.get(
+        f"{MODELS}/{h['mid']}/sample-quality/ghost-eval-33"
+    ).status_code == 404
+    # M30 evaluation-by-tokenizer regression: parity with the M4
+    # listing filtered by persisted tokenizer identity
+    evs = api_client.get(f"{MODELS}/{h['mid']}/evaluations").json()
+    evt = api_client.get(f"{MODELS}/{h['mid']}/evaluations/by-tokenizer/"
+                         f"{h['tok']}").json()
+    assert evt == [e for e in evs if e["tokenizer_id"] == h["tok"]]
+    # M32 samples-by-tokenizer regression: the measured sample sits in
+    # its tokenizer's sample group
+    smp = api_client.get(f"{MODELS}/{h['mid']}/samples/by-tokenizer/"
+                         f"{h['tok']}").json()
+    assert [x["sample_id"] for x in smp] == [s1["sample_id"]]
+
+    # OpenAPI: 65 paths, the new path exactly once, GET-only, tag
+    # sample-quality, SampleEvaluationRecord items; route order M20
+    # by-checkpoint < by-tokenizer < generic detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer) = 65
+    assert len(spec["paths"]) == 65
+    path = ("/api/v1/models/{model_id}/sample-quality/by-tokenizer"
+            "/{tokenizer_id}")
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["sample-quality"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/SampleEvaluationRecord"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/sample-quality/"
+                      "by-checkpoint/{checkpoint_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/sample-quality/{evaluation_id}")

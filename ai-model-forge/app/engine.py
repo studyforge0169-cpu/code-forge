@@ -700,6 +700,28 @@ class ModelForge:
         return self.sample_quality.list_sample_evaluations_for_checkpoint(
             model_id, checkpoint_id)
 
+    def list_sample_evaluations_for_tokenizer(
+            self, model_id: str, tokenizer_id: str
+    ) -> list[SampleEvaluationRecord]:
+        """Immutable M16 sample-quality measurements of ONE model whose
+        measured samples were generated with ONE tokenizer (M33
+        read-only access).
+
+        The tokenizer must exist in the GLOBAL M2 tokenizer registry
+        (unknown tokenizer -> FileNotFoundError -> 404); model scoping
+        comes from the model's own M16 listing. Returns the
+        authoritative M16 listing filtered by the persisted measurement
+        tokenizer identity — every record carries a required
+        non-nullable top-level tokenizer_id (the measured sample's
+        recorded state) and belongs to the request only when that
+        persisted id matches VERBATIM (nothing is inferred from
+        filenames, sample or checkpoint ids; no latest-tokenizer
+        substitution) — in the M16 (created_at, evaluation_id) order.
+        A valid tokenizer with no measurements for the model returns
+        []. Read-only, never writes."""
+        return self.sample_quality.list_sample_evaluations_for_tokenizer(
+            model_id, tokenizer_id)
+
 
 # --------------------------------------------------------------------------- #
 # Module-level singleton (bound to FORGE_ROOT at import time; tests override

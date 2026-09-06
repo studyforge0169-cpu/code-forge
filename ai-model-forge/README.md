@@ -1232,11 +1232,59 @@ generation never trains, evaluates, scores, ranks or judges output.
   by-tokenizer, M31 comparisons by-tokenizer, the tokenizer registry
   and the M16–M31 surfaces are byte-identical before and after
 
+### Milestone 33 — sample-quality history by tokenizer
+  (`sample-quality/by-tokenizer`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/sample-quality/by-tokenizer/{tokenizer_id}` —
+  answers "which immutable M16 sample-quality measurements of this
+  model measured samples generated with this tokenizer?" and nothing
+  else
+- **exact filtering (persisted measurement tokenizer identity)**:
+  every `SampleEvaluationRecord` carries a required non-nullable
+  top-level `tokenizer_id` (M16 measures an immutable M15 sample
+  under its own RECORDED state; the record persists that state's
+  tokenizer identity), and a measurement belongs to the request only
+  when that persisted id matches VERBATIM — never filenames, paths,
+  sample ids, checkpoint ids, tokenizer contents or hashes, the
+  tokenizer currently registered, or a latest-tokenizer substitution
+  (tokenizer ids are opaque; M2/M16 have no tokenizer versioning and
+  none is introduced; `SampleEvaluationRecord` is NOT altered for
+  this endpoint). Each matching record appears EXACTLY ONCE (the
+  authoritative listing holds each record exactly once)
+- **global tokenizers, model-scoped history**: the tokenizer is
+  validated through the existing GLOBAL M2 registry first
+  (`TokenizerEngine.load` — the same getter `GET /tokenizers/{id}`
+  exposes; unknown tokenizer → 404). Model scoping comes from the
+  model's own authoritative M16 listing — a model never sees another
+  model's measurements. Returned records are verbatim
+  `SampleEvaluationRecord` payloads (loss/perplexity included) in the
+  exact M16 authoritative order ((created_at, evaluation_id)
+  ASCENDING); a valid tokenizer with no measurements for the model is
+  a deterministic `[]` — never a 404
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_sample_evaluations_for_tokenizer(model_id,
+  tokenizer_id)` validates through the tokenizer registry handle
+  ALREADY composed in `SampleQualityEngine.__init__` (M16 measurement
+  uses the same handle; no new composition) and filters the
+  authoritative M16 `list_sample_evaluations()` by the persisted
+  `tokenizer_id`; the facade and route are thin pass-throughs
+  registered after the M20 by-checkpoint route and **before** the
+  generic `/sample-quality/{evaluation_id}` detail getter (M19/M20/
+  M33 are different groupings of the same listing, all intact). No
+  caches, no new storage — repeated GETs are byte-identical and the
+  endpoint never writes
+- **isolation & boundaries**: unknown model/tokenizer -> existing
+  404s; valid tokenizer without measurements for the model -> `[]`.
+  M16 (measure, listing, records, getter), M18 records, M19
+  by-sample, M20 by-checkpoint, M30/M31/M32 by-tokenizer surfaces,
+  the tokenizer registry and the M16–M32 surfaces are byte-identical
+  before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 470 tests
+pytest                       # 475 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1729,9 +1777,10 @@ ai-model-forge/
     sampling.py         # checkpoint sampling: deterministic generation (M15)
                        # + read-only by-checkpoint grouping of the history (M27)
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
+                       # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 470 tests across 20 suites
+  tests/               # 475 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
