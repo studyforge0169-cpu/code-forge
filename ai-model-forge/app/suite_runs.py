@@ -45,6 +45,11 @@ Rules honoured here (tested):
     this named suite?" — the model's authoritative listing above,
     filtered by the persisted suite_id, after M9 registry resolution.
     No new store, index, cache or manifest format; never writes
+  * read-only per-suite bookkeeping summary (M22):
+    ``list_suite_run_summary_for_suite`` derives a counting/identity
+    summary (total_count, ordered run ids, earliest/latest timestamps)
+    from the M21 filter — pure recomputation, never persisted, no
+    scores/averages/trends, never writes
 """
 
 from __future__ import annotations
@@ -63,6 +68,7 @@ from .schemas import (
     SuiteRunRecord,
     SuiteRunRequest,
     SuiteRunStatus,
+    SuiteRunSummary,
     utcnow,
 )
 from .storage import atomic_write_json, read_json
@@ -250,6 +256,36 @@ class SuiteRunEngine:
         self.policies.get_suite(suite_id)
         return [r for r in self.list_suite_runs(model_id)
                 if r.suite_id == suite_id]
+
+    # ------------------------------------------------------------------ #
+    # M22: per-suite bookkeeping summary (read-only)
+    # ------------------------------------------------------------------ #
+
+    def list_suite_run_summary_for_suite(self, model_id: str,
+                                         suite_id: str) -> SuiteRunSummary:
+        """Read-only bookkeeping summary of ONE model's suite-run history
+        for ONE named suite (M22).
+
+        A pure derived view: reuses ``list_suite_runs_for_suite`` (M21)
+        exactly — model + M9 suite-registry validation, persisted
+        suite_id filter, deterministic (created_at, suite_run_id)
+        ASCENDING order — and reports only identity/counting bookkeeping:
+        total_count, the ordered run ids, and the earliest/latest
+        created_at timestamps of the summarized records. A valid suite
+        with no runs for this model yields total_count 0, empty run_ids
+        and None timestamps (never a 404). No scores, averages, trends,
+        verdicts or any interpretation; nothing is persisted; read-only,
+        never writes.
+        """
+        records = self.list_suite_runs_for_suite(model_id, suite_id)
+        return SuiteRunSummary(
+            model_id=model_id,
+            suite_id=suite_id,
+            total_count=len(records),
+            run_ids=[r.suite_run_id for r in records],
+            earliest_created_at=records[0].created_at if records else None,
+            latest_created_at=records[-1].created_at if records else None,
+        )
 
     # ------------------------------------------------------------------ #
     # Deterministic hashing

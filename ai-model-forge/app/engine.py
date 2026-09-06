@@ -32,6 +32,7 @@ from .schemas import (
     ProbeSuiteCreateRequest,
     SuiteRunRecord,
     SuiteRunRequest,
+    SuiteRunSummary,
     WorkflowRecord,
     WorkflowRecipe,
     WorkflowRecipeCreateRequest,
@@ -376,6 +377,21 @@ class ModelForge:
         (created_at, suite_run_id) order; a valid suite with no runs for
         this model returns []. Read-only, never writes."""
         return self.suite_runs.list_suite_runs_for_suite(model_id, suite_id)
+
+    def list_suite_run_summary_for_suite(self, model_id: str,
+                                         suite_id: str) -> SuiteRunSummary:
+        """Read-only bookkeeping summary of ONE model's suite-run history
+        for ONE named suite (M22).
+
+        Reuses the M21 filter exactly (model + M9 suite-registry
+        validation, persisted suite_id, deterministic M10 order) and
+        derives only identity/counting bookkeeping: total_count, the
+        ordered run ids and the earliest/latest recorded run timestamps.
+        A valid suite with no runs yields a zero summary (total_count 0,
+        empty run_ids, None timestamps), not a 404. Never writes.
+        """
+        return self.suite_runs.list_suite_run_summary_for_suite(
+            model_id, suite_id)
 
     # ------------------------------------------------------------------ #
     # Workflow recipes (immutable reusable M7 plans; definitions only; M12)

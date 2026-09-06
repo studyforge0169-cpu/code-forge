@@ -785,5 +785,195 @@ def test_m21_api_existing_surfaces_and_openapi(api_client):
         "$ref": "#/components/schemas/SuiteRunRecord"}
     assert "SuiteRunRecord" in spec["components"]["schemas"]
     # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
-    # + 1 (M21) = 53
-    assert len(spec["paths"]) == 53
+    # + 1 (M21) + 1 (M22 summary) = 54
+    assert len(spec["paths"]) == 54
+
+
+# =========================================================================== #
+# M22: read-only per-suite bookkeeping summary over the M21 grouping
+# =========================================================================== #
+
+SUMMARY = "/api/v1/models/{mid}/suite-runs/by-suite/{suite}/summary"
+
+
+def test_m22_engine_summary_fields_order_and_parity(env):
+    a, b, sx, sy, ra, ra_y, rb1 = _m21_env(env)
+    f = env.forge
+    listing = f.list_suite_runs_for_suite(a, sx)
+    s = f.list_suite_run_summary_for_suite(a, sx)
+    # only identity/counting bookkeeping fields
+    assert set(s.model_dump()) == {"model_id", "suite_id", "total_count",
+                                   "run_ids", "earliest_created_at",
+                                   "latest_created_at"}
+    assert s.model_id == a and s.suite_id == sx
+    assert s.total_count == 2
+    # run ids are exactly the M21 listing, same deterministic order
+    assert s.run_ids == [r.suite_run_id for r in listing]
+    assert s.run_ids == [r.suite_run_id for r in ra]
+    # earliest/latest are the summarized records' min/max created_at
+    assert s.earliest_created_at == listing[0].created_at
+    assert s.latest_created_at == listing[-1].created_at
+    assert s.earliest_created_at == min(r.created_at for r in listing)
+    assert s.latest_created_at == max(r.created_at for r in listing)
+    # a second suite of the same model summarizes only its own run
+    sy_sum = f.list_suite_run_summary_for_suite(a, sy)
+    assert sy_sum.total_count == 1
+    assert sy_sum.run_ids == [r.suite_run_id for r in ra_y]
+
+
+def test_m22_engine_zero_summary_404s_and_read_only(env):
+    a, b, sx, sy, ra, ra_y, rb1 = _m21_env(env)
+    f = env.forge
+    # valid registered suite, model b has no runs of it -> ZERO summary
+    zero = f.list_suite_run_summary_for_suite(b, sy)
+    assert zero.model_id == b and zero.suite_id == sy
+    assert zero.total_count == 0 and zero.run_ids == []
+    assert zero.earliest_created_at is None
+    assert zero.latest_created_at is None
+    # model b's own suite-x history stays separate (exactly its one run)
+    b_sum = f.list_suite_run_summary_for_suite(b, sx)
+    assert b_sum.total_count == 1 and b_sum.run_ids == [rb1.suite_run_id]
+    # unknown model -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_suite_run_summary_for_suite("ghost-model-22", sx)
+    # unknown suite -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_suite_run_summary_for_suite(a, "m22-ghost-suite")
+    # read-only: summaries never write run manifests
+    before = env.run_files()
+    f.list_suite_run_summary_for_suite(a, sx)
+    f.list_suite_run_summary_for_suite(b, sy)
+    assert env.run_files() == before
+
+
+def test_m22_engine_repeated_calls_identical(env):
+    a, _, sx, _, _, _, _ = _m21_env(env)
+    f = env.forge
+    first = f.list_suite_run_summary_for_suite(a, sx).model_dump(mode="json")
+    for _ in range(3):
+        again = f.list_suite_run_summary_for_suite(a, sx)
+        assert again.model_dump(mode="json") == first
+
+
+def test_m22_api_summary_parity_and_determinism(api_client):
+    h = _http_env(api_client, "m22api", train=True)
+    mid, ds, tok, ck = h["mid"], h["ds"], h["tok"], h["ck"]
+    probes = [{"dataset_id": ds, "split": "validation", "tokenizer_id": tok,
+               "batch_size": 8, "max_seq_len": 32, "seed": 5301},
+              {"dataset_id": ds, "split": "validation", "tokenizer_id": tok,
+               "batch_size": 8, "max_seq_len": 32, "seed": 5302}]
+    api_client.post("/api/v1/probe-suites",
+                    json={"suite_id": "api22-suite-a", "probes": probes})
+    api_client.post("/api/v1/probe-suites",
+                    json={"suite_id": "api22-suite-b",
+                          "probes": probes[:1]})
+    body = {"model_id": mid, "state": {"state_kind": "checkpoint",
+                                       "checkpoint_id": ck}}
+    r1 = api_client.post(SUITE_RUNS,
+                         json=dict(body, suite_id="api22-suite-a")).json()
+    r2 = api_client.post(SUITE_RUNS,
+                         json=dict(body, suite_id="api22-suite-a")).json()
+    r3 = api_client.post(SUITE_RUNS,
+                         json=dict(body, suite_id="api22-suite-b")).json()
+    url = SUMMARY.format(mid=mid, suite="api22-suite-a")
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    s = got.json()
+    # parity with the M21 by-suite listing of the same model + suite
+    listing = api_client.get(
+        BY_SUITE.format(mid=mid, suite="api22-suite-a")).json()
+    assert s["model_id"] == mid and s["suite_id"] == "api22-suite-a"
+    assert s["total_count"] == 2 == len(listing)
+    assert s["run_ids"] == [x["suite_run_id"] for x in listing]
+    assert s["run_ids"] == [r1["suite_run_id"], r2["suite_run_id"]]
+    assert s["earliest_created_at"] == listing[0]["created_at"] == \
+        min(x["created_at"] for x in listing)
+    assert s["latest_created_at"] == listing[-1]["created_at"] == \
+        max(x["created_at"] for x in listing)
+    # the suite-b run stays out of the suite-a summary
+    assert r3["suite_run_id"] not in s["run_ids"]
+    # repeated GET returns identical JSON (and identical raw bytes)
+    raw1 = api_client.get(url).content
+    raw2 = api_client.get(url).content
+    assert raw1 == raw2 and json.loads(raw1) == s
+    # valid suite with no runs for a second model -> ZERO summary
+    cfg = {"name": "api22-b-model", "vocab_size": 640, "context_length": 64,
+           "hidden_size": 64, "n_layers": 2, "n_heads": 4, "n_kv_heads": 2,
+           "intermediate_size": 128}
+    mid_b = api_client.post(MODELS, json={"config": cfg}).json()["model"]["id"]
+    zero = api_client.get(SUMMARY.format(mid=mid_b, suite="api22-suite-a"))
+    assert zero.status_code == 200
+    assert zero.json() == {"model_id": mid_b, "suite_id": "api22-suite-a",
+                           "total_count": 0, "run_ids": [],
+                           "earliest_created_at": None,
+                           "latest_created_at": None}
+
+
+def test_m22_api_404s_isolation_and_prior_surfaces(api_client):
+    h = _http_env(api_client, "m22err", train=True)
+    mid, ds, tok, ck = h["mid"], h["ds"], h["tok"], h["ck"]
+    probe = {"dataset_id": ds, "split": "validation", "tokenizer_id": tok,
+             "batch_size": 8, "max_seq_len": 32, "seed": 5311}
+    api_client.post("/api/v1/probe-suites",
+                    json={"suite_id": "api22-iso-suite", "probes": [probe]})
+    run = api_client.post(SUITE_RUNS, json={
+        "model_id": mid, "suite_id": "api22-iso-suite",
+        "state": {"state_kind": "checkpoint", "checkpoint_id": ck}}).json()
+    # unknown model -> 404 (even with a real suite id)
+    assert api_client.get(SUMMARY.format(mid="ghost-model-22",
+                                         suite="api22-iso-suite")) \
+        .status_code == 404
+    # unknown suite -> 404 (even with a real model id)
+    assert api_client.get(SUMMARY.format(mid=mid,
+                                         suite="api22-ghost-suite")) \
+        .status_code == 404
+    # cross-model isolation: another real model + this real suite -> a
+    # ZERO summary; the first model's run ids are never counted/leaked
+    cfg = {"name": "api22-iso-b", "vocab_size": 640, "context_length": 64,
+           "hidden_size": 64, "n_layers": 2, "n_heads": 4, "n_kv_heads": 2,
+           "intermediate_size": 128}
+    mid_b = api_client.post(MODELS, json={"config": cfg}).json()["model"]["id"]
+    leak = api_client.get(SUMMARY.format(mid=mid_b,
+                                         suite="api22-iso-suite"))
+    assert leak.status_code == 200 and leak.json()["total_count"] == 0
+    assert run["suite_run_id"] not in leak.json()["run_ids"]
+    # M21 by-suite unchanged: still the full record list (not a summary)
+    recs = api_client.get(BY_SUITE.format(mid=mid,
+                                          suite="api22-iso-suite")).json()
+    assert [x["suite_run_id"] for x in recs] == [run["suite_run_id"]]
+    assert api_client.get(BY_SUITE.format(mid=mid_b,
+                                          suite="api22-iso-suite")) \
+        .json() == []
+    # M10 listing/detail unchanged
+    listing = api_client.get(MODEL_SUITE_RUNS.format(mid=mid)).json()
+    assert run["suite_run_id"] in {x["suite_run_id"] for x in listing}
+    assert api_client.get(
+        f"{MODEL_SUITE_RUNS.format(mid=mid)}/{run['suite_run_id']}") \
+        .json() == run
+    # M16-M20 sample-quality surface intact
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality").status_code == 200
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality/records").status_code == 200
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality/by-sample/no-such-sample") \
+        .status_code == 404
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality/by-checkpoint/no-such-ck") \
+        .status_code == 404
+
+
+def test_m22_api_openapi_documented(api_client):
+    spec = api_client.get("/openapi.json").json()
+    path = ("/api/v1/models/{model_id}/suite-runs/by-suite/{suite_id}"
+            "/summary")
+    assert path in spec["paths"]
+    ops = spec["paths"][path]
+    assert set(ops) == {"get"} and ops["get"]["tags"] == ["suite-runs"]
+    schema = (ops["get"]["responses"]["200"]["content"]
+              ["application/json"]["schema"])
+    assert schema == {"$ref": "#/components/schemas/SuiteRunSummary"}
+    assert "SuiteRunSummary" in spec["components"]["schemas"]
+    # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
+    # + 1 (M21) + 1 (M22) = 54
+    assert len(spec["paths"]) == 54

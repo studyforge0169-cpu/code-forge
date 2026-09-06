@@ -1897,6 +1897,28 @@ class SuiteRunRecord(BaseModel):
     schema_version: int = 1
 
 
+class SuiteRunSummary(BaseModel):
+    """Read-only bookkeeping summary of ONE model's suite-run history for
+    ONE named suite (M22).
+
+    A pure derived view over the immutable SuiteRunRecord manifests: it
+    contains only identity/counting bookkeeping (which run ids exist, in
+    the deterministic M21 order, and how many) plus the earliest/latest
+    recorded run timestamps — never scores, averages, trends or judgments.
+    ``earliest_created_at``/``latest_created_at`` are None exactly when the
+    model has no runs of the suite (total_count 0). Never persisted, never
+    written: recomputed deterministically from the M21 filter on request.
+    """
+
+    model_id: str
+    suite_id: str
+    total_count: int                      # number of suite-run records (>= 0)
+    run_ids: list[str] = Field(default_factory=list)
+                                           # ASCENDING (created_at, id)
+    earliest_created_at: Optional[datetime] = None   # None when no runs
+    latest_created_at: Optional[datetime] = None     # None when no runs
+
+
 # --------------------------------------------------------------------------- #
 # Named workflow recipes (immutable reusable M7 plans; M12)
 # --------------------------------------------------------------------------- #

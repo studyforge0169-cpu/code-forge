@@ -823,8 +823,9 @@ def test_api_openapi_exposes_sample_quality(api_client):
             in spec["paths"])
     assert "SampleEvaluationRecord" in spec["components"]["schemas"]
     # surface: 46 (M15 era) + 3 (M16) + 0 (M17) + 1 (M18) + 1 (M19)
-    # + 1 (M20) + 1 (M21 suite-runs by-suite) = 53
-    assert len(spec["paths"]) == 53
+    # + 1 (M20) + 1 (M21 suite-runs by-suite)
+    # + 1 (M22 by-suite summary) = 54
+    assert len(spec["paths"]) == 54
 
 
 # =========================================================================== #
@@ -1050,8 +1051,9 @@ def test_api_openapi_records_route(api_client):
     assert ("/api/v1/models/{model_id}/sample-quality/{evaluation_id}"
             in spec["paths"])
     # surface: 46 (M15 era) + 3 (M16) + 0 (M17) + 1 (M18) + 1 (M19)
-    # + 1 (M20) + 1 (M21 suite-runs by-suite) = 53
-    assert len(spec["paths"]) == 53
+    # + 1 (M20) + 1 (M21 suite-runs by-suite)
+    # + 1 (M22 by-suite summary) = 54
+    assert len(spec["paths"]) == 54
 
 
 # =========================================================================== #
@@ -1268,8 +1270,9 @@ def test_api_openapi_by_sample_route(api_client):
     assert "/api/v1/models/{model_id}/sample-quality/records" in spec["paths"]
     assert ("/api/v1/models/{model_id}/sample-quality/{evaluation_id}"
             in spec["paths"])
-    # M19, M20 and M21 each added exactly one documented route -> 53
-    assert len(spec["paths"]) == 53
+    # M19, M20, M21 and M22 each added exactly one documented route
+    # -> 54
+    assert len(spec["paths"]) == 54
 
 
 # =========================================================================== #
@@ -1505,5 +1508,6 @@ def test_api_openapi_by_checkpoint_route(api_client):
             in spec["paths"])
     assert ("/api/v1/models/{model_id}/sample-quality/{evaluation_id}"
             in spec["paths"])
-    # M18/M19/M20/M21 each added exactly one documented route -> 53
-    assert len(spec["paths"]) == 53
+    # M18/M19/M20/M21/M22 each added exactly one documented route
+    # -> 54
+    assert len(spec["paths"]) == 54

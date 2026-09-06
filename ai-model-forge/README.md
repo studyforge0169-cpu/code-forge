@@ -806,11 +806,36 @@ generation never trains, evaluates, scores, ranks or judges output.
   M10 (run, listing, getter, hashes, manifests), the M13 dashboard and the
   M16–M20 sample-quality surface are byte-identical before and after
 
+### Milestone 22 — per-suite bookkeeping summary (`by-suite/summary`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/suite-runs/by-suite/{suite_id}/summary` — answers "how
+  many suite runs exist for this model and suite, which ones, and when did
+  they run?" — a pure derived counting view over the M21 grouping
+- **bookkeeping only**: the summary contains exactly `model_id`,
+  `suite_id`, `total_count`, `run_ids` (the deterministic M21 ASCENDING
+  order) and `earliest_created_at`/`latest_created_at` — nothing else. A
+  valid suite with no runs returns a ZERO summary (count 0, empty ids,
+  null timestamps), not a 404. No scores, rankings, averages, trends,
+  regression judgments, verdicts or new metrics — ever
+- **implementation is a reuse, not a second engine**: the engine method
+  `list_suite_run_summary_for_suite(model_id, suite_id)` calls the M21
+  `list_suite_runs_for_suite` filter (model + M9 suite-registry
+  validation, persisted `suite_id`, exact M10 ordering) and derives the
+  counts/min/max from the parsed records; the facade and route are thin
+  pass-throughs. Nothing is persisted — the summary is recomputed
+  deterministically per request; repeated GETs are byte-identical and the
+  endpoint never writes
+- **isolation & boundaries**: a model only ever sees its own runs;
+  another model's runs are never counted (cross-model yields a zero
+  summary). Unknown model/suite -> existing 404s. M21 by-suite (full
+  record payloads), M10 (run/listing/getter), the M13 dashboard and the
+  M16–M20 sample-quality surface are byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 414 tests
+pytest                       # 420 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1295,13 +1320,13 @@ ai-model-forge/
     dashboards.py      # read-only dashboard engine: deterministic views (M8/M13)
     policies.py        # policy registry + probe suites: immutable definitions (M9)
     suite_runs.py      # explicit multi-probe M4 batches over named suites (M10)
-                       # + read-only by-suite grouping of the history (M21)
+                       # + read-only by-suite grouping & summary (M21/M22)
     recipes.py         # workflow recipes: immutable plans + M14 composition (M12/M14)
     sampling.py         # checkpoint sampling: deterministic generation (M15)
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 414 tests across 20 suites
+  tests/               # 420 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

@@ -32,6 +32,7 @@ from .schemas import (
     ProbeSuiteCreateRequest,
     SuiteRunRecord,
     SuiteRunRequest,
+    SuiteRunSummary,
     ModelRecord,
     ProjectInfo,
     SampleGenerateRequest,
@@ -284,6 +285,15 @@ def index() -> HTMLResponse:
         payloads, exact M10 ordering; unknown model or suite -> 404; a
         valid suite without runs for this model -> []). Pure data access —
         no aggregation, no scores, no ranking, zero storage growth.</li>
+
+      <li><b>M22 per-suite bookkeeping summary</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;/summary</code>,
+        answers "how many suite runs exist for this model and suite, which
+        ones, and when did they run?": a pure derived counting view over
+        the M21 grouping — total_count, ordered run ids, earliest/latest
+        recorded timestamps. A valid suite without runs returns a zero
+        summary; unknown model/suite -> 404. No scores, averages, trends
+        or judgments; never persisted, zero storage growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -318,6 +328,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/suite-runs</code> — execute one named suite against one state (independent M4 evaluations, immutable run record)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs</code> / <code>GET {prefix}/models/&#123;id&#125;/suite-runs/&#123;run&#125;</code> — immutable suite-run history</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;</code> — suite-run records of ONE named suite (read-only, deterministic, no aggregation)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;/summary</code> — bookkeeping summary of ONE suite's runs (count, ordered ids, earliest/latest; read-only)</li>
       <li><code>POST  {prefix}/workflows/recipes</code> — register an immutable workflow recipe (idempotent; conflicts 409)</li>
       <li><code>GET   {prefix}/workflows/recipes</code> / <code>GET {prefix}/workflows/recipes/&#123;recipe_id&#125;</code> — immutable recipes</li>
       <li><code>POST  {prefix}/workflows/recipes/&#123;recipe_id&#125;/runs</code> — execute a recipe against one explicit model (existing M7 engine)</li>
@@ -892,6 +903,27 @@ def list_suite_runs_by_suite(model_id: str, suite_id: str
     "by-suite" segment is not a suite-run id.)"""
     try:
         return _forge().list_suite_runs_for_suite(model_id, suite_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/suite-runs/by-suite/{suite_id}/summary",
+         response_model=SuiteRunSummary, tags=["suite-runs"])
+def summarize_suite_runs_by_suite(model_id: str, suite_id: str
+                                  ) -> SuiteRunSummary:
+    """Read-only bookkeeping summary of ONE model's suite-run history for
+    ONE named suite (M22).
+
+    Pure derived view over the immutable records: the exact M21 grouping
+    (model + M9 suite-registry validation, persisted suite_id filter) is
+    summarized with identity/counting bookkeeping only — total_count, the
+    run ids in the deterministic M21 ASCENDING (created_at, suite_run_id)
+    order, and the earliest/latest recorded run timestamps. A valid suite
+    with no runs for this model returns a zero summary (total_count 0,
+    empty run_ids, null timestamps), not a 404. No scores, averages,
+    trends, verdicts or comparisons; never persisted, never writes."""
+    try:
+        return _forge().list_suite_run_summary_for_suite(model_id, suite_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
