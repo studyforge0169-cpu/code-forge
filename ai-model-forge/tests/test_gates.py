@@ -27,6 +27,7 @@ from app.schemas import (
     GatePolicy,
     GateRequest,
     ModelCreateRequest,
+    PolicyCreateRequest,
     TokenizerConfig,
     TrainingConfig,
     TransformerConfig,
@@ -729,3 +730,130 @@ def test_probe_compatibility_rejected(env):
     p = env.policy(baseline_type="checkpoint", baseline_ckpt=a, max_seq_len=128)
     with pytest.raises(ValueError):
         env.forge.run_gate(env.gate(p, cand_ckpt=a))
+
+
+# =========================================================================== #
+# M23: read-only per-policy grouping of the immutable gate-decision history
+# =========================================================================== #
+
+def _m23_env(env):
+    """Two models, three registered policies, decisions spread across them
+    (model_a: pol-a twice + pol-b once + one INLINE decision; model_b:
+    its own pol-bb once). Built once per module env and cached — every
+    M23 engine test sees the exact same immutable history. Returns
+    (d1, d2, d3, d_inline, model_b, d_b).
+    """
+    cached = getattr(env, "_m23_state", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    base_kw = dict(baseline_type="checkpoint",
+                   baseline_ckpt=env.imp_early.checkpoint_id)
+    f.register_policy(PolicyCreateRequest(
+        policy_id="m23-pol-a", description="m23 policy a",
+        policy=env.policy(seed=6301, name="m23-pol-a", **base_kw)))
+    f.register_policy(PolicyCreateRequest(
+        policy_id="m23-pol-b", description="m23 policy b",
+        policy=env.policy(seed=6302, name="m23-pol-b", **base_kw)))
+    d1 = f.run_gate(GateRequest(
+        model_id=env.model_id, policy_id="m23-pol-a",
+        candidate=env.state("checkpoint", env.imp_final.checkpoint_id)))
+    d2 = f.run_gate(GateRequest(
+        model_id=env.model_id, policy_id="m23-pol-a",
+        candidate=env.state("checkpoint", env.reg_final.checkpoint_id)))
+    d3 = f.run_gate(GateRequest(
+        model_id=env.model_id, policy_id="m23-pol-b",
+        candidate=env.state("checkpoint", env.imp_final.checkpoint_id)))
+    d_inline = f.run_gate(env.gate(
+        env.policy(baseline_type="checkpoint",
+                   baseline_ckpt=env.imp_early.checkpoint_id, seed=6303),
+        cand_ckpt=env.imp_final.checkpoint_id))          # policy_id is None
+    # a second model with its own registered policy + one decision
+    m_b = f.create_model(ModelCreateRequest(config=TransformerConfig(
+        name="m23-b", vocab_size=640, context_length=64, hidden_size=64,
+        n_layers=2, n_heads=4, n_kv_heads=2, intermediate_size=128,
+        seed=63)))[0].id
+    f.register_policy(PolicyCreateRequest(
+        policy_id="m23-pol-bb", description="m23 policy of model b",
+        policy=env.policy(baseline_type="current", seed=6304,
+                          name="m23-pol-bb", model_id=m_b)))
+    d_b = f.run_gate(GateRequest(model_id=m_b, policy_id="m23-pol-bb",
+                                 candidate=env.state("current")))
+    env._m23_state = (d1, d2, d3, d_inline, m_b, d_b)
+    return env._m23_state
+
+
+def _m23_gate_files(env, model_ids) -> set[str]:
+    out = set()
+    for mid in model_ids:
+        root = env.gates_root(mid)
+        if root == []:
+            continue
+        for p in root.rglob("*"):
+            if p.is_file():
+                out.add(f"{mid}:{p.relative_to(root).as_posix()}")
+    return out
+
+
+def test_m23_engine_filters_by_persisted_policy_and_model(env):
+    d1, d2, d3, d_inline, m_b, d_b = _m23_env(env)
+    f = env.forge
+    got = f.list_gate_decisions_for_policy(env.model_id, "m23-pol-a")
+    # every record belongs to the requested model AND policy; ordering is
+    # the exact M6 convention ((created_at, decision_id) ascending)
+    assert [d.decision_id for d in got] == [d1.decision_id, d2.decision_id]
+    assert all(d.model_id == env.model_id and d.policy_id == "m23-pol-a"
+               for d in got)
+    assert [(d.created_at, d.decision_id) for d in got] == \
+        sorted((d.created_at, d.decision_id) for d in got)
+    # a second policy of the same model returns only its own decision
+    got_b = f.list_gate_decisions_for_policy(env.model_id, "m23-pol-b")
+    assert [d.decision_id for d in got_b] == [d3.decision_id]
+    # payload parity: verbatim GateDecision equality with both the
+    # authoritative M6 listing and the M6 single-record getter
+    listing = {d.decision_id: d for d in f.list_gate_decisions(env.model_id)}
+    for d in got:
+        assert d == listing[d.decision_id]
+        assert d == f.get_gate_decision(env.model_id, d.decision_id)
+    # inline-policy decisions keep policy_id None and never appear
+    assert d_inline.policy_id is None
+    all_ids = {d.decision_id for d in got} | {d.decision_id for d in got_b}
+    assert d_inline.decision_id not in all_ids
+
+
+def test_m23_engine_valid_policy_without_runs_404s_and_read_only(env):
+    d1, d2, d3, d_inline, m_b, d_b = _m23_env(env)
+    f = env.forge
+    # valid registered policy, but model b never gated under pol-a -> []
+    assert f.list_gate_decisions_for_policy(m_b, "m23-pol-a") == []
+    # model b's own policy returns exactly its own decision
+    got_bb = f.list_gate_decisions_for_policy(m_b, "m23-pol-bb")
+    assert [d.decision_id for d in got_bb] == [d_b.decision_id]
+    # cross-model: model b never sees model a's pol-a decisions
+    assert {d.decision_id for d in got_bb}.isdisjoint(
+        {d.decision_id for d in (d1, d2)})
+    # unknown model -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_gate_decisions_for_policy("ghost-model-23", "m23-pol-a")
+    # unknown policy -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_gate_decisions_for_policy(env.model_id, "m23-ghost-policy")
+    # read-only: the filter never writes decision manifests
+    models = (env.model_id, m_b)
+    before = _m23_gate_files(env, models)
+    f.list_gate_decisions_for_policy(env.model_id, "m23-pol-a")
+    f.list_gate_decisions_for_policy(m_b, "m23-pol-a")
+    assert _m23_gate_files(env, models) == before
+
+
+def test_m23_engine_repeated_calls_identical(env):
+    _m23_env(env)
+    f = env.forge
+    first = [d.model_dump(mode="json")
+             for d in f.list_gate_decisions_for_policy(env.model_id,
+                                                       "m23-pol-a")]
+    for _ in range(3):
+        again = [d.model_dump(mode="json")
+                 for d in f.list_gate_decisions_for_policy(env.model_id,
+                                                           "m23-pol-a")]
+        assert again == first

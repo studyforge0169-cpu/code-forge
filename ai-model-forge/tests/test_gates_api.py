@@ -457,3 +457,148 @@ def test_gate_openapi_and_empty_model_api(api_client):
     assert api_client.get(f"{MODELS}/{model_id}/gates/decisions/nope").status_code == 404
     assert api_client.get(f"{MODELS}/ghost/gates/decisions").status_code == 404
     assert api_client.get(f"{MODELS}/ghost/gates/decisions/nope").status_code == 404
+
+
+# =========================================================================== #
+# M23: read-only per-policy grouping of the gate-decision history (API)
+# =========================================================================== #
+
+POLICIES = "/api/v1/policies"
+BY_POLICY = "/api/v1/models/{mid}/gates/decisions/by-policy/{pid}"
+
+
+def _m23_cfg(tag: str) -> dict:
+    return {"name": f"api23-{tag}-model", "vocab_size": 640,
+            "context_length": 64, "hidden_size": 64, "n_layers": 2,
+            "n_heads": 4, "n_kv_heads": 2, "intermediate_size": 128}
+
+
+def test_m23_api_by_policy_grouping_parity_and_determinism(api_client):
+    env = _make_model(api_client, "m23a", epochs=10, eval_every=10)
+    mid, ds, tok = env["model_id"], env["ds_id"], env["tok_id"]
+    ck_e = env["ckpts"][2]["checkpoint_id"]
+    ck_f = env["ckpts"][-1]["checkpoint_id"]
+    pol = _policy(mid, ds, tok, baseline_type="checkpoint",
+                  baseline_ckpt=ck_e, seed=5401, name="api23-pol")
+    assert api_client.post(POLICIES, json={
+        "policy_id": "api23-pol-a", "description": "d",
+        "policy": pol}).status_code == 201
+    assert api_client.post(POLICIES, json={
+        "policy_id": "api23-pol-b", "description": "d",
+        "policy": dict(pol, seed=5402, name="api23-pol-b")}).status_code == 201
+    body_a = {"model_id": mid, "policy_id": "api23-pol-a",
+              "candidate": {"state_kind": "checkpoint",
+                            "checkpoint_id": ck_f}}
+    d1 = api_client.post(GATES, json=body_a).json()
+    d2 = api_client.post(GATES, json=body_a).json()
+    d3 = api_client.post(GATES, json=dict(body_a,
+                                          policy_id="api23-pol-b")).json()
+    d4 = api_client.post(GATES, json=_gate_body(
+        mid, ds, tok, baseline_type="checkpoint", baseline_ckpt=ck_e,
+        seed=5403, candidate={"state_kind": "checkpoint",
+                              "checkpoint_id": ck_f})).json()   # inline
+    url = BY_POLICY.format(mid=mid, pid="api23-pol-a")
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # exactly the two pol-a decisions, deterministic M6 order, verbatim
+    # payloads equal to the evaluate responses (existing representation)
+    assert [x["decision_id"] for x in recs] == \
+        [d1["decision_id"], d2["decision_id"]]
+    assert all(x["model_id"] == mid and x["policy_id"] == "api23-pol-a"
+               for x in recs)
+    assert [(x["created_at"], x["decision_id"]) for x in recs] == \
+        sorted((x["created_at"], x["decision_id"]) for x in recs)
+    by_id = {x["decision_id"]: x for x in recs}
+    assert by_id[d1["decision_id"]] == d1
+    assert by_id[d2["decision_id"]] == d2
+    # parity with the existing M6 listing filtered by persisted policy_id
+    listing = api_client.get(GATE_DECISIONS.format(model_id=mid)).json()
+    assert recs == [x for x in listing
+                    if x.get("policy_id") == "api23-pol-a"]
+    # the pol-b decision and the inline decision stay outside
+    assert d3["decision_id"] not in {x["decision_id"] for x in recs}
+    assert d4["policy_id"] is None
+    assert d4["decision_id"] not in {x["decision_id"] for x in recs}
+    # repeated GET returns identical JSON (and identical raw bytes)
+    raw1 = api_client.get(url).content
+    raw2 = api_client.get(url).content
+    assert raw1 == raw2 and json.loads(raw1) == recs
+
+
+def test_m23_api_404s_isolation_and_prior_surfaces(api_client):
+    env = _make_model(api_client, "m23e", epochs=10, eval_every=10)
+    mid, ds, tok = env["model_id"], env["ds_id"], env["tok_id"]
+    ck_f = env["ckpts"][-1]["checkpoint_id"]
+    pol = _policy(mid, ds, tok, baseline_type="current", seed=5411,
+                  name="api23-iso-pol")
+    assert api_client.post(POLICIES, json={
+        "policy_id": "api23-iso-pol", "description": "d",
+        "policy": pol}).status_code == 201
+    dec = api_client.post(GATES, json={
+        "model_id": mid, "policy_id": "api23-iso-pol",
+        "candidate": {"state_kind": "checkpoint",
+                      "checkpoint_id": ck_f}}).json()
+    # unknown model -> 404 (even with a real policy id)
+    assert api_client.get(BY_POLICY.format(mid="ghost-model-23",
+                                           pid="api23-iso-pol")) \
+        .status_code == 404
+    # unknown policy -> 404 (even with a real model id)
+    assert api_client.get(BY_POLICY.format(mid=mid,
+                                           pid="api23-ghost-pol")) \
+        .status_code == 404
+    # cross-model isolation: another real model + this real policy -> the
+    # valid empty case (200 + []); no foreign decision leaks
+    mid_b = api_client.post(MODELS, json={"config": _m23_cfg("iso-b")}) \
+        .json()["model"]["id"]
+    leak = api_client.get(BY_POLICY.format(mid=mid_b, pid="api23-iso-pol"))
+    assert leak.status_code == 200 and leak.json() == []
+    assert dec["decision_id"] not in {x["decision_id"] for x in leak.json()}
+    # M6 listing/detail unchanged; by-policy never shadows the detail
+    # getter
+    listing = api_client.get(GATE_DECISIONS.format(model_id=mid)).json()
+    assert dec["decision_id"] in {x["decision_id"] for x in listing}
+    assert api_client.get(f"{GATE_DECISIONS.format(model_id=mid)}/"
+                          f"{dec['decision_id']}").json() == dec
+    assert api_client.get(f"{GATE_DECISIONS.format(model_id=mid)}/"
+                          "ghost-dec").status_code == 404
+    # M9 policy registry unchanged
+    got_pol = api_client.get(f"{POLICIES}/api23-iso-pol")
+    assert got_pol.status_code == 200
+    assert got_pol.json()["policy_id"] == "api23-iso-pol"
+    # M18-M20 sample-quality surface intact
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality").status_code == 200
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality/records").status_code == 200
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality/by-sample/no-such-sample") \
+        .status_code == 404
+    assert api_client.get(
+        f"{MODELS}/{mid}/sample-quality/by-checkpoint/no-such-ck") \
+        .status_code == 404
+    # M21/M22 suite-run surfaces intact (registered suite, no runs)
+    probe = {"dataset_id": ds, "split": "validation", "tokenizer_id": tok,
+             "batch_size": 8, "max_seq_len": 32, "seed": 5421}
+    assert api_client.post("/api/v1/probe-suites",
+                           json={"suite_id": "api23-suite",
+                                 "probes": [probe]}).status_code == 201
+    assert api_client.get(
+        f"{MODELS}/{mid}/suite-runs/by-suite/api23-suite").json() == []
+    summary = api_client.get(
+        f"{MODELS}/{mid}/suite-runs/by-suite/api23-suite/summary").json()
+    assert summary["total_count"] == 0 and summary["run_ids"] == []
+    # new route documented correctly in OpenAPI (GET, right tag, schema)
+    spec = api_client.get("/openapi.json").json()
+    path = "/api/v1/models/{model_id}/gates/decisions/by-policy/{policy_id}"
+    assert path in spec["paths"]
+    ops = spec["paths"][path]
+    assert set(ops) == {"get"} and ops["get"]["tags"] == ["gates"]
+    schema = (ops["get"]["responses"]["200"]["content"]
+              ["application/json"]["schema"])
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/GateDecision"}
+    assert "GateDecision" in spec["components"]["schemas"]
+    # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
+    # + 1 (M21) + 1 (M22) + 1 (M23) = 55
+    assert len(spec["paths"]) == 55

@@ -139,6 +139,34 @@ class GateEngine:
         return GateDecision(**read_json(path))
 
     # ------------------------------------------------------------------ #
+    # M23: per-policy access (read-only)
+    # ------------------------------------------------------------------ #
+
+    def list_decisions_for_policy(self, model_id: str,
+                                  policy_id: str) -> list[GateDecision]:
+        """Immutable gate decisions of ONE registered policy of ONE model
+        (M23).
+
+        Resolution: unknown model or unregistered policy ->
+        FileNotFoundError; the policy is resolved through the existing M9
+        registry (``PolicyEngine.get_policy``) — policy identity is the
+        persisted definition manifest, never inferred from gate-directory
+        names. The result is the model's authoritative M6 listing above
+        (the exact engine parse + deterministic (created_at, decision_id)
+        ASCENDING order) filtered by the persisted ``policy_id`` recorded
+        in each GateDecision, so every returned record is a complete
+        verbatim GateDecision and decisions of other policies/models
+        never appear. Inline-policy decisions keep ``policy_id=None`` and
+        therefore belong to no policy id. A valid policy with no
+        decisions for this model returns []. Read-only, never writes.
+        """
+        # authoritative listing validates the model: FileNotFoundError (404)
+        decisions = self.list_decisions(model_id)
+        # policy registry resolution: raises FileNotFoundError when unknown
+        self.policies.get_policy(policy_id)
+        return [d for d in decisions if d.policy_id == policy_id]
+
+    # ------------------------------------------------------------------ #
     # The gate run
     # ------------------------------------------------------------------ #
 

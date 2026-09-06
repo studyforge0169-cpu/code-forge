@@ -831,11 +831,42 @@ generation never trains, evaluates, scores, ranks or judges output.
   record payloads), M10 (run/listing/getter), the M13 dashboard and the
   M16–M20 sample-quality surface are byte-identical before and after
 
+### Milestone 23 — gate-decision history by policy (`by-policy`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/gates/decisions/by-policy/{policy_id}` — answers
+  "which immutable gate decisions of this model were produced under this
+  registered policy?" — the model's authoritative M6 listing filtered by
+  the persisted `policy_id` recorded in each `GateDecision`
+- **exact filtering**: policy existence is verified through the existing
+  M9 policy registry first (an unknown policy is a 404 — policy identity
+  is the persisted definition manifest, never inferred from
+  gate-directory names); the model is verified through the existing model
+  registry (unknown model is a 404). Returned records are verbatim
+  `GateDecision` payloads in the exact M6 authoritative order
+  ((created_at, decision_id) ASCENDING); a valid policy with no decisions
+  for this model is a deterministic `[]`; inline-policy decisions keep
+  `policy_id=null` and never appear
+- **implementation is a reuse, not a second engine**: the engine method
+  `list_decisions_for_policy(model_id, policy_id)` resolves the policy via
+  the existing M9 `get_policy` registry getter and filters the
+  authoritative M6 `list_decisions()` by the persisted policy identity;
+  the facade and route are thin pass-throughs. No second gate system, no
+  duplicate manifest parsing, no new storage, caches, indexes or
+  aggregation — repeated GETs are byte-identical and the endpoint never
+  writes; it answers which decisions exist under one policy and never
+  judges, scores or ranks them
+- **isolation & boundaries**: a model only ever sees its own decisions;
+  another model's decisions (even under the same policy) are unreachable.
+  Unknown model/policy -> existing 404s; valid policy without decisions
+  -> `[]`. M6 (evaluate, listing, getter, hashes, manifests), the M9
+  policy registry, the M13 dashboard and the M16–M22 sample-quality /
+  suite-run surfaces are byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 420 tests
+pytest                       # 425 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1316,6 +1347,7 @@ ai-model-forge/
     evaluation.py      # evaluation engine: read-only state measurement (M4)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
     gates.py           # stage gates: policy-driven run decisions (M6)
+                       # + read-only by-policy grouping of the history (M23)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
     dashboards.py      # read-only dashboard engine: deterministic views (M8/M13)
     policies.py        # policy registry + probe suites: immutable definitions (M9)
@@ -1326,7 +1358,7 @@ ai-model-forge/
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 420 tests across 20 suites
+  tests/               # 425 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

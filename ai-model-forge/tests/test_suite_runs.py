@@ -785,8 +785,8 @@ def test_m21_api_existing_surfaces_and_openapi(api_client):
         "$ref": "#/components/schemas/SuiteRunRecord"}
     assert "SuiteRunRecord" in spec["components"]["schemas"]
     # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
-    # + 1 (M21) + 1 (M22 summary) = 54
-    assert len(spec["paths"]) == 54
+    # + 1 (M21) + 1 (M22 summary) + 1 (M23 gates by-policy) = 55
+    assert len(spec["paths"]) == 55
 
 
 # =========================================================================== #
@@ -975,5 +975,5 @@ def test_m22_api_openapi_documented(api_client):
     assert schema == {"$ref": "#/components/schemas/SuiteRunSummary"}
     assert "SuiteRunSummary" in spec["components"]["schemas"]
     # surface: 46 (M15 era) + 3 (M16) + 1 (M18) + 1 (M19) + 1 (M20)
-    # + 1 (M21) + 1 (M22) = 54
-    assert len(spec["paths"]) == 54
+    # + 1 (M21) + 1 (M22) + 1 (M23 gates by-policy) = 55
+    assert len(spec["paths"]) == 55

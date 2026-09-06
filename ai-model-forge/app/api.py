@@ -294,6 +294,18 @@ def index() -> HTMLResponse:
         recorded timestamps. A valid suite without runs returns a zero
         summary; unknown model/suite -> 404. No scores, averages, trends
         or judgments; never persisted, zero storage growth.</li>
+
+      <li><b>M23 gate-decision history by policy</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/gates/decisions/by-policy/&#123;policy_id&#125;</code>,
+        answers "which immutable gate decisions of this model were produced
+        under this registered policy?": the model's authoritative M6
+        listing filtered by the persisted policy_id recorded in each
+        decision, after policy existence is verified through the M9
+        registry (full record payloads, exact M6 ordering; unknown model
+        or policy -> 404; a valid policy without decisions for this model
+        -> []; inline-policy decisions never appear). Pure data access —
+        no aggregation, no verdicts beyond the persisted ones, zero
+        storage growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -316,6 +328,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/&#123;comp&#125;</code> — one comparison record</li>
       <li><code>POST  {prefix}/gates/evaluate</code> — stage gate: policy + candidate → passed / failed decision</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions</code> — immutable gate decision history</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-policy/&#123;policy_id&#125;</code> — gate decisions of ONE registered policy (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/&#123;decision&#125;</code> — one gate decision</li>
       <li><code>POST  {prefix}/workflows/run</code> — execute one inline workflow plan synchronously</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows</code> — immutable workflow run history</li>
@@ -729,7 +742,8 @@ def get_comparison(model_id: str, comparison_id: str) -> ComparisonRecord:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-# Gate routes (Milestone 6 — policy-driven, evidence-based run decisions)
+# Gate routes (Milestone 6 — policy-driven, evidence-based run decisions;
+# Milestone 23 adds the read-only by-policy grouping of the immutable history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/gates/evaluate", response_model=GateDecision, tags=["gates"])
@@ -759,6 +773,32 @@ def list_gate_decisions(model_id: str) -> list[dict[str, Any]]:
     try:
         return [r.model_dump(mode="json")
                 for r in _forge().list_gate_decisions(model_id)]
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/gates/decisions/by-policy/{policy_id}",
+         response_model=list[GateDecision], tags=["gates"])
+def list_gate_decisions_by_policy(model_id: str, policy_id: str
+                                  ) -> list[GateDecision]:
+    """Immutable gate decisions of ONE registered policy of one model (M23).
+
+    Read-only per-policy grouping: resolves the policy through the
+    existing M9 policy registry (an unknown policy is 404 — policy
+    identity is the persisted definition manifest, never inferred from
+    gate-directory names) and the model through the existing registry
+    (unknown model is 404), then returns the model's authoritative M6
+    listing filtered by the persisted policy_id recorded in each
+    GateDecision — complete verbatim payloads in the exact M6
+    (created_at, decision_id) order. Inline-policy decisions keep
+    policy_id null and never appear; a valid policy with no decisions
+    for this model returns []. Answers only which immutable decisions
+    belong to this model and policy; no aggregation, no verdicts beyond
+    the persisted ones, no writes. (Must stay registered before
+    /gates/decisions/{decision_id}; the literal "by-policy" segment is
+    not a decision id.)"""
+    try:
+        return _forge().list_gate_decisions_for_policy(model_id, policy_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

@@ -305,6 +305,20 @@ class ModelForge:
     def get_gate_decision(self, model_id: str, decision_id: str):
         return self.gates.get_decision(model_id, decision_id)
 
+    def list_gate_decisions_for_policy(self, model_id: str, policy_id: str):
+        """Immutable gate decisions of ONE registered policy (M23
+        read-only access).
+
+        The policy must exist in the M9 registry (unknown policy ->
+        FileNotFoundError -> 404), and the model must exist (unknown
+        model -> FileNotFoundError -> 404). Returns the model's
+        authoritative M6 listing filtered by the persisted policy_id
+        recorded in each decision — verbatim records in the M6
+        (created_at, decision_id) order; inline-policy decisions
+        (policy_id None) never appear; a valid policy with no decisions
+        for this model returns []. Read-only, never writes."""
+        return self.gates.list_decisions_for_policy(model_id, policy_id)
+
     # ------------------------------------------------------------------ #
     # Workflows (thin delegation; ordered orchestration over M3-M6; M7)
     # ------------------------------------------------------------------ #
