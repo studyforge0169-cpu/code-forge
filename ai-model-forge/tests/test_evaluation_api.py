@@ -343,8 +343,9 @@ def test_m24_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M21) + 1 (M22) + 1 (M23) + 1 (M24) + 1 (M25)
     # + 1 (M26 comparisons by-checkpoint)
     # + 1 (M27 samples by-checkpoint)
-    # + 1 (M28 evaluations by-dataset) = 60
-    assert len(spec["paths"]) == 60
+    # + 1 (M28 evaluations by-dataset)
+    # + 1 (M29 comparisons by-dataset) = 61
+    assert len(spec["paths"]) == 61
 
 
 # =========================================================================== #
@@ -451,7 +452,7 @@ def test_m28_api_404s_scoping_regressions_openapi(api_client):
     path = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
             "{dataset_id}")
     generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
-    assert len(spec["paths"]) == 60
+    assert len(spec["paths"]) == 61
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]

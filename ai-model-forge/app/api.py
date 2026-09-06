@@ -368,6 +368,20 @@ def index() -> HTMLResponse:
         model/dataset -> 404; a dataset with no evaluations for the
         model -> []). Pure data access — no aggregates, zero storage
         growth.</li>
+
+      <li><b>M29 comparison history by dataset</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/comparisons/by-dataset/&#123;dataset&#125;</code>,
+        answers "which immutable M5 comparisons of this model measured
+        this dataset?": the model's authoritative M5 listing filtered by
+        the persisted shared-probe dataset identity (a comparison
+        persists exactly ONE dataset_id + dataset_version — both sides
+        measure the same probe by construction; per-side dataset
+        identities cannot occur), each matching comparison EXACTLY
+        ONCE (dedup by comparison identity), versions VERBATIM, after
+        the dataset is validated through the M2 registry (full record
+        payloads, exact M5 ordering; unknown model/dataset -> 404; a
+        dataset with no comparisons for the model -> []). Pure data
+        access — no aggregates, zero storage growth.</li>
     </ul>
   </div>
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
@@ -390,6 +404,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/comparisons/run</code> — A/B comparison (improved / regressed / unchanged)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons</code> — immutable comparison history</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-checkpoint/&#123;ckpt&#125;</code> — comparisons involving ONE checkpoint on either side (read-only, deterministic, no aggregation)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-dataset/&#123;ds&#125;</code> — comparisons of ONE model over ONE dataset (read-only, deterministic, versions verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/&#123;comp&#125;</code> — one comparison record</li>
       <li><code>POST  {prefix}/gates/evaluate</code> — stage gate: policy + candidate → passed / failed decision</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions</code> — immutable gate decision history</li>
@@ -824,7 +839,8 @@ def get_evaluation(model_id: str, eval_id: str) -> EvaluationRecord:
 
 # --------------------------------------------------------------------------- #
 # Comparison routes (Milestone 5 — evidence-based A/B state comparison;
-# Milestone 26 adds the read-only by-checkpoint grouping of the immutable history)
+# Milestone 26 adds the read-only by-checkpoint grouping of the immutable history;
+# Milestone 29 adds the read-only by-dataset grouping of the immutable history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/comparisons/run", response_model=ComparisonRecord, tags=["comparison"])
@@ -880,6 +896,39 @@ def list_comparisons_by_checkpoint(model_id: str, checkpoint_id: str
     try:
         return _forge().list_comparisons_for_checkpoint(model_id,
                                                         checkpoint_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/comparisons/by-dataset/{dataset_id}",
+         response_model=list[ComparisonRecord], tags=["comparison"])
+def list_comparisons_by_dataset(model_id: str, dataset_id: str
+                                ) -> list[ComparisonRecord]:
+    """Immutable M5 comparisons of ONE model over ONE dataset (M29).
+
+    Read-only per-dataset grouping: validates the dataset through the
+    M2 registry (unknown dataset -> 404; never a raw filesystem
+    check), then returns the model's authoritative M5 listing filtered
+    by the persisted shared-probe dataset identity recorded in each
+    ComparisonRecord — a comparison is valid only when BOTH sides
+    measure the SAME probe, so exactly ONE top-level dataset_id +
+    dataset_version is persisted per record (M5 refuses cross-probe
+    requests with 422; per-side dataset identities cannot occur by
+    construction; membership never comes from filenames, checkpoint
+    ids or hashes). The persisted dataset_version travels VERBATIM
+    inside every returned record — all versions of the dataset are
+    returned, each exactly as persisted (never collapsed, resolved or
+    rewritten) — and each matching comparison appears EXACTLY ONCE
+    (dedup by comparison identity, not side combinations). Complete
+    verbatim payloads (verdict/per-side losses included) in the exact
+    M5 (created_at, comparison_id) order; datasets are global, so
+    model scoping comes from the model's own listing — a model never
+    sees another model's comparisons. A valid dataset with no
+    comparisons for the model returns []. No aggregates, no writes.
+    (Must stay registered before /comparisons/{comparison_id}; the
+    literal "by-dataset" segment is not a comparison id.)"""
+    try:
+        return _forge().list_comparisons_for_dataset(model_id, dataset_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

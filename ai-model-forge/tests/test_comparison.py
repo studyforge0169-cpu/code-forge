@@ -644,3 +644,120 @@ def test_m26_engine_repeated_calls_identical(env):
         again = [r.model_dump(mode="json") for r in
                  f.list_comparisons_for_checkpoint(env.model_id, ckE)]
         assert again == first
+
+
+# =========================================================================== #
+# M29: read-only per-dataset grouping of the comparison history
+# =========================================================================== #
+
+def _m29_env(env):
+    """M29 state on top of the shared module env (cached): ds_b pinned to
+    BOTH of its versions (v1 + v2) plus a third dataset with zero
+    comparisons. Returns (c_b1, c_b2, ds_c).
+    """
+    cached = getattr(env, "_m29_state", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    ckE = env.imp_early.checkpoint_id
+    ckF = env.imp_final.checkpoint_id
+    if 2 not in f.datasets.load_meta(env.ds_b).versions:
+        up = f.upload_dataset(
+            [("b2.txt", _domain_bytes(TAIL_B, 240))],
+            name="m5-domB", dataset_id=env.ds_b)
+        assert up["version"] == 2
+        f.tokenize_dataset(env.ds_b, env.tok_id, version=2)
+    c_b1 = f.run_comparison(env.cmp(ckE, ckF, ds="ds_b",
+                                    dataset_version=1, seed=2901))
+    c_b2 = f.run_comparison(env.cmp(ckE, ckF, ds="ds_b",
+                                    dataset_version=2, seed=2902))
+    up_c = f.upload_dataset(
+        [("c.txt", _domain_bytes(TAIL_A, 240))], name="m5-domC")
+    ds_c = up_c["dataset_id"]
+    f.tokenize_dataset(ds_c, env.tok_id)
+    env._m29_state = (c_b1, c_b2, ds_c)
+    return env._m29_state
+
+
+def test_m29_engine_filters_by_persisted_dataset_identity(env):
+    c_b1, c_b2, ds_c = _m29_env(env)
+    f = env.forge
+    listing = f.list_comparisons(env.model_id)
+    for ds_id in (env.ds_a, env.ds_b, ds_c):
+        got = f.list_comparisons_for_dataset(env.model_id, ds_id)
+        # parity with the authoritative M5 listing filtered by the
+        # persisted shared-probe dataset identity; deterministic
+        # (created_at, comparison_id) order; unique comparison ids
+        assert got == [r for r in listing if r.dataset_id == ds_id]
+        keyed = [(r.created_at, r.comparison_id) for r in got]
+        assert keyed == sorted(keyed)
+        ids = [r.comparison_id for r in got]
+        assert len(ids) == len(set(ids))
+        assert all(r.dataset_id == ds_id and r.model_id == env.model_id
+                   for r in got)
+        for r in got:
+            assert r == f.get_comparison(env.model_id, r.comparison_id)
+    # ds_b holds exactly the two pinned comparisons, one per version,
+    # versions VERBATIM (v1 and v2 both returned — never collapsed to
+    # the latest, never rewritten)
+    got_b = f.list_comparisons_for_dataset(env.model_id, env.ds_b)
+    assert [r.comparison_id for r in got_b] == \
+        [c_b1.comparison_id, c_b2.comparison_id]
+    assert [r.dataset_version for r in got_b] == [1, 2]
+    # each matching comparison appears EXACTLY ONCE even though BOTH
+    # sides measure the requested dataset (shared probe; includes the
+    # same-checkpoint A=B records from earlier module tests under ds_a)
+    got_a = f.list_comparisons_for_dataset(env.model_id, env.ds_a)
+    assert all([r.comparison_id for r in got_a].count(r.comparison_id)
+               == 1 for r in got_a)
+    # unrelated-dataset exclusion: no overlap between dataset groups
+    assert ({r.comparison_id for r in got_a}
+            & {r.comparison_id for r in got_b}) == set()
+    # structural fact: the persisted side representation carries NO
+    # dataset fields — the dataset identity is the ONE shared probe
+    # persisted once at the top level of the record
+    assert not any("dataset" in k
+                   for k in type(got_b[0].state_a).model_fields)
+
+
+def test_m29_engine_empty_404s_isolation_read_only(env):
+    c_b1, c_b2, ds_c = _m29_env(env)
+    _, _, _, _, _, _, _, b, b_ck = _m26_env(env)
+    f = env.forge
+    # valid dataset with zero comparisons -> []
+    assert f.list_comparisons_for_dataset(env.model_id, ds_c) == []
+    # model-scoped empty: the second model has no comparisons at all
+    assert f.list_comparisons_for_dataset(b, env.ds_a) == []
+    # unknown model / unknown dataset -> FileNotFoundError (404 at API)
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_dataset("ghost-model-29", env.ds_a)
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_dataset(env.model_id, "ghost-ds-29")
+    # cross-model isolation: a's comparison ids never appear under b
+    leak = [r.comparison_id for r in
+            f.list_comparisons_for_dataset(b, env.ds_a)]
+    assert {c_b1.comparison_id, c_b2.comparison_id}.isdisjoint(leak)
+    # read-only: the filter never writes comparison manifests
+    def comp_files(mid):
+        root = f.storage.model_dir(mid) / "comparisons"
+        if not root.exists():
+            return set()
+        return {p.relative_to(root).as_posix()
+                for p in root.rglob("*") if p.is_file()}
+    before = (comp_files(env.model_id), comp_files(b))
+    f.list_comparisons_for_dataset(env.model_id, env.ds_a)
+    f.list_comparisons_for_dataset(env.model_id, env.ds_b)
+    f.list_comparisons_for_dataset(b, env.ds_a)
+    f.list_comparisons_for_dataset(env.model_id, ds_c)
+    assert (comp_files(env.model_id), comp_files(b)) == before
+
+
+def test_m29_engine_repeated_calls_identical(env):
+    c_b1, c_b2, ds_c = _m29_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_comparisons_for_dataset(env.model_id, env.ds_b)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_comparisons_for_dataset(env.model_id, env.ds_b)]
+        assert again == first

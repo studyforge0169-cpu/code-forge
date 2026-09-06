@@ -372,5 +372,147 @@ def test_m26_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M21) + 1 (M22) + 1 (M23) + 1 (M24) + 1 (M25)
     # + 1 (M26 comparisons by-checkpoint)
     # + 1 (M27 samples by-checkpoint)
-    # + 1 (M28 evaluations by-dataset) = 60
-    assert len(spec["paths"]) == 60
+    # + 1 (M28 evaluations by-dataset)
+    # + 1 (M29 comparisons by-dataset) = 61
+    assert len(spec["paths"]) == 61
+
+
+# =========================================================================== #
+# M29: read-only per-dataset grouping of the comparison history (API)
+# =========================================================================== #
+
+BY_DATASET = "/api/v1/models/{mid}/comparisons/by-dataset/{ds}"
+
+
+def _m29_second_dataset(api_client, tag: str, tok_id: str) -> str:
+    """A second valid tokenized dataset for cross-dataset coverage."""
+    up = api_client.post(UPLOAD,
+                         files=[("files", (f"{tag}.txt",
+                                           _domain_bytes(TAIL_B, 200),
+                                           "text/plain"))],
+                         data={"name": f"api29-{tag}-ds"})
+    assert up.status_code == 201, up.text
+    ds2 = up.json()["dataset_id"]
+    assert api_client.post(f"{DATASETS}/{ds2}/tokenize",
+                           json={"tokenizer_id": tok_id}).status_code == 200
+    return ds2
+
+
+def test_m29_api_by_dataset_grouping_versions_determinism(api_client):
+    ds_id, tok_id, model_id, ckpts = _prepare(api_client, "m29a", TAIL_A,
+                                              epochs=30)
+    ds2 = _m29_second_dataset(api_client, "m29b", tok_id)
+    ck1, ck2 = ckpts[2]["checkpoint_id"], ckpts[-1]["checkpoint_id"]
+    # cross-checkpoint A/B on ds, same-checkpoint A=B on ds (BOTH sides
+    # measure the requested dataset), and one comparison on ds2
+    r1 = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                              ck1, ck2, seed=2951)).json()
+    r2 = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                              ck1, ck1, seed=2952)).json()
+    r3 = api_client.post(COMP_RUN, json=_comp(model_id, ds2, tok_id,
+                                              ck1, ck2, seed=2953)).json()
+    url = BY_DATASET.format(mid=model_id, ds=ds_id)
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # exactly r1 + r2 under ds — the A=B record appears EXACTLY ONCE —
+    # in the deterministic M5 order, verbatim equal to the run
+    # responses (existing representation)
+    assert [x["comparison_id"] for x in recs] == \
+        [r1["comparison_id"], r2["comparison_id"]]
+    keyed = [(x["created_at"], x["comparison_id"]) for x in recs]
+    assert keyed == sorted(keyed)
+    by_id = {x["comparison_id"]: x for x in recs}
+    assert by_id[r1["comparison_id"]] == r1
+    assert by_id[r2["comparison_id"]] == r2
+    # persisted dataset identity + version travel VERBATIM
+    assert all(x["dataset_id"] == ds_id
+               and x["dataset_version"] == r1["dataset_version"]
+               for x in recs)
+    # parity with the M5 listing filtered locally by the persisted
+    # dataset identity — no missing, no extra, no duplicates
+    listing = api_client.get(f"{MODELS}/{model_id}/comparisons").json()
+    assert recs == [x for x in listing if x["dataset_id"] == ds_id]
+    # the second dataset holds exactly r3; no cross-dataset leakage
+    got2 = api_client.get(BY_DATASET.format(mid=model_id, ds=ds2))
+    assert got2.status_code == 200
+    assert [x["comparison_id"] for x in got2.json()] == [r3["comparison_id"]]
+    # repeated GET returns identical raw bytes (3 repeats)
+    raw1 = api_client.get(url).content
+    raw2 = api_client.get(url).content
+    raw3 = api_client.get(url).content
+    assert raw1 == raw2 == raw3 and json.loads(raw1) == recs
+    # the generic comparison detail getter is not shadowed
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/{r1['comparison_id']}") \
+        .json() == r1
+
+
+def test_m29_api_404s_isolation_regressions_openapi(api_client):
+    ds_id, tok_id, model_id, ckpts = _prepare(api_client, "m29e", TAIL_A,
+                                              epochs=8)
+    ck = ckpts[-1]["checkpoint_id"]
+    rec = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                               ckpts[0]["checkpoint_id"],
+                                               ck, seed=2961)).json()
+    # unknown model / unknown dataset -> 404 (well-formed + malformed)
+    assert api_client.get(BY_DATASET.format(mid="ghost-model-29",
+                                            ds=ds_id)).status_code == 404
+    assert api_client.get(BY_DATASET.format(mid=model_id,
+                                            ds="ghost-ds-29")).status_code \
+        == 404
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/by-dataset/ds%20id%2029!!") \
+        .status_code == 404
+    # model scoping: datasets are GLOBAL, so another real model + this
+    # valid dataset is the natural model-scoped EMPTY case (200 + []),
+    # and no comparison id leaks into it
+    cfg = {"name": "api29-iso-b", "vocab_size": 640, "context_length": 64,
+           "hidden_size": 64, "n_layers": 2, "n_heads": 4, "n_kv_heads": 2,
+           "intermediate_size": 128}
+    mid_b = api_client.post(MODELS, json={"config": cfg}).json()["model"]["id"]
+    scoped = api_client.get(BY_DATASET.format(mid=mid_b, ds=ds_id))
+    assert scoped.status_code == 200 and scoped.json() == []
+    # M5 regression: run/list/get + validation unchanged
+    listing = api_client.get(f"{MODELS}/{model_id}/comparisons").json()
+    assert rec["comparison_id"] in {x["comparison_id"] for x in listing}
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/{rec['comparison_id']}") \
+        .json() == rec
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/ghost-comp-29").status_code == 404
+    # M26 by-checkpoint unchanged (different grouping of the same
+    # listing): the record appears under BOTH its checkpoints
+    for cki in (ckpts[0]["checkpoint_id"], ck):
+        got = api_client.get(
+            f"{MODELS}/{model_id}/comparisons/by-checkpoint/{cki}")
+        assert got.status_code == 200
+        assert [x["comparison_id"] for x in got.json()] == \
+            [rec["comparison_id"]]
+    # M28 evaluations-by-dataset unchanged (parity with the filtered
+    # M4 listing of this model)
+    evs = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    evd = api_client.get(f"{MODELS}/{model_id}/evaluations/"
+                         f"by-dataset/{ds_id}")
+    assert evd.status_code == 200
+    assert evd.json() == [x for x in evs if x["dataset_id"] == ds_id]
+    # OpenAPI: 61 paths, the new path exactly once, GET-only,
+    # comparison tag, array of ComparisonRecord, after the M26
+    # by-checkpoint route and before the generic comparison route
+    spec = api_client.get("/openapi.json").json()
+    path = ("/api/v1/models/{model_id}/comparisons/by-dataset/"
+            "{dataset_id}")
+    generic = "/api/v1/models/{model_id}/comparisons/{comparison_id}"
+    m26 = ("/api/v1/models/{model_id}/comparisons/by-checkpoint/"
+           "{checkpoint_id}")
+    assert len(spec["paths"]) == 61
+    assert list(spec["paths"]).count(path) == 1
+    ops = spec["paths"][path]
+    assert set(ops) == {"get"} and ops["get"]["tags"] == ["comparison"]
+    schema = (ops["get"]["responses"]["200"]["content"]
+              ["application/json"]["schema"])
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/ComparisonRecord"}
+    assert "ComparisonRecord" in spec["components"]["schemas"]
+    assert list(spec["paths"]).index(m26) < list(spec["paths"]).index(path) \
+        < list(spec["paths"]).index(generic)

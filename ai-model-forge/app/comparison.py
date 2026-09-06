@@ -167,6 +167,45 @@ class ComparisonEngine:
 
         return [r for r in self.list_comparisons(model_id) if involves(r)]
 
+    def list_comparisons_for_dataset(
+            self, model_id: str, dataset_id: str) -> list[ComparisonRecord]:
+        """Immutable M5 comparisons of ONE model over ONE dataset (M29).
+
+        Membership comes from the persisted shared-probe dataset
+        identity ONLY: a comparison is valid only when BOTH sides
+        measure the SAME probe, so ``ComparisonRecord`` persists
+        exactly ONE top-level ``dataset_id: str`` +
+        ``dataset_version: int`` pair (M5 refuses cross-probe requests
+        — different dataset/version/split/tokenizer/window/seed — with
+        422 before any artifact exists; per-side dataset identities
+        cannot occur by construction). A comparison belongs to the
+        request when its persisted ``dataset_id`` equals the requested
+        id — never filenames, dataset directory names, checkpoint ids,
+        state/result hashes, timestamps or eval ids. Every version of
+        the dataset is returned, each with its persisted
+        ``dataset_version`` VERBATIM inside the record (versions are
+        neither collapsed, resolved to the latest, aliased nor
+        rewritten). Because the comparison is the unit of grouping and
+        the listing above holds each record exactly once, a comparison
+        whose two sides measure the requested dataset (the shared
+        probe — true for EVERY matching record, including
+        same-checkpoint A=B) appears EXACTLY ONCE: dedup by comparison
+        identity, never by dataset id, hash, timestamp, side equality
+        or path. Resolution: unknown model or unknown dataset ->
+        FileNotFoundError; the dataset is validated through the M2
+        registry (``DatasetEngine.load_meta`` — the same registry call
+        M4's run preflight and M28's by-dataset grouping use; datasets
+        are GLOBAL, so the model scoping comes from the model's own M5
+        listing — a model never sees another model's comparisons). The
+        result keeps the authoritative M5 (created_at, comparison_id)
+        ASCENDING order. A valid dataset with no comparisons for the
+        model returns []. Read-only, never writes.
+        """
+        # existence: raises FileNotFoundError (404 at the API)
+        self.datasets.load_meta(dataset_id)
+        return [r for r in self.list_comparisons(model_id)
+                if r.dataset_id == dataset_id]
+
     # ------------------------------------------------------------------ #
     # Canonical flow (API): one model, one shared probe, two states
     # ------------------------------------------------------------------ #

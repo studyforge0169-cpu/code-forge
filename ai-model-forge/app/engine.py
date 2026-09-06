@@ -347,6 +347,27 @@ class ModelForge:
         return self.comparison.list_comparisons_for_checkpoint(
             model_id, checkpoint_id)
 
+    def list_comparisons_for_dataset(self, model_id: str,
+                                     dataset_id: str
+                                     ) -> list[ComparisonRecord]:
+        """Immutable M5 comparison records of ONE model over ONE dataset
+        (M29 read-only access).
+
+        The dataset must exist in the M2 registry (unknown dataset ->
+        FileNotFoundError -> 404; datasets are global — model scoping
+        comes from the model's own M5 listing). Returns the model's
+        authoritative M5 listing filtered by the persisted shared-probe
+        dataset identity (a comparison persists exactly ONE top-level
+        dataset_id + dataset_version — both sides measure the same
+        probe by construction; per-side dataset identities cannot
+        occur), each record exactly once (dedup by comparison
+        identity), with the persisted dataset_version VERBATIM, in the
+        M5 (created_at, comparison_id) order. A valid dataset with no
+        comparisons for the model returns []. Read-only, never
+        writes."""
+        return self.comparison.list_comparisons_for_dataset(
+            model_id, dataset_id)
+
     # ------------------------------------------------------------------ #
     # Stage gates (thin delegation; M6)
     # ------------------------------------------------------------------ #

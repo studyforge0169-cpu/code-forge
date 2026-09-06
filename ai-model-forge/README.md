@@ -1044,11 +1044,61 @@ generation never trains, evaluates, scores, ranks or judges output.
   M13/M17 dashboards and the M16–M27 surfaces are byte-identical
   before and after
 
+### Milestone 29 — comparison history by dataset
+  (`comparisons/by-dataset`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/comparisons/by-dataset/{dataset_id}` — answers
+  "which immutable M5 comparisons of this model measured this
+  dataset?" and nothing else
+- **exact filtering (shared-probe identity)**: a comparison is valid
+  only when BOTH sides measure the SAME probe, so `ComparisonRecord`
+  persists exactly ONE top-level `dataset_id` + `dataset_version`
+  pair — the dataset identity of the shared probe both sides measured
+  by construction (M5 refuses cross-probe requests — different
+  dataset/version/split/tokenizer/window/seed — with 422 before any
+  artifact exists; per-side dataset identities cannot occur).
+  Membership matches the persisted `dataset_id` only — never
+  filenames, dataset directory names, checkpoint ids, state/result
+  hashes, timestamps or eval ids
+- **once per comparison + versions verbatim**: because the comparison
+  (not the side) is the unit of grouping and the authoritative M5
+  listing holds each record exactly once, a comparison whose two
+  sides measure the requested dataset (true for EVERY matching
+  record, including same-checkpoint A=B) appears EXACTLY ONCE —
+  dedup by comparison identity, never by dataset id, hash, timestamp,
+  side equality or path. Every version of the dataset is returned,
+  each with its persisted `dataset_version` VERBATIM (never
+  collapsed, resolved to the latest, aliased or rewritten)
+- **global datasets, model-scoped history**: the dataset is validated
+  through the M2 registry first (`DatasetEngine.load_meta` — the same
+  registry call M4's run preflight and M28's by-dataset grouping use;
+  unknown dataset → 404). Datasets are GLOBAL, so model scoping comes
+  from the model's own authoritative M5 listing — a model never sees
+  another model's comparisons. Returned records are verbatim
+  `ComparisonRecord` payloads (verdict/per-side losses included) in
+  the exact M5 authoritative order ((created_at, comparison_id)
+  ASCENDING); a valid dataset with no comparisons for the model is a
+  deterministic `[]` — never a 404
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_comparisons_for_dataset(model_id, dataset_id)`
+  validates through the already-composed M2 dataset handle and
+  filters the authoritative M5 `list_comparisons()` by the persisted
+  dataset identity; the facade and route are thin pass-throughs
+  registered after the M26 by-checkpoint route and **before** the
+  generic `/comparisons/{comparison_id}` detail getter. No
+  dataset-comparison index, no caches, no new storage — repeated GETs
+  are byte-identical and the endpoint never writes
+- **isolation & boundaries**: unknown model/dataset -> existing 404s;
+  valid dataset without comparisons for the model -> `[]`. M5 (run,
+  listing, getter), M26 by-checkpoint, M28 by-dataset, the M2 dataset
+  registry and the M16–M28 surfaces are byte-identical before and
+  after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 450 tests
+pytest                       # 455 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1529,7 +1579,7 @@ ai-model-forge/
     evaluation.py      # evaluation engine: read-only state measurement (M4)
                        # + read-only by-checkpoint/by-dataset grouping (M24/M28)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
-                       # + read-only by-checkpoint grouping of the history (M26)
+                       # + read-only by-checkpoint/by-dataset grouping of the history (M26/M29)
     gates.py           # stage gates: policy-driven run decisions (M6)
                        # + read-only by-policy grouping of the history (M23)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
@@ -1543,7 +1593,7 @@ ai-model-forge/
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 450 tests across 20 suites
+  tests/               # 455 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
