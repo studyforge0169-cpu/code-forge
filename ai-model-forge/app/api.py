@@ -321,6 +321,22 @@ def index() -> HTMLResponse:
         appear). Pure data access — no aggregation, no new verdicts,
         zero storage growth.</li>
 
+      <li><b>M35 workflow history by recipe</b> — one read-only
+        MODEL-SCOPED access path, <code>GET /models/&#123;id&#125;/workflows/by-recipe/&#123;recipe_id&#125;</code>,
+        answers "which immutable M11 workflow runs of this model were
+        executed from this registered recipe?": the model's
+        authoritative M11 listing filtered by the persisted top-level
+        recipe_id (with its recorded recipe_hash provenance preserved
+        verbatim), after the recipe is validated through the GLOBAL
+        M12/M14 registry (recipes are global; model scoping from the
+        model's own listing; full record payloads, exact M11
+        ordering; unknown model or recipe -> 404; a valid recipe with
+        no runs for this model -> []; ad-hoc runs with null recipe_id
+        never appear). The model-scoped complement of the GLOBAL M12
+        recipe-runs lineage surface, which stays unchanged. Pure data
+        access — no execution, no aggregation, zero storage
+        growth.</li>
+
       <li><b>M24 evaluation history by checkpoint</b> — one read-only access
         path, <code>GET /models/&#123;id&#125;/evaluations/by-checkpoint/&#123;checkpoint&#125;</code>,
         answers "which immutable M4 evaluations measured this checkpoint?":
@@ -490,6 +506,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/&#123;decision&#125;</code> — one gate decision</li>
       <li><code>POST  {prefix}/workflows/run</code> — execute one inline workflow plan synchronously</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows</code> — immutable workflow run history</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/workflows/by-recipe/&#123;recipe_id&#125;</code> — workflow runs of ONE model executed from ONE registered recipe (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows/&#123;run&#125;</code> — one workflow run</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/dashboard</code> — read-only history dashboard incl. sample-quality observability (deterministic, no writes)</li>
       <li><code>POST  {prefix}/policies</code> — register an immutable policy definition (idempotent; conflicts 409)</li>
@@ -1380,7 +1397,8 @@ def get_suite_run(model_id: str, suite_run_id: str) -> SuiteRunRecord:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-# Workflow routes (Milestone 7 — ordered orchestration over M3–M6)
+# Workflow routes (Milestone 7 — ordered orchestration over M3–M6;
+# Milestone 35 adds the read-only model-scoped by-recipe grouping of the history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/workflows/run", response_model=WorkflowRecord, tags=["workflows"])
@@ -1411,6 +1429,38 @@ def list_workflows(model_id: str) -> list[dict[str, Any]]:
     try:
         return [r.model_dump(mode="json")
                 for r in _forge().list_workflows(model_id)]
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/workflows/by-recipe/{recipe_id}",
+         response_model=list[WorkflowRecord], tags=["workflows"])
+def list_workflows_by_recipe(model_id: str, recipe_id: str
+                             ) -> list[WorkflowRecord]:
+    """Immutable workflow runs of ONE model from ONE recipe (M35).
+
+    Read-only model-scoped per-recipe grouping: resolves the recipe
+    through the GLOBAL M12/M14 recipe registry (an unknown recipe is
+    404 — the same resolution GET /workflows/recipes/{recipe_id} uses;
+    recipes are global, so model scoping comes from the model's own
+    M11 listing and a model never sees another model's runs; nothing
+    is inferred from filenames or stage contents) and the model
+    through the existing registry (unknown model is 404 — a valid
+    recipe never makes an unknown model valid), then returns the
+    model's authoritative M11 listing filtered by the persisted
+    top-level recipe_id recorded in each WorkflowRecord — complete
+    verbatim payloads (status, stages, transitions, result_hash and
+    the recorded recipe_id/recipe_hash provenance included) in the
+    exact M11 (created_at, workflow_id) order. Ad-hoc runs keep
+    recipe_id null and never appear (no ad-hoc pseudo-recipe exists);
+    a VALID registered recipe with no runs for this model returns []
+    (never 404). This is the model-scoped complement of the GLOBAL M12
+    cross-model /workflows/recipes/{recipe_id}/runs lineage surface,
+    which stays unchanged. No execution, no aggregation, no writes.
+    (Must stay registered before /workflows/{workflow_id}; the literal
+    "by-recipe" segment is not a workflow id.)"""
+    try:
+        return _forge().list_workflows_for_recipe(model_id, recipe_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

@@ -1323,11 +1323,59 @@ generation never trains, evaluates, scores, ranks or judges output.
   registry and the M16–M33 surfaces are byte-identical before and
   after
 
+### Milestone 35 — workflow history by recipe, model-scoped
+  (`workflows/by-recipe`)
+- **concept**: one narrow read-only MODEL-SCOPED access path —
+  `GET /models/{id}/workflows/by-recipe/{recipe_id}` — answers "which
+  immutable M11 workflow runs of this model were executed from this
+  registered recipe?" and nothing else. It is the model-scoped
+  complement of the GLOBAL M12 cross-model
+  `GET /workflows/recipes/{recipe_id}/runs` lineage surface, which
+  stays unchanged
+- **exact filtering (persisted run recipe identity)**: every
+  `WorkflowRecord` carries a top-level `recipe_id` plus its matching
+  `recipe_hash` provenance (M12 records both verbatim when a
+  registered recipe is executed; the provenance is preserved exactly
+  and never re-derived), and a run belongs to the request only when
+  that persisted id matches VERBATIM — never filenames, paths, stage
+  ids, stage contents, statuses, recipe hashes, or the recipe's
+  current definition. Ad-hoc runs keep `recipe_id=None`, belong to NO
+  by-recipe group, and stay in the generic M11 listing untouched (no
+  `by-ad-hoc` pseudo-recipe exists). Each matching run appears EXACTLY
+  ONCE
+- **global recipes, model-scoped history**: the recipe is validated
+  through the existing GLOBAL M12/M14 registry first
+  (`RecipeEngine.get` — the same resolution
+  `GET /workflows/recipes/{recipe_id}` uses; unknown recipe → 404 —
+  never `[]`). Model scoping comes from the model's own authoritative
+  M11 listing — a model never sees another model's runs, and a valid
+  recipe never makes an unknown model valid. Returned records are
+  verbatim `WorkflowRecord` payloads (status, stages, transitions,
+  `result_hash` included) in the exact M11 authoritative order
+  ((created_at, workflow_id) ASCENDING); a valid registered recipe
+  with zero runs for the model is a deterministic `[]` — never a 404
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_workflows_for_recipe(model_id, recipe_id)` filters the
+  authoritative M11 `list_workflows()` by the persisted `recipe_id`;
+  the recipe handle is ONE new `__init__` composition line in
+  `WorkflowEngine` (`RecipeEngine(storage, workflows=self)` — the
+  local import avoids the circular module dependency and the
+  injection keeps THIS engine the sole workflow executor); the facade
+  and route are thin pass-throughs registered after the M11 listing
+  route and **before** the generic `/workflows/{workflow_id}` detail
+  getter. No caches, no new storage, no recipe expansion or execution
+  — repeated GETs are byte-identical and the endpoint never writes
+- **isolation & boundaries**: unknown model/recipe -> existing 404s;
+  valid recipe without runs for the model -> `[]`. M7 (run, listing,
+  getter), the M12/M14 registry + GLOBAL recipe-runs lineage, M23/M34
+  gate groupings and the M16–M34 surfaces are byte-identical before
+  and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 480 tests
+pytest                       # 485 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1823,7 +1871,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 480 tests across 20 suites
+  tests/               # 485 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

@@ -835,8 +835,9 @@ def test_api_openapi_exposes_sample_quality(api_client):
     # + 1 (M31 comparisons by-tokenizer)
     # + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer)
-    # + 1 (M34 gate decisions by-comparison) = 66
-    assert len(spec["paths"]) == 66
+    # + 1 (M34 gate decisions by-comparison)
+    # + 1 (M35 workflows by-recipe) = 67
+    assert len(spec["paths"]) == 67
 
 
 # =========================================================================== #
@@ -1074,8 +1075,9 @@ def test_api_openapi_records_route(api_client):
     # + 1 (M31 comparisons by-tokenizer)
     # + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer)
-    # + 1 (M34 gate decisions by-comparison) = 66
-    assert len(spec["paths"]) == 66
+    # + 1 (M34 gate decisions by-comparison)
+    # + 1 (M35 workflows by-recipe) = 67
+    assert len(spec["paths"]) == 67
 
 
 # =========================================================================== #
@@ -1300,8 +1302,9 @@ def test_api_openapi_by_sample_route(api_client):
     # + 1 (M31 comparisons by-tokenizer)
     # + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer)
-    # + 1 (M34 gate decisions by-comparison) -> 66
-    assert len(spec["paths"]) == 66
+    # + 1 (M34 gate decisions by-comparison)
+    # + 1 (M35 workflows by-recipe) -> 67
+    assert len(spec["paths"]) == 67
 
 
 # =========================================================================== #
@@ -1538,7 +1541,7 @@ def test_api_openapi_by_checkpoint_route(api_client):
     assert ("/api/v1/models/{model_id}/sample-quality/{evaluation_id}"
             in spec["paths"])
     # M18–M28 each added exactly one documented route -> 60
-    assert len(spec["paths"]) == 66
+    assert len(spec["paths"]) == 67
 
 
 # =========================================================================== #
@@ -1836,7 +1839,7 @@ def test_m33_api_404s_isolation_regressions_openapi(api_client):
                          f"{h['tok']}").json()
     assert [x["sample_id"] for x in smp] == [s1["sample_id"]]
 
-    # OpenAPI: 66 paths, the new path exactly once, GET-only, tag
+    # OpenAPI: 67 paths, the new path exactly once, GET-only, tag
     # sample-quality, SampleEvaluationRecord items; route order M20
     # by-checkpoint < by-tokenizer < generic detail
     spec = api_client.get("/openapi.json").json()
@@ -1844,8 +1847,9 @@ def test_m33_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
     # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer)
-    # + 1 (M34 gate decisions by-comparison) = 66
-    assert len(spec["paths"]) == 66
+    # + 1 (M34 gate decisions by-comparison)
+    # + 1 (M35 workflows by-recipe) = 67
+    assert len(spec["paths"]) == 67
     path = ("/api/v1/models/{model_id}/sample-quality/by-tokenizer"
             "/{tokenizer_id}")
     keys = list(spec["paths"])

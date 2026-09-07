@@ -1544,3 +1544,275 @@ def test_plain_recipe_hash_stable_across_m12_m14_schema(env):
                   created_at=env.recipes.get("m14-hashparity").created_at)
     assert recipe_config_hash(crafted.stages) == crafted.config_hash
     env.no_tmp()
+
+
+# =========================================================================== #
+# M35: read-only model-scoped by-recipe grouping of the workflow history
+# =========================================================================== #
+
+BY_RECIPE = "/api/v1/models/{mid}/workflows/by-recipe/{rid}"
+
+
+def _m35_state(env):
+    """M35 state on top of the shared module env (cached): two recipes
+    (r1 run twice, r2 run once) over the shared m12-suite checkpoint
+    stage, a registered-but-never-run recipe r3 (the natural valid-id
+    empty case), one ad-hoc inline run (recipe_id None), and a fresh
+    model with zero workflows (model-scoped isolation). Returns
+    (w1a, w1b, w2, adhoc, fresh).
+    """
+    cached = getattr(env, "_m35", None)
+    if cached is not None:
+        return cached
+    st = _suite_stage("eval_suite", "m12-suite", ckpt=env.ck_main)
+    env.recipes.register(_recipe("m35-r1", [st]))
+    env.recipes.register(_recipe("m35-r2", [st]))
+    env.recipes.register(_recipe("m35-r3", [st]))      # never run
+    w1a = env.recipes.run("m35-r1", env.model_id)
+    w1b = env.recipes.run("m35-r1", env.model_id)
+    w2 = env.recipes.run("m35-r2", env.model_id)
+    adhoc = env.forge.run_workflow(WorkflowPlan(
+        name="m35-inline", model_id=env.model_id, stages=[st]))
+    assert adhoc.recipe_id is None
+    fresh = env.fresh_model("m35-fresh")
+    env._m35 = (w1a, w1b, w2, adhoc, fresh)
+    return env._m35
+
+
+def test_m35_engine_grouping_parity_order_verbatim(env):
+    w1a, w1b, w2, adhoc, fresh = _m35_state(env)
+    f = env.forge
+    listing = f.list_workflows(env.model_id)
+    for rid in ("m35-r1", "m35-r2"):
+        got = f.list_workflows_for_recipe(env.model_id, rid)
+        # parity with the authoritative M11 listing filtered by the
+        # persisted recipe identity; deterministic (created_at,
+        # workflow_id) order; membership from the persisted field only
+        assert got == [w for w in listing if w.recipe_id == rid]
+        keyed = [(x.created_at, x.workflow_id) for x in got]
+        assert keyed == sorted(keyed)
+        ids = [x.workflow_id for x in got]
+        assert len(ids) == len(set(ids))
+        assert all(x.recipe_id == rid and x.model_id == env.model_id
+                   for x in got)
+        # verbatim payload parity with the M11 single-record getter AND
+        # verbatim recipe_hash provenance vs the registered definition
+        definition = env.recipes.get(rid)
+        for x in got:
+            assert x == f.get_workflow(env.model_id, x.workflow_id)
+            assert x.recipe_hash == definition.config_hash
+    got1 = f.list_workflows_for_recipe(env.model_id, "m35-r1")
+    assert {x.workflow_id for x in got1} == {w1a.workflow_id,
+                                             w1b.workflow_id}
+    assert [x.workflow_id for x in f.list_workflows_for_recipe(
+        env.model_id, "m35-r2")] == [w2.workflow_id]
+    # ad-hoc (None) runs belong to NO group but stay listed
+    assert adhoc.recipe_id is None
+    assert adhoc.workflow_id in {w.workflow_id for w in listing}
+    # explicit partition: groups over EVERY non-null persisted recipe id
+    # cover exactly the recipe-attributed runs (discovery, not fixed)
+    attributed = [w for w in listing if w.recipe_id is not None]
+    groups = {rid: {x.workflow_id for x in
+                    f.list_workflows_for_recipe(env.model_id, rid)}
+              for rid in {w.recipe_id for w in attributed}}
+    flat = [i for g in groups.values() for i in g]
+    assert set(flat) == {w.workflow_id for w in attributed}
+    assert len(flat) == len(set(flat)) == len(attributed)
+    assert adhoc.workflow_id not in set(flat)
+    assert "m35-r1" in groups
+
+
+def test_m35_engine_empty_404s_cross_model_read_only(env):
+    w1a, w1b, w2, adhoc, fresh = _m35_state(env)
+    f = env.forge
+    # valid registered recipe with zero runs (globally fresh) -> []
+    assert f.list_workflows_for_recipe(env.model_id, "m35-r3") == []
+    # model-scoped empty: fresh model has an EMPTY workflow listing, so
+    # every registered recipe returns [] under it (global recipes,
+    # model-scoped history)
+    assert f.list_workflows(fresh) == []
+    for rid in ("m35-r1", "m35-r2", "m35-r3"):
+        assert f.list_workflows_for_recipe(fresh, rid) == []
+    # unknown model / unknown recipe -> FileNotFoundError (404 at API);
+    # a valid recipe never makes an unknown model valid
+    with pytest.raises(FileNotFoundError):
+        f.list_workflows_for_recipe("ghost-model-35", "m35-r1")
+    with pytest.raises(FileNotFoundError):
+        f.list_workflows_for_recipe(env.model_id, "ghost-recipe-35")
+    # cross-model isolation: the fresh model never sees main's runs
+    fresh_ids = {w.workflow_id for w in f.list_workflows(fresh)}
+    main_ids = {w.workflow_id for w in f.list_workflows(env.model_id)}
+    assert fresh_ids.isdisjoint(main_ids)
+    # read-only: neither workflow manifests nor recipe manifests change
+    wf_files = {p.relative_to(env.forge.storage.root).as_posix()
+                for p in (env.forge.storage.root / "workflows")
+                .rglob("*") if p.is_file()} \
+        if (env.forge.storage.root / "workflows").exists() else set()
+    rc_bytes = {rid: env.manifest_bytes(rid)
+                for rid in ("m35-r1", "m35-r2", "m35-r3")}
+    f.list_workflows_for_recipe(env.model_id, "m35-r1")
+    f.list_workflows_for_recipe(env.model_id, "m35-r3")
+    f.list_workflows_for_recipe(fresh, "m35-r1")
+    wf_after = {p.relative_to(env.forge.storage.root).as_posix()
+                for p in (env.forge.storage.root / "workflows")
+                .rglob("*") if p.is_file()} \
+        if (env.forge.storage.root / "workflows").exists() else set()
+    assert wf_after == wf_files
+    assert {rid: env.manifest_bytes(rid)
+            for rid in ("m35-r1", "m35-r2", "m35-r3")} == rc_bytes
+
+
+def test_m35_engine_repeated_calls_identical(env):
+    w1a, w1b, w2, adhoc, fresh = _m35_state(env)
+    f = env.forge
+    first = [w.model_dump(mode="json") for w in
+             f.list_workflows_for_recipe(env.model_id, "m35-r1")]
+    for _ in range(3):
+        again = [w.model_dump(mode="json") for w in
+                 f.list_workflows_for_recipe(env.model_id, "m35-r1")]
+        assert again == first
+
+
+def test_m35_api_by_recipe_grouping_partition_determinism(api_client):
+    h = _http_env(api_client, "m35a")
+    mid, suite = h["mid"], h["suite"]
+    stage = _current_suite_stage("eval_suite", suite)
+    for rid in ("api35-r1", "api35-r2", "api35-r3"):
+        r = api_client.post(RECIPES, json={
+            "recipe_id": rid, "description": f"m35 {rid}",
+            "stages": [stage]})
+        assert r.status_code == 201, r.text
+    w1a = api_client.post(RUNS.format(rid="api35-r1"),
+                          json={"model_id": mid}).json()
+    w1b = api_client.post(RUNS.format(rid="api35-r1"),
+                          json={"model_id": mid}).json()
+    w2 = api_client.post(RUNS.format(rid="api35-r2"),
+                         json={"model_id": mid}).json()
+    adhoc = api_client.post("/api/v1/workflows/run", json={
+        "name": "m35-inline", "model_id": mid,
+        "stages": [stage]}).json()
+    assert adhoc["recipe_id"] is None
+
+    url = BY_RECIPE.format(mid=mid, rid="api35-r1")
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # authoritative-filter parity: exact subset of the M11 listing
+    # whose persisted recipe_id matches, in the same order
+    listing = api_client.get(f"/api/v1/models/{mid}/workflows").json()
+    assert recs == [x for x in listing
+                    if x["recipe_id"] == "api35-r1"]
+    assert {x["workflow_id"] for x in recs} == {w1a["workflow_id"],
+                                                w1b["workflow_id"]}
+    keyed = [(x["created_at"], x["workflow_id"]) for x in recs]
+    assert keyed == sorted(keyed)
+    # verbatim: each element equals its POST payload and its
+    # detail-getter payload (incl. recipe_hash provenance)
+    by_id = {x["workflow_id"]: x for x in recs}
+    assert by_id[w1a["workflow_id"]] == w1a
+    assert by_id[w1b["workflow_id"]] == w1b
+    definition = api_client.get(f"{RECIPES}/api35-r1").json()
+    for x in recs:
+        one = api_client.get(
+            f"/api/v1/models/{mid}/workflows/{x['workflow_id']}")
+        assert one.status_code == 200 and one.json() == x
+        assert x["recipe_hash"] == definition["config_hash"]
+    # deterministic: three repeats return identical raw bytes
+    raws = {api_client.get(url).content for _ in range(3)}
+    assert len(raws) == 1
+    # partition: r2 holds exactly its own run, disjoint from r1's
+    # group; ad-hoc (None) runs belong to NO group
+    recs2 = api_client.get(
+        BY_RECIPE.format(mid=mid, rid="api35-r2")).json()
+    assert [x["workflow_id"] for x in recs2] == [w2["workflow_id"]]
+    ids1 = {x["workflow_id"] for x in recs}
+    ids2 = {x["workflow_id"] for x in recs2}
+    assert ids1.isdisjoint(ids2)
+    attributed = {x["workflow_id"] for x in listing
+                  if x["recipe_id"] is not None}
+    assert ids1 | ids2 == attributed
+    assert adhoc["workflow_id"] not in attributed
+    # valid registered recipe with zero runs for the model -> [] (200)
+    empty = api_client.get(BY_RECIPE.format(mid=mid, rid="api35-r3"))
+    assert empty.status_code == 200 and empty.json() == []
+    # no side effects: the filter itself added no runs
+    assert len(api_client.get(
+        f"/api/v1/models/{mid}/workflows").json()) == 4
+
+
+def test_m35_api_404s_isolation_regressions_openapi(api_client):
+    h = _http_env(api_client, "m35b")
+    mid, suite = h["mid"], h["suite"]
+    h2 = _http_env(api_client, "m35c")     # second real model
+    mid2 = h2["mid"]
+    stage = _current_suite_stage("eval_suite", suite)
+    assert api_client.post(RECIPES, json={
+        "recipe_id": "api35-r4", "description": "d",
+        "stages": [stage]}).status_code == 201
+    w1 = api_client.post(RUNS.format(rid="api35-r4"),
+                         json={"model_id": mid}).json()
+
+    # 404s: unknown model / unknown recipe (two ghost forms); a valid
+    # recipe never makes an unknown model valid
+    assert api_client.get(BY_RECIPE.format(
+        mid="ghost-model-35", rid="api35-r4")).status_code == 404
+    assert api_client.get(BY_RECIPE.format(
+        mid=mid, rid="ghost-recipe-35")).status_code == 404
+    assert api_client.get(
+        f"/api/v1/models/{mid}/workflows/by-recipe/"
+        "m35--not-a-real-recipe-id").status_code == 404
+    assert api_client.get(BY_RECIPE.format(
+        mid="ghost-model-35", rid="ghost-recipe-35")).status_code == 404
+
+    # cross-model isolation: recipes are global, but the other model's
+    # group is empty (scoping from the model's own listing)
+    iso = api_client.get(BY_RECIPE.format(mid=mid2, rid="api35-r4"))
+    assert iso.status_code == 200 and iso.json() == []
+
+    # M11 listing/getter intact; generic ghost workflow id 404 (no
+    # route capture)
+    listing = api_client.get(f"/api/v1/models/{mid}/workflows").json()
+    assert [x["workflow_id"] for x in listing] == [w1["workflow_id"]]
+    got = api_client.get(
+        f"/api/v1/models/{mid}/workflows/{w1['workflow_id']}")
+    assert got.status_code == 200 and got.json() == w1
+    assert api_client.get(
+        f"/api/v1/models/{mid}/workflows/ghost-wf-35").status_code == 404
+
+    # M12 regression: the GLOBAL cross-model recipe-runs surface still
+    # works unchanged (same record, its own model_id; unknown 404)
+    global_runs = api_client.get(RUNS.format(rid="api35-r4")).json()
+    assert [x["workflow_id"] for x in global_runs] == [w1["workflow_id"]]
+    assert global_runs[0]["model_id"] == mid
+    assert api_client.get(RUNS.format(rid="ghost-recipe-35")
+                          ).status_code == 404
+    # M34 regression: gate-decision by-comparison route intact
+    assert api_client.get(
+        f"/api/v1/models/{mid}/gates/decisions/by-comparison/"
+        "ghost-comp-35").status_code == 404
+
+    # OpenAPI: 67 paths, the new path exactly once, GET-only, tag
+    # workflows, WorkflowRecord items; route order M11 listing <
+    # by-recipe < generic workflow detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer) + 1 (M34 gate decisions
+    # by-comparison) + 1 (M35 workflows by-recipe) = 67
+    assert len(spec["paths"]) == 67
+    path = "/api/v1/models/{model_id}/workflows/by-recipe/{recipe_id}"
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["workflows"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/WorkflowRecord"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/workflows") \
+        < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/workflows/{workflow_id}")

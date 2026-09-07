@@ -91,6 +91,12 @@ class WorkflowEngine:
         self.comparison = ComparisonEngine(storage)
         self.gates = GateEngine(storage)
         self.suite_runs = SuiteRunEngine(storage)
+        # registry validation (M35); the local import avoids the circular
+        # recipes -> workflows module dependency, and injecting ``self``
+        # keeps THIS engine the sole workflow executor (no second one is
+        # constructed inside the recipe engine)
+        from .recipes import RecipeEngine
+        self.recipes = RecipeEngine(storage, workflows=self)
 
     # ------------------------------------------------------------------ #
     # Paths / registry helpers
@@ -138,6 +144,46 @@ class WorkflowEngine:
             raise FileNotFoundError(
                 f"workflow run '{workflow_id}' not found for model '{model_id}'")
         return WorkflowRecord(**read_json(path))
+
+    def list_workflows_for_recipe(self, model_id: str,
+                                  recipe_id: str) -> list[WorkflowRecord]:
+        """Immutable M11 workflow runs of ONE model executed from ONE
+        registered M12/M14 recipe (M35; model-scoped).
+
+        Membership comes from the persisted run recipe identity ONLY:
+        every ``WorkflowRecord`` carries a top-level ``recipe_id`` plus
+        its matching ``recipe_hash`` provenance (M12 records both
+        verbatim when a registered recipe is executed; ad-hoc runs
+        keep ``recipe_id=None``), and a run belongs to the request when
+        its persisted ``recipe_id`` equals the requested id, matched
+        VERBATIM — never filenames, paths, stage ids, stage contents,
+        statuses, recipe hashes or the recipe's current definition
+        (recipes are immutable, but identity is still the persisted id
+        alone; the recorded ``recipe_hash`` provenance is preserved
+        exactly and never re-derived). Ad-hoc runs (``recipe_id=None``)
+        belong to NO by-recipe group and stay in the generic M11
+        listing untouched; no "ad-hoc" pseudo-recipe exists and none
+        is introduced. Each run appears EXACTLY ONCE (the
+        authoritative listing holds each record exactly once).
+        Resolution: unknown model or unknown recipe ->
+        FileNotFoundError; the recipe is validated through the existing
+        GLOBAL M12/M14 registry (``RecipeEngine.get`` — the same
+        resolution ``GET /workflows/recipes/{recipe_id}`` uses), while
+        model scoping comes from the model's own M11 listing — a model
+        never sees another model's runs (this is the model-scoped
+        complement of the GLOBAL cross-model
+        ``RecipeEngine.runs``/``GET /workflows/recipes/{id}/runs``
+        lineage surface, which stays intact). The result keeps the
+        authoritative M11 (created_at, workflow_id) ASCENDING order. A
+        VALID registered recipe with no runs for this model returns
+        []. Read-only, never writes, never expands or executes
+        anything.
+        """
+        # authoritative listing validates the model: FileNotFoundError (404)
+        workflows = self.list_workflows(model_id)
+        # M12 registry resolution: raises FileNotFoundError when unknown
+        self.recipes.get(recipe_id)
+        return [w for w in workflows if w.recipe_id == recipe_id]
 
     # ------------------------------------------------------------------ #
     # The run

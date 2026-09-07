@@ -460,6 +460,21 @@ class ModelForge:
     def list_workflows(self, model_id: str):
         return self.workflows.list_workflows(model_id)
 
+    def list_workflows_for_recipe(self, model_id: str, recipe_id: str):
+        """Immutable workflow runs of ONE model executed from ONE
+        registered recipe (M35 read-only access).
+
+        The recipe must exist in the GLOBAL M12/M14 registry (unknown
+        recipe -> FileNotFoundError -> 404) and the model must exist
+        (unknown model -> FileNotFoundError -> 404). Returns the
+        model's authoritative M11 listing filtered by the persisted
+        top-level recipe_id — verbatim records in the M11 (created_at,
+        workflow_id) order; ad-hoc runs (recipe_id None) never appear;
+        a valid registered recipe with no runs for this model returns
+        []. Read-only, never writes, never executes anything."""
+        return self.workflows.list_workflows_for_recipe(model_id,
+                                                        recipe_id)
+
     # ------------------------------------------------------------------ #
     # Dashboard (read-only aggregation over immutable histories; M8)
     # ------------------------------------------------------------------ #
