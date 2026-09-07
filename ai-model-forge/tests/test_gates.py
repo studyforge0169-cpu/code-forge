@@ -21,6 +21,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas import (
+    ComparisonRequest,
     ComparisonState,
     EvaluationConfig,
     GateDecisionResult,
@@ -856,4 +857,152 @@ def test_m23_engine_repeated_calls_identical(env):
         again = [d.model_dump(mode="json")
                  for d in f.list_gate_decisions_for_policy(env.model_id,
                                                            "m23-pol-a")]
+        assert again == first
+
+
+# =========================================================================== #
+# M34: read-only per-comparison grouping of the gate-decision history
+# =========================================================================== #
+
+def _m34_state(env):
+    """M34 state on top of the shared module env (cached): two gate
+    runs over the SAME evidence (identical request -> the M6 run REUSES
+    the same M5 comparison, so both decisions attach to ONE
+    comparison), one gate over a different probe (fresh comparison),
+    one threshold-only gate (legacy-style direct decision with
+    comparison_id None), and one fresh M5 comparison nobody gated (the
+    natural valid-id empty case). Returns (d1a, d1b, d3, d_none, c_new,
+    c_empty).
+    """
+    cached = getattr(env, "_m34", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    ck_e = env.imp_early.checkpoint_id
+    ck_f = env.imp_final.checkpoint_id
+    d1a = env.run_gate(baseline_ckpt=ck_e, cand_ckpt=ck_f, seed=6401,
+                       name="m34-g1")
+    d1b = env.run_gate(baseline_ckpt=ck_e, cand_ckpt=ck_f, seed=6401,
+                       name="m34-g1")            # identical -> same evidence
+    d3 = env.run_gate(baseline_ckpt=ck_e, cand_ckpt=ck_f, seed=6402,
+                      name="m34-g2")
+    d_none = env.run_gate(baseline_type="minimum_loss", minimum_loss=1e9,
+                          cand_ckpt=ck_f, seed=6403, name="m34-g3")
+    c_new = f.run_comparison(ComparisonRequest(
+        model_id=env.model_id,
+        state_a=ComparisonState(state_kind="checkpoint",
+                                checkpoint_id=ck_e),
+        state_b=ComparisonState(state_kind="checkpoint",
+                                checkpoint_id=ck_f),
+        dataset_id=env.ds_a, split="validation", tokenizer_id=env.tok_id,
+        batch_size=8, max_seq_len=32, seed=6498, tolerance=1e-4))
+    c_empty = f.run_comparison(ComparisonRequest(
+        model_id=env.model_id,
+        state_a=ComparisonState(state_kind="checkpoint",
+                                checkpoint_id=ck_e),
+        state_b=ComparisonState(state_kind="checkpoint",
+                                checkpoint_id=ck_f),
+        dataset_id=env.ds_a, split="validation", tokenizer_id=env.tok_id,
+        batch_size=8, max_seq_len=32, seed=6499, tolerance=1e-4))
+    env._m34 = (d1a, d1b, d3, d_none, c_new, c_empty)
+    return env._m34
+
+
+def test_m34_engine_grouping_parity_order_verbatim(env):
+    d1a, d1b, d3, d_none, c_new, c_empty = _m34_state(env)
+    f = env.forge
+    listing = f.list_gate_decisions(env.model_id)
+    # evidence reuse: both identical runs judged the SAME comparison
+    assert d1a.comparison_id == d1b.comparison_id
+    assert d1a.comparison_id != d3.comparison_id
+    for dec in (d1a, d3):
+        got = f.list_gate_decisions_for_comparison(
+            env.model_id, dec.comparison_id)
+        # parity with the authoritative M6 listing filtered by the
+        # persisted comparison identity; deterministic (created_at,
+        # decision_id) order; membership from the persisted field only
+        assert got == [d for d in listing
+                       if d.comparison_id == dec.comparison_id]
+        keyed = [(x.created_at, x.decision_id) for x in got]
+        assert keyed == sorted(keyed)
+        ids = [x.decision_id for x in got]
+        assert len(ids) == len(set(ids))
+        assert all(x.comparison_id == dec.comparison_id
+                   and x.model_id == env.model_id for x in got)
+        # verbatim payload parity with the M6 single-record getter
+        for x in got:
+            assert x == f.get_gate_decision(env.model_id, x.decision_id)
+    # the shared-evidence comparison holds exactly its two decisions
+    got1 = f.list_gate_decisions_for_comparison(
+        env.model_id, d1a.comparison_id)
+    assert {x.decision_id for x in got1} == {d1a.decision_id,
+                                             d1b.decision_id}
+    assert [x.decision_id for x in f.list_gate_decisions_for_comparison(
+        env.model_id, d3.comparison_id)] == [d3.decision_id]
+    # null-comparison decisions belong to NO group but stay listed
+    assert d_none.comparison_id is None
+    assert d_none.decision_id in {d.decision_id for d in listing}
+    # explicit partition: groups over EVERY non-null persisted
+    # comparison id are pairwise disjoint and cover exactly the
+    # non-null decisions (discovery, not fixed pairs)
+    non_null = [d for d in listing if d.comparison_id is not None]
+    groups = {cid: {x.decision_id for x in
+                    f.list_gate_decisions_for_comparison(env.model_id, cid)}
+              for cid in {d.comparison_id for d in non_null}}
+    flat = [i for g in groups.values() for i in g]
+    assert set(flat) == {d.decision_id for d in non_null}
+    assert len(flat) == len(set(flat)) == len(non_null)
+    assert d_none.decision_id not in set(flat)
+    assert d1a.comparison_id in groups
+
+
+def test_m34_engine_empty_404s_cross_model_read_only(env):
+    d1a, d1b, d3, d_none, c_new, c_empty = _m34_state(env)
+    f = env.forge
+    _, _, _, _, m_b, d_b = _m23_env(env)
+    # valid fresh comparisons with zero decisions -> []
+    assert f.list_gate_decisions_for_comparison(
+        env.model_id, c_new.comparison_id) == []
+    assert f.list_gate_decisions_for_comparison(
+        env.model_id, c_empty.comparison_id) == []
+    # unknown model / unknown comparison -> FileNotFoundError (404 at API)
+    with pytest.raises(FileNotFoundError):
+        f.list_gate_decisions_for_comparison(
+            "ghost-model-34", d1a.comparison_id)
+    with pytest.raises(FileNotFoundError):
+        f.list_gate_decisions_for_comparison(
+            env.model_id, "ghost-comp-34")
+    # cross-model isolation: this model's comparison id does not
+    # resolve under the other model (comparisons are model-scoped
+    # through the M5 registry), and its decisions never appear there
+    with pytest.raises(FileNotFoundError):
+        f.list_gate_decisions_for_comparison(
+            m_b, d1a.comparison_id)
+    a_ids = {d.decision_id for d in f.list_gate_decisions(env.model_id)}
+    b_ids = {d.decision_id for d in f.list_gate_decisions(m_b)}
+    assert a_ids.isdisjoint(b_ids)
+    assert d_b.decision_id not in a_ids
+    # read-only: the filter never writes gate artifacts
+    before = _m23_gate_files(env, (env.model_id, m_b))
+    f.list_gate_decisions_for_comparison(env.model_id,
+                                         d1a.comparison_id)
+    f.list_gate_decisions_for_comparison(env.model_id,
+                                         c_empty.comparison_id)
+    f.list_gate_decisions_for_comparison(m_b, d_b.comparison_id)
+    with pytest.raises(FileNotFoundError):
+        f.list_gate_decisions_for_comparison(m_b, d1a.comparison_id)
+    after = _m23_gate_files(env, (env.model_id, m_b))
+    assert after == before
+
+
+def test_m34_engine_repeated_calls_identical(env):
+    d1a, d1b, d3, d_none, c_new, c_empty = _m34_state(env)
+    f = env.forge
+    first = [d.model_dump(mode="json") for d in
+             f.list_gate_decisions_for_comparison(
+                 env.model_id, d1a.comparison_id)]
+    for _ in range(3):
+        again = [d.model_dump(mode="json") for d in
+                 f.list_gate_decisions_for_comparison(
+                     env.model_id, d1a.comparison_id)]
         assert again == first

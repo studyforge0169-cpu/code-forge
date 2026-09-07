@@ -607,5 +607,197 @@ def test_m23_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M30 evaluations by-tokenizer)
     # + 1 (M31 comparisons by-tokenizer)
     # + 1 (M32 samples by-tokenizer)
-    # + 1 (M33 sample-quality by-tokenizer) = 65
-    assert len(spec["paths"]) == 65
+    # + 1 (M33 sample-quality by-tokenizer)
+    # + 1 (M34 gate decisions by-comparison) = 66
+    assert len(spec["paths"]) == 66
+
+
+# --------------------------------------------------------------------------- #
+# M34: gate-decision history by comparison (read-only grouping)
+# --------------------------------------------------------------------------- #
+
+BY_COMP = "/api/v1/models/{mid}/gates/decisions/by-comparison/{cid}"
+_COMP_RUN = "/api/v1/comparisons/run"
+
+
+def _comp34(mid, ds, tok, a_ck, b_ck, seed) -> dict:
+    return {"model_id": mid,
+            "state_a": {"state_kind": "checkpoint", "checkpoint_id": a_ck},
+            "state_b": {"state_kind": "checkpoint", "checkpoint_id": b_ck},
+            "dataset_id": ds, "split": "validation",
+            "tokenizer_id": tok, "batch_size": 8, "max_seq_len": 32,
+            "seed": seed, "tolerance": 1e-4}
+
+
+def test_m34_api_by_comparison_grouping_determinism(api_client):
+    env = _make_model(api_client, "m34a", epochs=24, eval_every=8)
+    mid, ds, tok = env["model_id"], env["ds_id"], env["tok_id"]
+    ck_e = env["ckpts"][2]["checkpoint_id"]
+    ck_f = env["ckpts"][-1]["checkpoint_id"]
+
+    # identical inline gates REUSE the same M5 evidence -> ONE
+    # comparison with TWO decisions; a different seed -> its own
+    # comparison; a threshold-only gate -> comparison_id null
+    cand = {"state_kind": "checkpoint", "checkpoint_id": ck_f}
+    g1a = api_client.post(GATES, json=_gate_body(
+        mid, ds, tok, baseline_ckpt=ck_e, candidate=cand,
+        seed=6401)).json()
+    g1b = api_client.post(GATES, json=_gate_body(
+        mid, ds, tok, baseline_ckpt=ck_e, candidate=cand,
+        seed=6401)).json()
+    g2 = api_client.post(GATES, json=_gate_body(
+        mid, ds, tok, baseline_ckpt=ck_e, candidate=cand,
+        seed=6402)).json()
+    g_none = api_client.post(GATES, json=_gate_body(
+        mid, ds, tok, baseline_type="minimum_loss", minimum_loss=1e9,
+        candidate=cand, seed=6403)).json()
+    assert g1a["comparison_id"] == g1b["comparison_id"]
+    assert g1a["comparison_id"] != g2["comparison_id"]
+    assert g_none["comparison_id"] is None
+
+    url = BY_COMP.format(mid=mid, cid=g1a["comparison_id"])
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # authoritative-filter parity: exact subset of the M6 listing whose
+    # persisted comparison_id matches, in the same order
+    listing = api_client.get(GATE_DECISIONS.format(model_id=mid)).json()
+    assert recs == [x for x in listing
+                    if x["comparison_id"] == g1a["comparison_id"]]
+    assert {x["decision_id"] for x in recs} == {g1a["decision_id"],
+                                                g1b["decision_id"]}
+    keyed = [(x["created_at"], x["decision_id"]) for x in recs]
+    assert keyed == sorted(keyed)
+    # verbatim: each element equals its POST payload and its
+    # detail-getter payload (verdict/decision/losses/delta/reason)
+    by_id = {x["decision_id"]: x for x in recs}
+    assert by_id[g1a["decision_id"]] == g1a
+    assert by_id[g1b["decision_id"]] == g1b
+    for x in recs:
+        one = api_client.get(
+            f"{GATE_DECISIONS.format(model_id=mid)}/{x['decision_id']}")
+        assert one.status_code == 200 and one.json() == x
+    # deterministic: three repeats return identical raw bytes
+    raws = {api_client.get(url).content for _ in range(3)}
+    assert len(raws) == 1
+    # partition: g2's group holds exactly its own decision, disjoint
+    # from g1's group; null-comparison records belong to NO group
+    recs2 = api_client.get(
+        BY_COMP.format(mid=mid, cid=g2["comparison_id"])).json()
+    assert [x["decision_id"] for x in recs2] == [g2["decision_id"]]
+    ids1 = {x["decision_id"] for x in recs}
+    ids2 = {x["decision_id"] for x in recs2}
+    assert ids1.isdisjoint(ids2)
+    non_null = {x["decision_id"] for x in listing
+                if x["comparison_id"] is not None}
+    assert ids1 | ids2 == non_null
+    assert g_none["decision_id"] not in non_null
+    # valid comparison with zero decisions -> [] (200): fresh M5 runs
+    for seed in (6498, 6499):
+        fresh = api_client.post(_COMP_RUN, json=_comp34(mid, ds, tok,
+                                                        ck_e, ck_f, seed))
+        assert fresh.status_code == 200, fresh.text
+        empty = api_client.get(BY_COMP.format(
+            mid=mid, cid=fresh.json()["comparison_id"]))
+        assert empty.status_code == 200 and empty.json() == []
+    # no side effects: the filter itself added no decisions
+    assert len(api_client.get(
+        GATE_DECISIONS.format(model_id=mid)).json()) == 4
+
+
+def test_m34_api_404s_isolation_regressions_openapi(api_client):
+    env = _make_model(api_client, "m34b", epochs=10, eval_every=10)
+    mid, ds, tok = env["model_id"], env["ds_id"], env["tok_id"]
+    ck_e = env["ckpts"][2]["checkpoint_id"]
+    ck_f = env["ckpts"][-1]["checkpoint_id"]
+    g1 = api_client.post(GATES, json=_gate_body(
+        mid, ds, tok, baseline_ckpt=ck_e,
+        candidate={"state_kind": "checkpoint", "checkpoint_id": ck_f},
+        seed=6404)).json()
+    # a second REAL model with no comparisons of its own
+    mid_b = api_client.post(MODELS, json={"config": _m23_cfg("iso-34")}) \
+        .json()["model"]["id"]
+
+    # 404s: unknown model / unknown comparison (two ghost forms)
+    assert api_client.get(BY_COMP.format(
+        mid="ghost-model-34", cid=g1["comparison_id"])).status_code == 404
+    assert api_client.get(BY_COMP.format(
+        mid=mid, cid="ghost-comp-34")).status_code == 404
+    assert api_client.get(
+        f"{GATE_DECISIONS.format(model_id=mid)}/by-comparison/"
+        "m34--not-a-real-comparison-id").status_code == 404
+    assert api_client.get(BY_COMP.format(
+        mid="ghost-model-34", cid="ghost-comp-34")).status_code == 404
+
+    # cross-model isolation: this model's comparison id does not
+    # resolve under the other model (comparisons are model-scoped
+    # through the M5 registry)
+    assert api_client.get(BY_COMP.format(
+        mid=mid_b, cid=g1["comparison_id"])).status_code == 404
+
+    # M6 listing/getter intact
+    listing = api_client.get(GATE_DECISIONS.format(model_id=mid)).json()
+    assert [x["decision_id"] for x in listing] == [g1["decision_id"]]
+    got = api_client.get(
+        f"{GATE_DECISIONS.format(model_id=mid)}/{g1['decision_id']}")
+    assert got.status_code == 200 and got.json() == g1
+
+    # M23 by-policy regression: registered policy grouping still works
+    pol = _policy(mid, ds, tok, baseline_type="checkpoint",
+                  baseline_ckpt=ck_e, seed=6405, name="api34-pol")
+    assert api_client.post(POLICIES, json={
+        "policy_id": "api34-pol-a", "description": "d",
+        "policy": pol}).status_code == 201
+    dp = api_client.post(GATES, json={
+        "model_id": mid, "policy_id": "api34-pol-a",
+        "candidate": {"state_kind": "checkpoint",
+                      "checkpoint_id": ck_f}}).json()
+    bypol = api_client.get(BY_POLICY.format(mid=mid, pid="api34-pol-a"))
+    assert bypol.status_code == 200
+    assert [x["decision_id"] for x in bypol.json()] == [dp["decision_id"]]
+    assert api_client.get(BY_POLICY.format(mid=mid,
+                                           pid="ghost-pol-34")
+                          ).status_code == 404
+    # ...and the policy decision lands in ITS comparison's group too
+    grp = api_client.get(BY_COMP.format(mid=mid,
+                                        cid=dp["comparison_id"])).json()
+    assert [x["decision_id"] for x in grp] == [dp["decision_id"]]
+
+    # generic detail getter still 404s ghost ids (no route capture)
+    assert api_client.get(
+        f"{GATE_DECISIONS.format(model_id=mid)}/ghost-dec-34"
+    ).status_code == 404
+
+    # M31 comparisons-by-tokenizer regression: the gated comparisons
+    # group correctly under the tokenizer they measured with
+    comps = api_client.get(f"{MODELS}/{mid}/comparisons").json()
+    cmpt = api_client.get(f"{MODELS}/{mid}/comparisons/by-tokenizer/"
+                          f"{tok}").json()
+    assert cmpt == [c for c in comps if c["tokenizer_id"] == tok]
+
+    # OpenAPI: 66 paths, the new path exactly once, GET-only, tag
+    # gates, GateDecision items; route order M23 by-policy <
+    # by-comparison < generic decision detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer)
+    # + 1 (M34 gate decisions by-comparison) = 66
+    assert len(spec["paths"]) == 66
+    path = ("/api/v1/models/{model_id}/gates/decisions/by-comparison"
+            "/{comparison_id}")
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["gates"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/GateDecision"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/gates/decisions/"
+                      "by-policy/{policy_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/gates/decisions/{decision_id}")

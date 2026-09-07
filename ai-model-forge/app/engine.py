@@ -433,6 +433,23 @@ class ModelForge:
         for this model returns []. Read-only, never writes."""
         return self.gates.list_decisions_for_policy(model_id, policy_id)
 
+    def list_gate_decisions_for_comparison(self, model_id: str,
+                                           comparison_id: str):
+        """Immutable gate decisions that judged ONE M5 comparison (M34
+        read-only access).
+
+        The comparison must be registered under THIS model's M5
+        registry (unknown comparison, or a comparison id belonging to
+        another model -> FileNotFoundError -> 404), and the model must
+        exist. Returns the model's authoritative M6 listing filtered by
+        the persisted comparison_id recorded in each decision —
+        verbatim records in the M6 (created_at, decision_id) order;
+        legacy direct-evaluation decisions (comparison_id None) never
+        appear; a valid comparison with no decisions returns [].
+        Read-only, never writes."""
+        return self.gates.list_decisions_for_comparison(
+            model_id, comparison_id)
+
     # ------------------------------------------------------------------ #
     # Workflows (thin delegation; ordered orchestration over M3-M6; M7)
     # ------------------------------------------------------------------ #

@@ -140,6 +140,7 @@ class GateEngine:
 
     # ------------------------------------------------------------------ #
     # M23: per-policy access (read-only)
+    # M34: per-comparison access (read-only)
     # ------------------------------------------------------------------ #
 
     def list_decisions_for_policy(self, model_id: str,
@@ -165,6 +166,42 @@ class GateEngine:
         # policy registry resolution: raises FileNotFoundError when unknown
         self.policies.get_policy(policy_id)
         return [d for d in decisions if d.policy_id == policy_id]
+
+    def list_decisions_for_comparison(self, model_id: str,
+                                      comparison_id: str) -> list[GateDecision]:
+        """Immutable gate decisions that judged ONE M5 comparison of ONE
+        model (M34).
+
+        Membership comes from the persisted decision comparison identity
+        ONLY: every ``GateDecision`` carries a top-level ``comparison_id``
+        (the M5 record it judged — the M6 run persists it verbatim from
+        the request), and a decision belongs to the request when its
+        persisted ``comparison_id`` equals the requested id, matched
+        VERBATIM — never filenames, gate-directory names, checkpoint
+        ids, policy ids or hashes, and never re-derived from the
+        comparison's current content. Legacy direct-evaluation
+        decisions keep ``comparison_id=None`` and therefore belong to
+        NO by-comparison group (None never matches any requested id);
+        they stay in the generic M6 listing untouched. Each decision
+        appears EXACTLY ONCE (the authoritative listing holds each
+        record exactly once). Resolution: unknown model or unknown
+        comparison -> FileNotFoundError; ownership is validated through
+        the model's own M5 registry
+        (``ComparisonEngine.get_comparison`` — the same getter
+        ``GET /models/{id}/comparisons/{comparison_id}`` exposes); a
+        comparison id belonging to another model is not registered
+        under this model and raises FileNotFoundError, exactly like an
+        unknown one (comparisons are model-scoped). The result keeps
+        the authoritative M6 (created_at, decision_id) ASCENDING
+        order. A valid comparison with no decisions returns [].
+        Read-only, never writes.
+        """
+        # authoritative listing validates the model: FileNotFoundError (404)
+        decisions = self.list_decisions(model_id)
+        # M5 registry ownership resolution: raises FileNotFoundError when
+        # unknown or belonging to another model
+        self.comparison.get_comparison(model_id, comparison_id)
+        return [d for d in decisions if d.comparison_id == comparison_id]
 
     # ------------------------------------------------------------------ #
     # The gate run

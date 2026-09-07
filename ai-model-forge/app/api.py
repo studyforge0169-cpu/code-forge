@@ -307,6 +307,20 @@ def index() -> HTMLResponse:
         no aggregation, no verdicts beyond the persisted ones, zero
         storage growth.</li>
 
+      <li><b>M34 gate-decision history by comparison</b> — one read-only
+        access path, <code>GET /models/&#123;id&#125;/gates/decisions/by-comparison/&#123;comparison_id&#125;</code>,
+        answers "which immutable gate decisions of this model judged
+        this M5 comparison?": the model's authoritative M6 listing
+        filtered by the persisted comparison_id recorded in each
+        decision, after comparison ownership is verified through the
+        model's own M5 registry (full record payloads incl. verdict,
+        decision, losses, delta and reason, exact M6 ordering; unknown
+        model or comparison -> 404; a comparison of another model ->
+        404; a valid comparison without decisions -> []; legacy
+        direct-evaluation decisions with null comparison_id never
+        appear). Pure data access — no aggregation, no new verdicts,
+        zero storage growth.</li>
+
       <li><b>M24 evaluation history by checkpoint</b> — one read-only access
         path, <code>GET /models/&#123;id&#125;/evaluations/by-checkpoint/&#123;checkpoint&#125;</code>,
         answers "which immutable M4 evaluations measured this checkpoint?":
@@ -472,6 +486,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/gates/evaluate</code> — stage gate: policy + candidate → passed / failed decision</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions</code> — immutable gate decision history</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-policy/&#123;policy_id&#125;</code> — gate decisions of ONE registered policy (read-only, deterministic, no aggregation)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-comparison/&#123;comparison_id&#125;</code> — gate decisions that judged ONE M5 comparison (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/&#123;decision&#125;</code> — one gate decision</li>
       <li><code>POST  {prefix}/workflows/run</code> — execute one inline workflow plan synchronously</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows</code> — immutable workflow run history</li>
@@ -1072,7 +1087,8 @@ def get_comparison(model_id: str, comparison_id: str) -> ComparisonRecord:
 
 
 # Gate routes (Milestone 6 — policy-driven, evidence-based run decisions;
-# Milestone 23 adds the read-only by-policy grouping of the immutable history)
+# Milestone 23 adds the read-only by-policy grouping of the immutable history;
+# Milestone 34 adds the read-only by-comparison grouping of the same history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/gates/evaluate", response_model=GateDecision, tags=["gates"])
@@ -1128,6 +1144,35 @@ def list_gate_decisions_by_policy(model_id: str, policy_id: str
     not a decision id.)"""
     try:
         return _forge().list_gate_decisions_for_policy(model_id, policy_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/gates/decisions/by-comparison/{comparison_id}",
+         response_model=list[GateDecision], tags=["gates"])
+def list_gate_decisions_by_comparison(model_id: str, comparison_id: str
+                                      ) -> list[GateDecision]:
+    """Immutable gate decisions that judged ONE comparison (M34).
+
+    Read-only per-comparison grouping: resolves the comparison through
+    the model's own M5 comparison registry (an unknown comparison, or a
+    comparison id belonging to another model, is 404 — comparisons are
+    model-scoped; identity is the persisted comparison manifest, never
+    inferred from gate-directory names) and the model through the
+    existing registry (unknown model is 404), then returns the model's
+    authoritative M6 listing filtered by the persisted comparison_id
+    recorded in each GateDecision — complete verbatim payloads
+    (verdict, decision, losses, delta, reason included) in the exact
+    M6 (created_at, decision_id) order. Legacy direct-evaluation
+    decisions keep comparison_id null and never appear; a valid
+    comparison with no decisions for this model returns []. Answers
+    only which immutable decisions judged this comparison; no
+    aggregation, no new verdicts, no re-evaluation, no writes. (Must
+    stay registered before /gates/decisions/{decision_id}; the literal
+    "by-comparison" segment is not a decision id.)"""
+    try:
+        return _forge().list_gate_decisions_for_comparison(
+            model_id, comparison_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

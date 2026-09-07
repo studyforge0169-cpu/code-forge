@@ -1280,11 +1280,54 @@ generation never trains, evaluates, scores, ranks or judges output.
   the tokenizer registry and the M16–M32 surfaces are byte-identical
   before and after
 
+### Milestone 34 — gate-decision history by comparison
+  (`gates/decisions/by-comparison`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/gates/decisions/by-comparison/{comparison_id}` —
+  answers "which immutable M6 gate decisions of this model judged
+  this M5 comparison?" and nothing else
+- **exact filtering (persisted decision comparison identity)**: every
+  `GateDecision` carries a top-level `comparison_id` (the M5 record
+  it judged — the M6 run persists it verbatim from the request), and
+  a decision belongs to the request only when that persisted id
+  matches VERBATIM — never filenames, gate-directory names, checkpoint
+  ids, policy ids, hashes, or re-derivation from the comparison's
+  current content. Legacy direct-evaluation decisions keep
+  `comparison_id=None`, belong to NO by-comparison group, and stay in
+  the generic M6 listing untouched. Each matching decision appears
+  EXACTLY ONCE
+- **model-scoped ownership first**: the comparison is validated
+  through the model's OWN M5 registry first
+  (`ComparisonEngine.get_comparison` — the same getter
+  `GET /models/{id}/comparisons/{comparison_id}` exposes; unknown
+  comparison, or one belonging to another model, → 404 — comparisons
+  are model-scoped). Returned records are verbatim `GateDecision`
+  payloads (verdict, decision, losses, delta, reason included) in the
+  exact M6 authoritative order ((created_at, decision_id) ASCENDING);
+  a valid comparison with zero decisions is a deterministic `[]` —
+  never a 404
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_decisions_for_comparison(model_id, comparison_id)`
+  validates through the comparison registry handle ALREADY composed
+  in `GateEngine.__init__` (the M6 run uses the same handle; no new
+  composition) and filters the authoritative M6 `list_decisions()` by
+  the persisted `comparison_id`; the facade and route are thin
+  pass-throughs registered after the M23 by-policy route and
+  **before** the generic `/gates/decisions/{decision_id}` detail
+  getter (M23/M34 are different groupings of the same listing, both
+  intact). No caches, no new storage — repeated GETs are
+  byte-identical and the endpoint never writes
+- **isolation & boundaries**: unknown model/comparison -> existing
+  404s; valid comparison without decisions -> `[]`. M6 (run, listing,
+  getter), M23 by-policy, M26/M29/M31 comparison surfaces, the M5
+  registry and the M16–M33 surfaces are byte-identical before and
+  after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 475 tests
+pytest                       # 480 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1767,7 +1810,7 @@ ai-model-forge/
     comparison.py      # comparison engine: A/B states over identical probes (M5)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer grouping (M26/M29/M31)
     gates.py           # stage gates: policy-driven run decisions (M6)
-                       # + read-only by-policy grouping of the history (M23)
+                       # + read-only by-policy/by-comparison grouping (M23/M34)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
     dashboards.py      # read-only dashboard engine: deterministic views (M8/M13)
     policies.py        # policy registry + probe suites: immutable definitions (M9)
@@ -1780,7 +1823,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 475 tests across 20 suites
+  tests/               # 480 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

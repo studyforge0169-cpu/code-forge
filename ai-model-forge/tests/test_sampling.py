@@ -781,12 +781,12 @@ def test_m27_api_404s_isolation_regressions_openapi(api_client):
     cmp_ = api_client.get(f"{MODELS}/{h['mid']}/comparisons/"
                           f"by-checkpoint/{h['ckpt']}")
     assert cmp_.status_code == 200 and cmp_.json() == []
-    # OpenAPI: 65 paths, the new path exactly once, GET-only, sampling
+    # OpenAPI: 66 paths, the new path exactly once, GET-only, sampling
     # tag, array of SampleRecord, registered before the generic route
     spec = api_client.get("/openapi.json").json()
     path = "/api/v1/models/{model_id}/samples/by-checkpoint/{checkpoint_id}"
     generic = "/api/v1/models/{model_id}/samples/{sample_id}"
-    assert len(spec["paths"]) == 65
+    assert len(spec["paths"]) == 66
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["sampling"]
@@ -1058,8 +1058,9 @@ def test_m32_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
     # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer)
-    # = 65
-    assert len(spec["paths"]) == 65
+    # + 1 (M34 gate decisions by-comparison)
+    # = 66
+    assert len(spec["paths"]) == 66
     path = ("/api/v1/models/{model_id}/samples/by-tokenizer"
             "/{tokenizer_id}")
     keys = list(spec["paths"])
