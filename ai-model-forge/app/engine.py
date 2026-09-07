@@ -25,6 +25,7 @@ from .sampling import SamplingEngine
 from .sample_quality import SampleQualityEngine
 from .schemas import (
     ComparisonRecord,
+    ComparisonVerdict,
     EvalStateKind,
     EvaluationRecord,
     EvaluationSplit,
@@ -466,6 +467,27 @@ class ModelForge:
         comparisons for the model returns []. Read-only, never
         writes."""
         return self.comparison.list_comparisons_for_split(model_id, split)
+
+    def list_comparisons_for_verdict(self, model_id: str,
+                                     verdict: ComparisonVerdict
+                                     ) -> list[ComparisonRecord]:
+        """Immutable M5 comparison records of ONE model with ONE
+        verdict (M39 read-only access).
+
+        The verdict is the persisted schema enum (improved/regressed/
+        unchanged) — there is NO verdict registry, so an unsupported
+        value is rejected at the API boundary with 422, while an
+        unknown model raises FileNotFoundError (404) exactly like the
+        sibling groupings. Returns the model's authoritative M5
+        listing filtered by the persisted top-level verdict (matched
+        VERBATIM — NEVER recalculated from loss deltas or per-side
+        losses, never rewritten; no comparison is executed and no
+        evaluation rerun) in the M5 (created_at, comparison_id)
+        order, as complete verbatim records. A valid verdict with no
+        comparisons for the model returns []. Read-only, never
+        writes."""
+        return self.comparison.list_comparisons_for_verdict(
+            model_id, verdict)
 
     # ------------------------------------------------------------------ #
     # Stage gates (thin delegation; M6)

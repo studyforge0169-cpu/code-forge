@@ -1510,11 +1510,58 @@ generation never trains, evaluates, scores, ranks or judges output.
   M37 comparisons-by-split and the M16–M37 surfaces are
   byte-identical before and after
 
+### Milestone 39 — comparison history by verdict
+  (`comparisons/by-verdict`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/comparisons/by-verdict/{verdict}` — answers
+  "which immutable M5 comparisons of this model produced this
+  verdict?" and nothing else
+- **exact filtering (persisted verdict identity)**: every
+  `ComparisonRecord` carries a top-level `verdict` (the schema enum
+  improved/regressed/unchanged — the immutable loss-only judgment
+  persisted at run time by the M5 comparison flow: it describes
+  measured loss on ONE probe, never a universal quality judgment),
+  and a comparison belongs to the request only when that persisted
+  value matches VERBATIM — NEVER recalculated from loss deltas,
+  per-side losses or tolerances, never resolved or rewritten, no
+  comparison executed and no evaluation rerun. Each matching
+  comparison appears EXACTLY ONCE; verbatim `ComparisonRecord`
+  payloads (verdict/per-side losses included) in the exact M5
+  authoritative order ((created_at, comparison_id) ASCENDING)
+- **the 422-vs-404 contract (no verdict registry)**: verdicts are a
+  SCHEMA ENUM, not a registry — unlike the M26 checkpoint / M29
+  dataset / M31 tokenizer axes there is nothing to 404 for an
+  unsupported verdict value, so it is rejected with 422 by schema
+  validation at the API boundary (before the handler, matching
+  M36/M37/M38: even unknown-model + invalid-verdict is 422); unknown
+  model with a VALID verdict -> existing 404; a valid verdict with
+  zero comparisons for the model is a deterministic `[]` — never a
+  404 (production currently holds improved -> 3 / unchanged -> 3 /
+  regressed -> 2 for `4a0a871886ef` — all three groups non-empty;
+  every verdict of `b5bc905326b6` is a natural valid-empty case)
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_comparisons_for_verdict(model_id, verdict)` filters
+  the authoritative M5 `list_comparisons()` by the persisted
+  `verdict` (ZERO new `__init__` composition lines — no registry
+  handle is needed, and the execution engine is never invoked); the
+  facade and route are thin pass-throughs registered after the M37
+  by-split route and **before** the generic
+  `/comparisons/{comparison_id}` detail getter
+  (M26/M29/M31/M37/M39 are different groupings of the same listing,
+  all intact). No caches, no new storage — repeated GETs are
+  byte-identical and the endpoint never writes
+- **isolation & boundaries**: unknown model -> existing 404;
+  unsupported verdict value -> 422; valid verdict without
+  comparisons for the model -> `[]`. M5 (run, listing, getter), M26
+  by-checkpoint, M29 by-dataset, M31 by-tokenizer, M37 by-split, M38
+  evaluations-by-state-kind and the M16–M38 surfaces are
+  byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 500 tests
+pytest                       # 505 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1996,8 +2043,8 @@ ai-model-forge/
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
                        #   by-state-kind grouping (M24/M28/M30/M36/M38)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
-                       # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split
-                       #   grouping (M26/M29/M31/M37)
+                       # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
+                       #   by-verdict grouping (M26/M29/M31/M37/M39)
     gates.py           # stage gates: policy-driven run decisions (M6)
                        # + read-only by-policy/by-comparison grouping (M23/M34)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
@@ -2012,7 +2059,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 500 tests across 20 suites
+  tests/               # 505 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

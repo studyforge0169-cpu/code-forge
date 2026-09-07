@@ -288,6 +288,48 @@ class ComparisonEngine:
         return [r for r in self.list_comparisons(model_id)
                 if r.split == split]
 
+    def list_comparisons_for_verdict(
+            self, model_id: str, verdict: ComparisonVerdict
+    ) -> list[ComparisonRecord]:
+        """Immutable M5 comparisons of ONE model with ONE verdict
+        (M39).
+
+        Membership comes from the persisted verdict identity ONLY:
+        every ``ComparisonRecord`` carries a top-level ``verdict:
+        ComparisonVerdict`` (the schema enum improved/regressed/
+        unchanged — the immutable loss-only judgment persisted at run
+        time by the M5 comparison flow: |loss_B - loss_A| <= tolerance
+        -> unchanged, below -> improved, above -> regressed; it
+        describes measured loss on ONE probe, never a universal
+        quality judgment), and a comparison belongs to the request
+        when its persisted ``verdict`` equals the requested value —
+        never recalculated from loss deltas, per-side losses,
+        tolerances, checkpoint ids or hashes, and never resolved or
+        rewritten into another value (the persisted verdict is the
+        ONLY authority; this method NEVER calls the comparison
+        execution engine or reruns evaluations). Verdicts have NO
+        registry (unlike the M26 checkpoint / M29 dataset / M31
+        tokenizer axes): the enum IS the contract, so an unsupported
+        verdict value is rejected at the API boundary with 422
+        (schema-level validation — it never even reaches this
+        method), while an unknown model raises FileNotFoundError
+        exactly like the sibling groupings. Each comparison appears
+        EXACTLY ONCE (the authoritative listing holds each record
+        exactly once). The result is the model's authoritative M5
+        listing above (the exact engine parse + deterministic
+        (created_at, comparison_id) ASCENDING order) filtered by the
+        persisted verdict; complete verbatim ``ComparisonRecord``
+        payloads, no rewritten fields. A valid verdict with no
+        comparisons for the model returns []. Verdicts are
+        model-scoped through the listing itself — a model never sees
+        another model's comparisons. Read-only, never writes.
+        """
+        # existence: raises FileNotFoundError (404 at the API); the
+        # verdict itself needs NO registry lookup and is NEVER
+        # recalculated — the persisted field is filtered verbatim
+        return [r for r in self.list_comparisons(model_id)
+                if r.verdict == verdict]
+
     # ------------------------------------------------------------------ #
     # Canonical flow (API): one model, one shared probe, two states
     # ------------------------------------------------------------------ #

@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from app.schemas import (
     ComparisonRequest,
     ComparisonState,
+    ComparisonVerdict,
     EvaluationConfig,
     EvalStateKind,
     ModelCreateRequest,
@@ -975,4 +976,126 @@ def test_m37_engine_repeated_calls_identical(env):
         again = [r.model_dump(mode="json") for r in
                  f.list_comparisons_for_split(env.model_id,
                                               "validation")]
+        assert again == first
+
+
+# --------------------------------------------------------------------------- #
+# M39: comparison history by verdict (read-only grouping, enum contract)
+# --------------------------------------------------------------------------- #
+
+def _m39_env(env):
+    """M39 state on top of the shared module env (cached): comparisons
+    covering ALL THREE verdicts deterministically — one A=B record
+    (delta 0 -> unchanged) plus the two directions of the same
+    checkpoint pair under a tiny tolerance (losses differ -> one
+    improved, one regressed). Returns (c_un, c_ab, c_ba).
+    """
+    cached = getattr(env, "_m39_state", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    ckE, ckF = env.imp_early.checkpoint_id, env.imp_final.checkpoint_id
+    c_un = f.run_comparison(env.cmp(ckF, ckF, tolerance=1e-4,
+                                    seed=3900))
+    c_ab = f.run_comparison(env.cmp(ckE, ckF, tolerance=1e-9,
+                                    seed=3901))
+    c_ba = f.run_comparison(env.cmp(ckF, ckE, tolerance=1e-9,
+                                    seed=3902))
+    env._m39_state = (c_un, c_ab, c_ba)
+    return env._m39_state
+
+
+def test_m39_engine_filters_by_persisted_verdict_identity(env):
+    c_un, c_ab, c_ba = _m39_env(env)
+    f = env.forge
+    # the fixture covers all three enum values exactly once (the two
+    # directions of one pair under a tiny tolerance are opposite
+    # non-unchanged verdicts; A=B is unchanged by construction)
+    assert {c_un.verdict, c_ab.verdict, c_ba.verdict} == \
+        {ComparisonVerdict.UNCHANGED, ComparisonVerdict.IMPROVED,
+         ComparisonVerdict.REGRESSED}
+    listing = f.list_comparisons(env.model_id)
+    for verdict in (ComparisonVerdict.IMPROVED,
+                    ComparisonVerdict.REGRESSED,
+                    ComparisonVerdict.UNCHANGED):
+        got = f.list_comparisons_for_verdict(env.model_id, verdict)
+        # parity with the authoritative M5 listing filtered by the
+        # persisted verdict; deterministic (created_at,
+        # comparison_id) order; the verdict is NEVER recalculated
+        assert got == [r for r in listing if r.verdict == verdict]
+        keyed = [(r.created_at, r.comparison_id) for r in got]
+        assert keyed == sorted(keyed)
+        ids = [r.comparison_id for r in got]
+        assert len(ids) == len(set(ids))
+        assert all(r.verdict == verdict and r.model_id == env.model_id
+                   for r in got)
+        for r in got:
+            assert r == f.get_comparison(env.model_id, r.comparison_id)
+    # the fixture's records land one per group with the persisted
+    # verdict VERBATIM (earlier module tests may have added other
+    # comparisons — membership derives from the listing)
+    by_v = {v: {r.comparison_id for r in
+                f.list_comparisons_for_verdict(env.model_id, v)}
+            for v in (ComparisonVerdict.IMPROVED,
+                      ComparisonVerdict.REGRESSED,
+                      ComparisonVerdict.UNCHANGED)}
+    assert c_un.comparison_id in by_v[c_un.verdict]
+    assert c_ab.comparison_id in by_v[c_ab.verdict]
+    assert c_ba.comparison_id in by_v[c_ba.verdict]
+    # explicit partition: disjoint groups over ALL enum values whose
+    # union is the full listing
+    all_v = list(by_v.values())
+    assert all(all_v)
+    for i in range(len(all_v)):
+        for j in range(i + 1, len(all_v)):
+            assert all_v[i].isdisjoint(all_v[j])
+    assert set().union(*all_v) == {r.comparison_id for r in listing}
+
+
+def test_m39_engine_empty_404s_model_scoping_read_only(env):
+    c_un, c_ab, c_ba = _m39_env(env)
+    f = env.forge
+    _, _, _, _, _, _, _, b, b_ck = _m26_env(env)
+    # valid verdict with zero comparisons -> [] (the model-scoped
+    # empty case: b has none under ANY verdict)
+    for v in (ComparisonVerdict.IMPROVED, ComparisonVerdict.REGRESSED,
+              ComparisonVerdict.UNCHANGED):
+        assert f.list_comparisons_for_verdict(b, v) == []
+    # unknown model -> FileNotFoundError (404 at the API); the enum
+    # itself needs NO registry lookup (unsupported values are 422 at
+    # the API boundary and never reach the engine)
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_verdict("ghost-model-39",
+                                       ComparisonVerdict.IMPROVED)
+    # cross-model isolation: a's comparison ids never appear under b
+    for v in (ComparisonVerdict.IMPROVED, ComparisonVerdict.REGRESSED,
+              ComparisonVerdict.UNCHANGED):
+        leak = [r.comparison_id for r in
+                f.list_comparisons_for_verdict(b, v)]
+        assert c_ab.comparison_id not in leak
+    # read-only: the filter never writes comparison manifests
+    def comp_files(mid):
+        root = f.storage.model_dir(mid) / "comparisons"
+        if not root.exists():
+            return set()
+        return {p.relative_to(root).as_posix()
+                for p in root.rglob("*") if p.is_file()}
+    before = (comp_files(env.model_id), comp_files(b))
+    for v in (ComparisonVerdict.IMPROVED, ComparisonVerdict.REGRESSED,
+              ComparisonVerdict.UNCHANGED):
+        f.list_comparisons_for_verdict(env.model_id, v)
+        f.list_comparisons_for_verdict(b, v)
+    assert (comp_files(env.model_id), comp_files(b)) == before
+
+
+def test_m39_engine_repeated_calls_identical(env):
+    _m39_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_comparisons_for_verdict(env.model_id,
+                                            ComparisonVerdict.UNCHANGED)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_comparisons_for_verdict(
+                     env.model_id, ComparisonVerdict.UNCHANGED)]
         assert again == first

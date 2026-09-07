@@ -382,8 +382,9 @@ def test_m26_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M35 workflows by-recipe)
     # + 1 (M36 evaluations by-split)
     # + 1 (M37 comparisons by-split)
-    # + 1 (M38 evaluations by-state-kind) = 70
-    assert len(spec["paths"]) == 70
+    # + 1 (M38 evaluations by-state-kind)
+    # + 1 (M39 comparisons by-verdict) = 71
+    assert len(spec["paths"]) == 71
 
 
 # =========================================================================== #
@@ -514,7 +515,7 @@ def test_m29_api_404s_isolation_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/comparisons/{comparison_id}"
     m26 = ("/api/v1/models/{model_id}/comparisons/by-checkpoint/"
            "{checkpoint_id}")
-    assert len(spec["paths"]) == 70
+    assert len(spec["paths"]) == 71
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["comparison"]
@@ -664,8 +665,9 @@ def test_m31_by_tokenizer_404s_isolation_regressions_openapi(api_client):
     # + 1 (M35 workflows by-recipe)
     # + 1 (M36 evaluations by-split)
     # + 1 (M37 comparisons by-split)
-    # + 1 (M38 evaluations by-state-kind) = 70
-    assert len(spec["paths"]) == 70
+    # + 1 (M38 evaluations by-state-kind)
+    # + 1 (M39 comparisons by-verdict) = 71
+    assert len(spec["paths"]) == 71
     path = ("/api/v1/models/{model_id}/comparisons/by-tokenizer"
             "/{tokenizer_id}")
     keys = list(spec["paths"])
@@ -796,7 +798,7 @@ def test_m37_by_split_404_422s_isolation_regressions_openapi(api_client):
     assert evs_by.status_code == 200
     assert evs_by.json() == [e for e in evs if e["split"] == "validation"]
 
-    # OpenAPI: 70 paths, the new path exactly once, GET-only, tag
+    # OpenAPI: 71 paths, the new path exactly once, GET-only, tag
     # comparison, ComparisonRecord items, split $ref EvaluationSplit;
     # route order M31 by-tokenizer < by-split < generic detail
     spec = api_client.get("/openapi.json").json()
@@ -809,8 +811,9 @@ def test_m37_by_split_404_422s_isolation_regressions_openapi(api_client):
     # + 1 (M35 workflows by-recipe)
     # + 1 (M36 evaluations by-split)
     # + 1 (M37 comparisons by-split)
-    # + 1 (M38 evaluations by-state-kind) = 70
-    assert len(spec["paths"]) == 70
+    # + 1 (M38 evaluations by-state-kind)
+    # + 1 (M39 comparisons by-verdict) = 71
+    assert len(spec["paths"]) == 71
     path = ("/api/v1/models/{model_id}/comparisons/by-split/{split}")
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -828,5 +831,167 @@ def test_m37_by_split_404_422s_isolation_regressions_openapi(api_client):
     assert "post" not in item
     assert keys.index("/api/v1/models/{model_id}/comparisons/"
                       "by-tokenizer/{tokenizer_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/comparisons/{comparison_id}")
+
+
+# --------------------------------------------------------------------------- #
+# M39: comparison history by verdict (read-only grouping, enum contract)
+# --------------------------------------------------------------------------- #
+
+def test_m39_by_verdict_grouping_partition_determinism(api_client):
+    ds_id, tok_id, model_id, ckpts = _prepare(api_client, "m39a", TAIL_A,
+                                              epochs=30)
+    early, final = ckpts[2]["checkpoint_id"], ckpts[-1]["checkpoint_id"]
+
+    url = f"{MODELS}/{model_id}/comparisons/by-verdict"
+    # A=B -> unchanged by construction; the two directions of the
+    # same pair under a tiny tolerance -> opposite non-unchanged
+    # verdicts (improved/regressed)
+    c_un = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                                final, final)).json()
+    c_ab = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                                early, final,
+                                                tolerance=1e-9)).json()
+    c_ba = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                                final, early,
+                                                tolerance=1e-9)).json()
+    assert c_un["verdict"] == "unchanged"
+    assert {c_ab["verdict"], c_ba["verdict"]} == {"improved",
+                                                  "regressed"}
+
+    listing = api_client.get(f"{MODELS}/{model_id}/comparisons").json()
+    assert len(listing) == 3
+    # authoritative-filter parity for ALL THREE verdict groups; each
+    # is a singleton holding exactly its own record; deterministic
+    # (created_at, comparison_id) order
+    ids_by = {}
+    for v in ("improved", "regressed", "unchanged"):
+        got = api_client.get(f"{url}/{v}")
+        assert got.status_code == 200, got.text
+        body = got.json()
+        assert body == [r for r in listing if r["verdict"] == v]
+        assert len(body) == 1
+        ids_by[v] = {r["comparison_id"] for r in body}
+        keyed = [(r["created_at"], r["comparison_id"]) for r in body]
+        assert keyed == sorted(keyed)
+        # verbatim: the element equals its detail-getter payload
+        one = api_client.get(
+            f"{MODELS}/{model_id}/comparisons/"
+            f"{body[0]['comparison_id']}")
+        assert one.status_code == 200 and one.json() == body[0]
+    assert ids_by["unchanged"] == {c_un["comparison_id"]}
+    assert ids_by[c_ab["verdict"]] == {c_ab["comparison_id"]}
+    assert ids_by[c_ba["verdict"]] == {c_ba["comparison_id"]}
+    # partition: disjoint groups whose union is the full listing
+    all_ids = {r["comparison_id"] for r in listing}
+    assert set().union(*ids_by.values()) == all_ids
+    # deterministic: three repeats return identical raw bytes
+    for v in ("improved", "regressed", "unchanged"):
+        raws = {api_client.get(f"{url}/{v}").content
+                for _ in range(3)}
+        assert len(raws) == 1
+    # no execution side effects: the filter itself added no records
+    assert len(api_client.get(
+        f"{MODELS}/{model_id}/comparisons").json()) == 3
+
+
+def test_m39_by_verdict_404_422s_isolation_regressions_openapi(api_client):
+    ds_id, tok_id, model_id, ckpts = _prepare(api_client, "m39b", TAIL_A,
+                                              epochs=24)
+    early, final = ckpts[2]["checkpoint_id"], ckpts[-1]["checkpoint_id"]
+    _, _, other_model, _ = _prepare(api_client, "m39c", TAIL_B,
+                                    epochs=24)
+    url = f"{MODELS}/{model_id}/comparisons/by-verdict/"
+
+    c = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                             early, final)).json()
+
+    # 404: unknown model with a VALID verdict (exactly like the
+    # sibling groupings)
+    assert api_client.get(
+        f"{MODELS}/ghost-model-39/comparisons/by-verdict/improved"
+    ).status_code == 404
+    # 422: unsupported verdict values are rejected by the schema enum
+    # at the API boundary — before the handler, so the 422 wins even
+    # for an UNKNOWN model (never a registry-style 404, never [])
+    for bad in ("IMPROVED", "im%20proved", "1", "better"):
+        got = api_client.get(url + bad)
+        assert got.status_code == 422, (bad, got.status_code)
+    assert api_client.get(
+        f"{MODELS}/ghost-model-39/comparisons/by-verdict/better"
+    ).status_code == 422
+
+    # cross-model isolation: the other model's group is empty under
+    # EVERY valid verdict (scoping from the model's own listing)
+    for v in ("improved", "regressed", "unchanged"):
+        iso = api_client.get(
+            f"{MODELS}/{other_model}/comparisons/by-verdict/{v}")
+        assert iso.status_code == 200 and iso.json() == []
+
+    # M5 listing/getter intact; generic detail getter still 404s ghost
+    # ids (no route capture by the new literal segment)
+    listing = api_client.get(f"{MODELS}/{model_id}/comparisons").json()
+    assert [r["comparison_id"] for r in listing] == [c["comparison_id"]]
+    got = api_client.get(
+        f"{MODELS}/{model_id}/comparisons/{c['comparison_id']}")
+    assert got.status_code == 200 and got.json() == c
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/ghost-comp-39").status_code == 404
+
+    # M26 by-checkpoint / M29 by-dataset / M31 by-tokenizer / M37
+    # by-split regressions: same listing, other groupings, unconfused
+    for ep, arg in (("by-checkpoint", early), ("by-dataset", ds_id),
+                    ("by-tokenizer", tok_id),
+                    ("by-split", "validation")):
+        g = api_client.get(f"{MODELS}/{model_id}/comparisons/{ep}/{arg}")
+        assert g.status_code == 200
+        assert [r["comparison_id"] for r in g.json()] == \
+            [c["comparison_id"]]
+    # M38 evaluations-by-state-kind regression: both groups keep
+    # listing parity on the same model
+    evs = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    for kind in ("current", "checkpoint"):
+        g = api_client.get(
+            f"{MODELS}/{model_id}/evaluations/by-state-kind/{kind}")
+        assert g.status_code == 200
+        assert g.json() == [e for e in evs
+                            if e["state_kind"] == kind]
+
+    # OpenAPI: 71 paths, the new path exactly once, GET-only, tag
+    # comparison, ComparisonRecord items, verdict $ref
+    # ComparisonVerdict; route order M37 by-split < by-verdict <
+    # generic detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer)
+    # + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer)
+    # + 1 (M34 gate decisions by-comparison)
+    # + 1 (M35 workflows by-recipe)
+    # + 1 (M36 evaluations by-split)
+    # + 1 (M37 comparisons by-split)
+    # + 1 (M38 evaluations by-state-kind)
+    # + 1 (M39 comparisons by-verdict) = 71
+    assert len(spec["paths"]) == 71
+    path = ("/api/v1/models/{model_id}/comparisons/by-verdict/"
+            "{verdict}")
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["comparison"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/ComparisonRecord"}
+    verdict_param = [p for p in item["get"]["parameters"]
+                     if p["name"] == "verdict"][0]
+    assert verdict_param["schema"] == {
+        "$ref": "#/components/schemas/ComparisonVerdict"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/comparisons/"
+                      "by-split/{split}") < keys.index(path)
     assert keys.index(path) < keys.index(
         "/api/v1/models/{model_id}/comparisons/{comparison_id}")

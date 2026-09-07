@@ -19,6 +19,7 @@ from .engine import ModelForge, get_forge
 from .schemas import (
     ComparisonRecord,
     ComparisonRequest,
+    ComparisonVerdict,
     EvalStateKind,
     EvaluationConfig,
     EvaluationRecord,
@@ -484,6 +485,21 @@ def index() -> HTMLResponse:
         []). Pure data access — no aggregates, zero storage
         growth.</li>
 
+      <li><b>M39 comparison history by verdict</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/comparisons/by-verdict/&#123;verdict&#125;</code>,
+        answers "which immutable M5 comparisons of this model produced
+        this verdict?": the model's authoritative M5 listing filtered
+        by the persisted top-level verdict (schema enum
+        improved/regressed/unchanged — the immutable loss-only
+        judgment of ONE probe), matched VERBATIM — NEVER recalculated
+        from loss deltas, per-side losses or tolerances, never
+        executed; full record payloads, exact M5 ordering; unknown
+        model -> 404; an UNSUPPORTED verdict value -> 422, because
+        verdicts have no registry — the enum IS the contract; a valid
+        verdict with no comparisons for the model -> []). Pure data
+        access — no aggregates, no rankings, zero storage
+        growth.</li>
+
       <li><b>M32 sample history by tokenizer</b> — one read-only access
         path, <code>GET /models/&#123;id&#125;/samples/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M15 samples of this model were
@@ -542,6 +558,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-dataset/&#123;ds&#125;</code> — comparisons of ONE model over ONE dataset (read-only, deterministic, versions verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-tokenizer/&#123;tok&#125;</code> — comparisons of ONE model with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-split/&#123;split&#125;</code> — comparisons of ONE model on ONE dataset split (read-only, deterministic, persisted shared-probe split verbatim; unsupported split 422)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-verdict/&#123;verdict&#125;</code> — comparisons of ONE model with ONE verdict (read-only, deterministic, persisted verdict verbatim — never recalculated; unsupported verdict 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-tokenizer/&#123;tok&#125;</code> — samples of ONE model generated with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tok&#125;</code> — M16 sample-quality measurements of ONE model under ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/&#123;comp&#125;</code> — one comparison record</li>
@@ -1081,7 +1098,8 @@ def get_evaluation(model_id: str, eval_id: str) -> EvaluationRecord:
 # Milestone 26 adds the read-only by-checkpoint grouping of the immutable history;
 # Milestone 29 adds the read-only by-dataset grouping of the immutable history;
 # Milestone 31 adds the read-only by-tokenizer grouping of the immutable history;
-# Milestone 37 adds the read-only by-split grouping of the same history)
+# Milestone 37 adds the read-only by-split grouping of the same history;
+# Milestone 39 adds the read-only by-verdict grouping of the same history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/comparisons/run", response_model=ComparisonRecord, tags=["comparison"])
@@ -1237,6 +1255,39 @@ def list_comparisons_by_split(model_id: str, split: EvaluationSplit
     not a comparison id.)"""
     try:
         return _forge().list_comparisons_for_split(model_id, split)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/comparisons/by-verdict/{verdict}",
+         response_model=list[ComparisonRecord], tags=["comparison"])
+def list_comparisons_by_verdict(model_id: str, verdict: ComparisonVerdict
+                                ) -> list[ComparisonRecord]:
+    """Immutable M5 comparisons of ONE model with ONE verdict (M39).
+
+    Read-only per-verdict grouping: returns the model's authoritative
+    M5 listing filtered by the persisted verdict recorded in each
+    ComparisonRecord (top-level verdict — the immutable loss-only
+    judgment persisted at run time by the M5 comparison flow;
+    matched VERBATIM — membership NEVER comes from recalculating
+    loss deltas, per-side losses, tolerances, checkpoint ids or
+    hashes, no comparison is executed and no evaluation rerun; the
+    persisted value is never resolved or rewritten). Complete
+    verbatim payloads (verdict/per-side losses included) in the exact
+    M5 (created_at, comparison_id) order; a valid verdict with no
+    comparisons for the model returns []. Verdicts have NO registry
+    (unlike the by-checkpoint/by-dataset/by-tokenizer axes): the
+    ComparisonVerdict enum IS the contract, so an UNSUPPORTED verdict
+    value is rejected with 422 at the API boundary (schema-level
+    validation — never a registry-style 404, and the validation
+    fires BEFORE this handler even for an unknown model), while an
+    unknown model with a VALID verdict raises FileNotFoundError ->
+    404 exactly like the sibling groupings. No aggregates, no
+    rankings, no writes. (Must stay registered before
+    /comparisons/{comparison_id}; the literal "by-verdict" segment is
+    not a comparison id.)"""
+    try:
+        return _forge().list_comparisons_for_verdict(model_id, verdict)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
