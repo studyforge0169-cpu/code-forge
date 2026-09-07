@@ -55,6 +55,7 @@ from .schemas import (
     EvalStateKind,
     EvaluationConfig,
     EvaluationRecord,
+    EvaluationSplit,
     ModelRecord,
 )
 from .storage import Storage, atomic_write_json, read_json
@@ -228,6 +229,40 @@ class EvaluationEngine:
         self.tokenizers.load(tokenizer_id)
         return [r for r in self.list_evaluations(model_id)
                 if r.tokenizer_id == tokenizer_id]
+
+    def list_evaluations_for_split(
+            self, model_id: str, split: EvaluationSplit
+    ) -> list[EvaluationRecord]:
+        """Immutable M4 evaluations of ONE model measured on ONE
+        dataset split (M36).
+
+        Membership comes from the persisted split identity ONLY: every
+        ``EvaluationRecord`` carries a top-level ``split:
+        EvaluationSplit`` (the schema enum train/validation/test,
+        persisted verbatim at run time from the evaluation request),
+        and an evaluation belongs to the request when its persisted
+        ``split`` equals the requested value — never filenames,
+        directories, timestamps, dataset names, eval ids or hashes,
+        and never resolved or rewritten into another value. Splits
+        have NO registry (unlike the M24 checkpoint / M28 dataset /
+        M30 tokenizer axes): the enum IS the contract, so an
+        unsupported split value is rejected at the API boundary with
+        422 (schema-level validation), while an unknown model raises
+        FileNotFoundError exactly like the sibling groupings. Each
+        evaluation appears EXACTLY ONCE (the authoritative listing
+        holds each record exactly once). The result is the model's
+        authoritative M4 listing above (the exact engine parse +
+        deterministic (created_at, eval_id) ASCENDING order) filtered
+        by the persisted split; complete verbatim
+        ``EvaluationRecord`` payloads, no rewritten fields. A valid
+        split with no evaluations for the model returns []. Splits
+        are model-scoped through the listing itself — a model never
+        sees another model's evaluations. Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API)
+        return [r for r in self.list_evaluations(model_id)
+                if r.split == split]
 
     # ------------------------------------------------------------------ #
     # The run (preflight everything before creating any artifact)

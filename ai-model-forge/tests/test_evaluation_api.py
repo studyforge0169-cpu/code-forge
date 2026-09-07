@@ -350,8 +350,9 @@ def test_m24_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer)
     # + 1 (M34 gate decisions by-comparison)
-    # + 1 (M35 workflows by-recipe) = 67
-    assert len(spec["paths"]) == 67
+    # + 1 (M35 workflows by-recipe)
+    # + 1 (M36 evaluations by-split) = 68
+    assert len(spec["paths"]) == 68
 
 
 # =========================================================================== #
@@ -458,7 +459,7 @@ def test_m28_api_404s_scoping_regressions_openapi(api_client):
     path = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
             "{dataset_id}")
     generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
-    assert len(spec["paths"]) == 67
+    assert len(spec["paths"]) == 68
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
@@ -585,7 +586,7 @@ def test_m30_api_404s_scoping_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
     m28 = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
            "{dataset_id}")
-    assert len(spec["paths"]) == 67
+    assert len(spec["paths"]) == 68
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
@@ -596,3 +597,166 @@ def test_m30_api_404s_scoping_regressions_openapi(api_client):
     assert "EvaluationRecord" in spec["components"]["schemas"]
     assert list(spec["paths"]).index(m28) < list(spec["paths"]).index(path) \
         < list(spec["paths"]).index(generic)
+
+
+# --------------------------------------------------------------------------- #
+# M36: evaluation history by split (read-only grouping)
+# --------------------------------------------------------------------------- #
+
+BY_SPLIT = "/api/v1/models/{mid}/evaluations/by-split/{split}"
+
+
+def test_m36_api_by_split_grouping_partition_determinism(api_client):
+    ds_id, tok_id, model_id, _ = _prepare(api_client, "m36a")
+    # one evaluation on EACH split (the M4 run accepts all enum values)
+    v1 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, seed=3611)).json()
+    v2 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, seed=3612)).json()
+    t1 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, split="train", seed=3613)).json()
+    s1 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, split="test", seed=3614)).json()
+    assert {v1["split"], v2["split"], t1["split"], s1["split"]} == \
+        {"validation", "train", "test"}
+
+    url = BY_SPLIT.format(mid=model_id, split="validation")
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # authoritative-filter parity: exact subset of the M4 listing
+    # whose persisted split matches, in the same order
+    listing = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert recs == [x for x in listing if x["split"] == "validation"]
+    assert {x["eval_id"] for x in recs} == {v1["eval_id"], v2["eval_id"]}
+    keyed = [(x["created_at"], x["eval_id"]) for x in recs]
+    assert keyed == sorted(keyed)
+    # verbatim: each element equals its POST payload and its
+    # detail-getter payload (loss/perplexity/state included)
+    by_id = {x["eval_id"]: x for x in recs}
+    assert by_id[v1["eval_id"]] == v1
+    assert by_id[v2["eval_id"]] == v2
+    for x in recs:
+        one = api_client.get(
+            f"{MODELS}/{model_id}/evaluations/{x['eval_id']}")
+        assert one.status_code == 200 and one.json() == x
+    # deterministic: three repeats return identical raw bytes
+    raws = {api_client.get(url).content for _ in range(3)}
+    assert len(raws) == 1
+    # partition: train and test hold exactly their own records; the
+    # three groups are disjoint and cover the listing exactly once
+    # (training-internal evals only measure validation, so the three
+    # posted records ARE the full listing)
+    recs_t = api_client.get(
+        BY_SPLIT.format(mid=model_id, split="train")).json()
+    recs_s = api_client.get(
+        BY_SPLIT.format(mid=model_id, split="test")).json()
+    assert [x["eval_id"] for x in recs_t] == [t1["eval_id"]]
+    assert [x["eval_id"] for x in recs_s] == [s1["eval_id"]]
+    ids_v = {x["eval_id"] for x in recs}
+    assert ids_v.isdisjoint({t1["eval_id"], s1["eval_id"]})
+    assert ids_v | {t1["eval_id"], s1["eval_id"]} == \
+        {x["eval_id"] for x in listing}
+    # valid split + zero records for a second real model -> [] (200)
+    m_cfg = {"name": "api4-m36b-model", "vocab_size": 640,
+             "context_length": 64, "hidden_size": 64, "n_layers": 2,
+             "n_heads": 4, "n_kv_heads": 2, "intermediate_size": 128}
+    mid_b = api_client.post(MODELS, json={"config": m_cfg}) \
+        .json()["model"]["id"]
+    for split in ("validation", "train", "test"):
+        empty = api_client.get(BY_SPLIT.format(mid=mid_b, split=split))
+        assert empty.status_code == 200 and empty.json() == []
+    # no side effects: the filter itself added no records
+    assert len(api_client.get(
+        f"{MODELS}/{model_id}/evaluations").json()) == 4
+
+
+def test_m36_api_404_422_isolation_regressions_openapi(api_client):
+    ds_id, tok_id, model_id, _ = _prepare(api_client, "m36c")
+    v1 = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, seed=3615)).json()
+
+    # 404: unknown model + VALID split (never masked by the enum)
+    assert api_client.get(BY_SPLIT.format(
+        mid="ghost-model-36", split="validation")).status_code == 404
+    # 422: unsupported split values (schema enum, NO registry 404) —
+    # well-formed and malformed forms
+    for bad in ("test-set", "TEST", "validation2", "train%20",
+                "ValiDaTiOn"):
+        resp = api_client.get(BY_SPLIT.format(mid=model_id,
+                                              split=bad))
+        assert resp.status_code == 422, (bad, resp.status_code)
+    # the enum check fires even for an unknown model (validation
+    # precedes the handler)
+    assert api_client.get(BY_SPLIT.format(
+        mid="ghost-model-36", split="no-such-split")).status_code == 422
+
+    # cross-model isolation via the bare second model (200 + [])
+    m_cfg = {"name": "api4-m36d-model", "vocab_size": 640,
+             "context_length": 64, "hidden_size": 64, "n_layers": 2,
+             "n_heads": 4, "n_kv_heads": 2, "intermediate_size": 128}
+    mid_b = api_client.post(MODELS, json={"config": m_cfg}) \
+        .json()["model"]["id"]
+    iso = api_client.get(BY_SPLIT.format(mid=mid_b, split="validation"))
+    assert iso.status_code == 200 and iso.json() == []
+
+    # M4 listing/getter intact; generic ghost eval id 404 (no capture)
+    listing = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert [x["eval_id"] for x in listing] == [v1["eval_id"]]
+    got = api_client.get(f"{MODELS}/{model_id}/evaluations/{v1['eval_id']}")
+    assert got.status_code == 200 and got.json() == v1
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/ghost-eval-36").status_code == 404
+
+    # M24/M28/M30 regressions: same listing, other groupings (v1 is a
+    # CURRENT-state evaluation, so the M24 group of any checkpoint
+    # excludes it — parity with the locally filtered listing is the
+    # authoritative check)
+    ckpts = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    byck = api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-checkpoint/"
+        f"{ckpts[0]['checkpoint_id']}").json()
+    assert byck == [x for x in listing
+                    if x.get("checkpoint_id")
+                    == ckpts[0]["checkpoint_id"]]
+    byds = api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-dataset/{ds_id}").json()
+    assert [x["eval_id"] for x in byds] == [v1["eval_id"]]
+    bytok = api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-tokenizer/{tok_id}").json()
+    assert [x["eval_id"] for x in bytok] == [v1["eval_id"]]
+    # M35 regression: workflows by-recipe route intact
+    assert api_client.get(
+        f"{MODELS}/{model_id}/workflows/by-recipe/ghost-recipe-36"
+    ).status_code == 404
+
+    # OpenAPI: 68 paths, the new path exactly once, GET-only, tag
+    # evaluation, EvaluationRecord items, ENUM path parameter; route
+    # order M30 by-tokenizer < by-split < generic detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer) + 1 (M34 gate decisions
+    # by-comparison) + 1 (M35 workflows by-recipe)
+    # + 1 (M36 evaluations by-split) = 68
+    assert len(spec["paths"]) == 68
+    path = "/api/v1/models/{model_id}/evaluations/by-split/{split}"
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["evaluation"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/EvaluationRecord"}
+    param = [p for p in item["get"]["parameters"]
+             if p["name"] == "split"][0]
+    assert param["schema"] == {
+        "$ref": "#/components/schemas/EvaluationSplit"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/evaluations/"
+                      "by-tokenizer/{tokenizer_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/evaluations/{eval_id}")

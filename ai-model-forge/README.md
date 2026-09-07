@@ -1371,11 +1371,56 @@ generation never trains, evaluates, scores, ranks or judges output.
   gate groupings and the M16–M34 surfaces are byte-identical before
   and after
 
+### Milestone 36 — evaluation history by split
+  (`evaluations/by-split`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/evaluations/by-split/{split}` — answers "which
+  immutable M4 evaluations of this model measured this dataset
+  split?" and nothing else
+- **exact filtering (persisted split identity)**: every
+  `EvaluationRecord` carries a top-level `split` (the schema enum
+  train/validation/test, persisted verbatim at run time from the
+  evaluation request), and an evaluation belongs to the request only
+  when that persisted value matches VERBATIM — never filenames,
+  directories, timestamps, dataset names, eval ids or hashes, and
+  never resolved or rewritten. Each matching evaluation appears
+  EXACTLY ONCE; verbatim `EvaluationRecord` payloads
+  (loss/perplexity/state/dataset identity included) in the exact M4
+  authoritative order ((created_at, eval_id) ASCENDING)
+- **the 422-vs-404 contract (no split registry)**: splits are a
+  SCHEMA ENUM, not a registry — unlike the M24 checkpoint / M28
+  dataset / M30 tokenizer axes there is nothing to 404 for an
+  unknown split id. An unsupported split value (`test-set`, `TEST`,
+  …) is rejected at the API boundary with **422** (FastAPI enum
+  path-param validation), while an unknown model stays **404**
+  exactly like every sibling grouping; the enum IS the contract
+- **model-scoped history**: model validation comes from the
+  authoritative M4 listing path (unknown model → 404); a model never
+  sees another model's evaluations. A valid split with no
+  evaluations for the model is a deterministic `[]` — never a 404
+  (e.g. the `test` split currently has zero production evaluations,
+  and `b5bc905326b6` has none at all)
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_evaluations_for_split(model_id, split)` filters the
+  authoritative M4 `list_evaluations()` by the persisted `split`
+  (ZERO new `__init__` composition lines — no registry handle is
+  needed); the facade and route are thin pass-throughs registered
+  after the M30 by-tokenizer route and **before** the generic
+  `/evaluations/{eval_id}` detail getter (M24/M28/M30/M36 are
+  different groupings of the same listing, all intact). No caches, no
+  new storage — repeated GETs are byte-identical and the endpoint
+  never writes
+- **isolation & boundaries**: unknown model -> existing 404;
+  unsupported split value -> 422; valid split without evaluations
+  for the model -> `[]`. M4 (run, listing, getter), M24
+  by-checkpoint, M28 by-dataset, M30 by-tokenizer and the M16–M35
+  surfaces are byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 485 tests
+pytest                       # 490 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1854,7 +1899,8 @@ ai-model-forge/
     tokenizer.py       # byte-level BPE engine
     training.py        # training engine: schedules, streams, run, checkpoints, rollback
     evaluation.py      # evaluation engine: read-only state measurement (M4)
-                       # + read-only by-checkpoint/by-dataset/by-tokenizer grouping (M24/M28/M30)
+                       # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split
+                       #   grouping (M24/M28/M30/M36)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer grouping (M26/M29/M31)
     gates.py           # stage gates: policy-driven run decisions (M6)
@@ -1871,7 +1917,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 485 tests across 20 suites
+  tests/               # 490 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

@@ -26,6 +26,7 @@ from .sample_quality import SampleQualityEngine
 from .schemas import (
     ComparisonRecord,
     EvaluationRecord,
+    EvaluationSplit,
     ModelCreateRequest,
     ModelRecord,
     PolicyCreateRequest,
@@ -332,6 +333,25 @@ class ModelForge:
         the model returns []. Read-only, never writes."""
         return self.evaluation.list_evaluations_for_tokenizer(
             model_id, tokenizer_id)
+
+    def list_evaluations_for_split(self, model_id: str,
+                                   split: EvaluationSplit
+                                   ) -> list[EvaluationRecord]:
+        """Immutable M4 evaluation records of ONE model measured on
+        ONE dataset split (M36 read-only access).
+
+        The split is the persisted schema enum (train/validation/test)
+        — there is NO split registry, so an unsupported value is
+        rejected at the API boundary with 422, while an unknown model
+        raises FileNotFoundError (404) exactly like the sibling
+        groupings. Returns the model's authoritative M4 listing
+        filtered by the persisted split (top-level split, matched
+        VERBATIM — never inferred from filenames, datasets or
+        timestamps, never rewritten) in the M4 (created_at, eval_id)
+        order, as complete verbatim records. A valid split with no
+        evaluations for the model returns []. Read-only, never
+        writes."""
+        return self.evaluation.list_evaluations_for_split(model_id, split)
 
     # ------------------------------------------------------------------ #
     # Comparison (thin delegation; read-only orchestration over evaluations)

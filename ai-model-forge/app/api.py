@@ -21,6 +21,7 @@ from .schemas import (
     ComparisonRequest,
     EvaluationConfig,
     EvaluationRecord,
+    EvaluationSplit,
     GateDecision,
     GateRequest,
     HealthResponse,
@@ -337,6 +338,19 @@ def index() -> HTMLResponse:
         access — no execution, no aggregation, zero storage
         growth.</li>
 
+      <li><b>M36 evaluation history by split</b> — one read-only
+        access path, <code>GET /models/&#123;id&#125;/evaluations/by-split/&#123;split&#125;</code>,
+        answers "which immutable M4 evaluations of this model measured
+        this dataset split?": the model's authoritative M4 listing
+        filtered by the persisted top-level split (schema enum
+        train/validation/test, matched VERBATIM — never inferred from
+        filenames, datasets or timestamps; full record payloads, exact
+        M4 ordering; unknown model -> 404; an UNSUPPORTED split value
+        -> 422, because splits have no registry — the enum IS the
+        contract; a valid split with no evaluations for the model ->
+        []). Pure data access — no aggregates, zero storage
+        growth.</li>
+
       <li><b>M24 evaluation history by checkpoint</b> — one read-only access
         path, <code>GET /models/&#123;id&#125;/evaluations/by-checkpoint/&#123;checkpoint&#125;</code>,
         answers "which immutable M4 evaluations measured this checkpoint?":
@@ -490,6 +504,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-checkpoint/&#123;ckpt&#125;</code> — evaluations recorded under ONE checkpoint (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-dataset/&#123;ds&#125;</code> — evaluations of ONE model over ONE dataset (read-only, deterministic, versions verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-tokenizer/&#123;tok&#125;</code> — evaluations of ONE model with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-split/&#123;split&#125;</code> — evaluations of ONE model on ONE dataset split (read-only, deterministic; unsupported split 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/&#123;eval&#125;</code> — one evaluation record</li>
       <li><code>POST  {prefix}/comparisons/run</code> — A/B comparison (improved / regressed / unchanged)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons</code> — immutable comparison history</li>
@@ -953,6 +968,35 @@ def list_evaluations_by_tokenizer(model_id: str, tokenizer_id: str
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.get("/models/{model_id}/evaluations/by-split/{split}",
+         response_model=list[EvaluationRecord], tags=["evaluation"])
+def list_evaluations_by_split(model_id: str, split: EvaluationSplit
+                              ) -> list[EvaluationRecord]:
+    """Immutable M4 evaluations of ONE model measured on ONE dataset
+    split (M36).
+
+    Read-only per-split grouping: returns the model's authoritative
+    M4 listing filtered by the persisted split recorded in each
+    EvaluationRecord (top-level split, matched VERBATIM — membership
+    never comes from filenames, directories, timestamps, dataset
+    names, eval ids or hashes, and the persisted value is never
+    resolved or rewritten). Complete verbatim payloads
+    (loss_nats/perplexity/state/dataset identity included) in the
+    exact M4 (created_at, eval_id) order; a valid split with no
+    evaluations for the model returns []. Splits have NO registry
+    (unlike the by-checkpoint/by-dataset/by-tokenizer axes): the
+    EvaluationSplit enum IS the contract, so an UNSUPPORTED split
+    value is rejected with 422 at the API boundary (schema-level
+    validation — never a registry-style 404), while an unknown model
+    is 404 exactly like the sibling groupings. No aggregates, no
+    writes. (Must stay registered before /evaluations/{eval_id}; the
+    literal "by-split" segment is not an evaluation id.)"""
+    try:
+        return _forge().list_evaluations_for_split(model_id, split)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/evaluations/{eval_id}", response_model=EvaluationRecord,
          tags=["evaluation"])
 def get_evaluation(model_id: str, eval_id: str) -> EvaluationRecord:
@@ -967,7 +1011,8 @@ def get_evaluation(model_id: str, eval_id: str) -> EvaluationRecord:
 # Comparison routes (Milestone 5 — evidence-based A/B state comparison;
 # Milestone 26 adds the read-only by-checkpoint grouping of the immutable history;
 # Milestone 29 adds the read-only by-dataset grouping of the immutable history;
-# Milestone 31 adds the read-only by-tokenizer grouping of the immutable history)
+# Milestone 31 adds the read-only by-tokenizer grouping of the immutable history;
+# Milestone 36 adds the read-only by-split grouping of the same history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/comparisons/run", response_model=ComparisonRecord, tags=["comparison"])

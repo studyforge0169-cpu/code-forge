@@ -745,3 +745,118 @@ def test_m30_engine_repeated_calls_identical(env):
         again = [r.model_dump(mode="json") for r in
                  f.list_evaluations_for_tokenizer(a, tok1)]
         assert again == first
+
+
+# =========================================================================== #
+# M36: read-only per-split grouping of the evaluation history
+# =========================================================================== #
+
+def _m36_env(env):
+    """M36 state on top of the shared module env (cached): a model with
+    evaluations on ALL THREE splits (validation x2, train x1, test x1,
+    all over 'base'), plus the M28 empty-history model b. Returns
+    (a, b, e_v1, e_v2, e_t1, e_s1).
+    """
+    cached = getattr(env, "_m36_state", None)
+    if cached is not None:
+        return cached
+    _, b, _, _, _, _ = _m28_env(env)      # b: NO evaluations at all
+    f = env.forge
+    a = env.new_model("m36-main", seed=36)
+    e_v1 = f.run_evaluation(env.eval_cfg(a, ds_key="base", seed=3611))
+    e_v2 = f.run_evaluation(env.eval_cfg(a, ds_key="base", seed=3612))
+    e_t1 = f.run_evaluation(env.eval_cfg(a, ds_key="base",
+                                         split=EvaluationSplit.TRAIN,
+                                         seed=3613))
+    e_s1 = f.run_evaluation(env.eval_cfg(a, ds_key="base",
+                                         split=EvaluationSplit.TEST,
+                                         seed=3614))
+    env._m36_state = (a, b, e_v1, e_v2, e_t1, e_s1)
+    return env._m36_state
+
+
+def test_m36_engine_filters_by_persisted_split_identity(env):
+    a, b, e_v1, e_v2, e_t1, e_s1 = _m36_env(env)
+    f = env.forge
+    listing = f.list_evaluations(a)
+    for split in (EvaluationSplit.VALIDATION, EvaluationSplit.TRAIN,
+                  EvaluationSplit.TEST):
+        got = f.list_evaluations_for_split(a, split)
+        # parity with the authoritative M4 listing filtered by the
+        # persisted split; deterministic (created_at, eval_id) order;
+        # membership from the persisted field only, never rewritten
+        assert got == [r for r in listing if r.split == split]
+        keyed = [(r.created_at, r.eval_id) for r in got]
+        assert keyed == sorted(keyed)
+        ids = [r.eval_id for r in got]
+        assert len(ids) == len(set(ids))
+        assert all(r.split == split and r.model_id == a for r in got)
+        # verbatim payload parity with the M4 single-record getter
+        for r in got:
+            assert r == f.get_evaluation(a, r.eval_id)
+    # the M36-created evaluations sit under exactly their splits
+    val_ids = [r.eval_id for r in f.list_evaluations_for_split(
+        a, EvaluationSplit.VALIDATION)]
+    assert val_ids.count(e_v1.eval_id) == 1
+    assert val_ids.count(e_v2.eval_id) == 1
+    assert [r.eval_id for r in f.list_evaluations_for_split(
+        a, EvaluationSplit.TRAIN)] .count(e_t1.eval_id) == 1
+    assert [r.eval_id for r in f.list_evaluations_for_split(
+        a, EvaluationSplit.TEST)].count(e_s1.eval_id) == 1
+    # explicit partition: groups over EVERY split present in the
+    # listing are pairwise disjoint and cover it exactly once
+    groups = {sp: {r.eval_id for r in
+                   f.list_evaluations_for_split(a, sp)}
+              for sp in {r.split for r in listing}}
+    flat = [i for g in groups.values() for i in g]
+    assert set(flat) == {r.eval_id for r in listing}
+    assert len(flat) == len(set(flat)) == len(listing)
+
+
+def test_m36_engine_empty_404s_model_scoping_read_only(env):
+    a, b, e_v1, e_v2, e_t1, e_s1 = _m36_env(env)
+    f = env.forge
+    # empty-history model -> [] for EVERY valid split (never 404)
+    assert f.list_evaluations(b) == []
+    for split in (EvaluationSplit.VALIDATION, EvaluationSplit.TRAIN,
+                  EvaluationSplit.TEST):
+        assert f.list_evaluations_for_split(b, split) == []
+    # unknown model -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        f.list_evaluations_for_split("ghost-model-36",
+                                     EvaluationSplit.VALIDATION)
+    # cross-model isolation: the groups of one model never contain
+    # the other's evaluation ids (model scoping from the listing)
+    a_ids = {r.eval_id for r in f.list_evaluations(a)}
+    b_ids = {r.eval_id for r in f.list_evaluations(b)}
+    assert a_ids.isdisjoint(b_ids)
+    for split in (EvaluationSplit.VALIDATION, EvaluationSplit.TRAIN,
+                  EvaluationSplit.TEST):
+        got_b = {r.eval_id for r in
+                 f.list_evaluations_for_split(b, split)}
+        assert got_b <= b_ids and got_b.isdisjoint(a_ids)
+    # read-only: the filter never writes evaluation manifests
+    def eval_files(mid):
+        root = f.storage.model_dir(mid) / "evaluations"
+        if not root.exists():
+            return set()
+        return {p.relative_to(root).as_posix()
+                for p in root.rglob("*") if p.is_file()}
+    before = (eval_files(a), eval_files(b))
+    f.list_evaluations_for_split(a, EvaluationSplit.VALIDATION)
+    f.list_evaluations_for_split(a, EvaluationSplit.TEST)
+    f.list_evaluations_for_split(b, EvaluationSplit.TRAIN)
+    assert (eval_files(a), eval_files(b)) == before
+
+
+def test_m36_engine_repeated_calls_identical(env):
+    a, b, e_v1, e_v2, e_t1, e_s1 = _m36_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_evaluations_for_split(a,
+                                          EvaluationSplit.VALIDATION)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_evaluations_for_split(
+                     a, EvaluationSplit.VALIDATION)]
+        assert again == first
