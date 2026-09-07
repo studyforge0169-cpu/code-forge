@@ -1006,3 +1006,133 @@ def test_m34_engine_repeated_calls_identical(env):
                  f.list_gate_decisions_for_comparison(
                      env.model_id, d1a.comparison_id)]
         assert again == first
+
+
+# =========================================================================== #
+# M41: read-only per-decision grouping of the gate-decision history
+# =========================================================================== #
+
+def _m41_state(env):
+    """M41 state on top of the shared module env (cached): BOTH
+    decision results deterministically — two PASSED gates (an
+    improvement candidate and an unchanged same-state candidate) and
+    one FAILED gate (an improved candidate under an impossible
+    minimum_loss ceiling: the policy verdict legitimately differs from
+    the loss-only comparison verdict) — plus a fresh model with NO
+    gate decisions. Returns (d_pass1, d_pass2, d_fail, empty_model).
+    """
+    cached = getattr(env, "_m41", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    ck_e = env.imp_early.checkpoint_id
+    ck_f = env.imp_final.checkpoint_id
+    d_pass1 = env.run_gate(baseline_ckpt=ck_e, cand_ckpt=ck_f,
+                           seed=4101, name="m41-g1")
+    d_pass2 = env.run_gate(baseline_ckpt=ck_f, cand_ckpt=ck_f,
+                           seed=4102, name="m41-g2")
+    ceiling = env.imp_final.validation_loss * 0.99
+    d_fail = env.run_gate(baseline_ckpt=ck_e, cand_ckpt=ck_f,
+                          minimum_loss=ceiling, seed=4103,
+                          name="m41-g3")
+    empty_model = f.create_model(ModelCreateRequest(config=TransformerConfig(
+        name="m41-empty", vocab_size=640, context_length=64,
+        hidden_size=64, n_layers=2, n_heads=4, n_kv_heads=2,
+        intermediate_size=128, seed=42)))[0].id
+    env._m41 = (d_pass1, d_pass2, d_fail, empty_model)
+    return env._m41
+
+
+def test_m41_engine_filters_by_persisted_decision_identity(env):
+    d_pass1, d_pass2, d_fail, empty_model = _m41_state(env)
+    f = env.forge
+    # the fixture covers BOTH enum values (and the FAILED record is a
+    # loss-IMPROVED candidate — proof the persisted policy verdict is
+    # the authority, never the comparison verdict)
+    assert d_pass1.decision == GateDecisionResult.PASSED
+    assert d_pass2.decision == GateDecisionResult.PASSED
+    assert d_fail.decision == GateDecisionResult.FAILED
+    assert d_fail.verdict.value == "improved"
+    listing = f.list_gate_decisions(env.model_id)
+    for decision in (GateDecisionResult.PASSED, GateDecisionResult.FAILED):
+        got = f.list_gate_decisions_for_decision(env.model_id, decision)
+        # parity with the authoritative M6 listing filtered by the
+        # persisted decision; deterministic (created_at, decision_id)
+        # order; membership from the persisted field only
+        assert got == [d for d in listing if d.decision == decision]
+        keyed = [(x.created_at, x.decision_id) for x in got]
+        assert keyed == sorted(keyed)
+        ids = [x.decision_id for x in got]
+        assert len(ids) == len(set(ids))
+        assert all(x.decision == decision and x.model_id == env.model_id
+                   for x in got)
+        # verbatim payload parity with the M6 single-record getter
+        for x in got:
+            assert x == f.get_gate_decision(env.model_id, x.decision_id)
+    # the fixture's records land in their own groups with the persisted
+    # decision VERBATIM (earlier module tests may have added other
+    # decisions — membership derives from the listing)
+    got_p = f.list_gate_decisions_for_decision(env.model_id,
+                                               GateDecisionResult.PASSED)
+    got_f = f.list_gate_decisions_for_decision(env.model_id,
+                                               GateDecisionResult.FAILED)
+    assert {d_pass1.decision_id, d_pass2.decision_id} <= \
+        {x.decision_id for x in got_p}
+    assert d_fail.decision_id in {x.decision_id for x in got_f}
+    # explicit partition: disjoint groups over BOTH enum values whose
+    # union is the full listing
+    ids_p = {x.decision_id for x in got_p}
+    ids_f = {x.decision_id for x in got_f}
+    assert ids_p and ids_f
+    assert ids_p.isdisjoint(ids_f)
+    assert ids_p | ids_f == {d.decision_id for d in listing}
+
+
+def test_m41_engine_empty_404s_model_scoping_read_only(env):
+    d_pass1, d_pass2, d_fail, empty_model = _m41_state(env)
+    f = env.forge
+    _, _, _, _, m_b, d_b = _m23_env(env)      # m_b has its OWN decision
+    # a model whose ENTIRE M6 listing is empty -> [] for BOTH enum
+    # values (the fixture created it with no gates at all — never 404)
+    assert f.list_gate_decisions(empty_model) == []
+    for decision in (GateDecisionResult.PASSED, GateDecisionResult.FAILED):
+        assert f.list_gate_decisions_for_decision(empty_model,
+                                                  decision) == []
+    # unknown model -> FileNotFoundError (404 at the API); the enum
+    # itself needs NO registry lookup (unsupported values are 422 at
+    # the API boundary and never reach the engine)
+    with pytest.raises(FileNotFoundError):
+        f.list_gate_decisions_for_decision("ghost-model-41",
+                                           GateDecisionResult.PASSED)
+    # cross-model isolation: both models hold decisions, the listings
+    # are disjoint, and each group is a subset of its own model's
+    # listing (a's ids never appear under b, and vice versa)
+    a_ids = {d.decision_id for d in f.list_gate_decisions(env.model_id)}
+    b_ids = {d.decision_id for d in f.list_gate_decisions(m_b)}
+    assert a_ids and b_ids and a_ids.isdisjoint(b_ids)
+    for decision in (GateDecisionResult.PASSED, GateDecisionResult.FAILED):
+        for mid, ids in ((env.model_id, a_ids), (m_b, b_ids)):
+            group = {x.decision_id for x in
+                     f.list_gate_decisions_for_decision(mid, decision)}
+            assert group <= ids
+    # read-only: the filter never writes gate manifests
+    before = _m23_gate_files(env, [env.model_id, m_b, empty_model])
+    for decision in (GateDecisionResult.PASSED, GateDecisionResult.FAILED):
+        f.list_gate_decisions_for_decision(env.model_id, decision)
+        f.list_gate_decisions_for_decision(m_b, decision)
+        f.list_gate_decisions_for_decision(empty_model, decision)
+    after = _m23_gate_files(env, [env.model_id, m_b, empty_model])
+    assert after == before
+
+
+def test_m41_engine_repeated_calls_identical(env):
+    d_pass1, d_pass2, d_fail, empty_model = _m41_state(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_gate_decisions_for_decision(env.model_id,
+                                                GateDecisionResult.PASSED)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_gate_decisions_for_decision(
+                     env.model_id, GateDecisionResult.PASSED)]
+        assert again == first

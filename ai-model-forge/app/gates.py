@@ -203,6 +203,48 @@ class GateEngine:
         self.comparison.get_comparison(model_id, comparison_id)
         return [d for d in decisions if d.comparison_id == comparison_id]
 
+    def list_decisions_for_decision(
+            self, model_id: str, decision: GateDecisionResult
+    ) -> list[GateDecision]:
+        """Immutable gate decisions of ONE model with ONE decision
+        result (M41).
+
+        Membership comes from the persisted decision identity ONLY:
+        every ``GateDecision`` carries a top-level ``decision:
+        GateDecisionResult`` (the schema enum passed/failed — the
+        immutable policy verdict persisted at run time by the M6 gate
+        flow: the policy semantics over the measured evidence, which
+        may legitimately DIFFER from the loss-only comparison verdict
+        — e.g. an improved candidate still fails a minimum_loss
+        ceiling), and a decision belongs to the request when its
+        persisted ``decision`` equals the requested value — never
+        recalculated from loss deltas, tolerances, policy thresholds,
+        gate configuration or comparison results, and never resolved
+        or rewritten into another value (the persisted decision is the
+        ONLY authority; this method never re-evaluates a gate).
+        Decision results have NO registry (unlike the M23 policy / M34
+        comparison axes): the enum IS the contract, so an unsupported
+        decision value is rejected at the API boundary with 422
+        (schema-level validation — it never even reaches this method),
+        while an unknown model raises FileNotFoundError exactly like
+        the sibling groupings. Each decision appears EXACTLY ONCE (the
+        authoritative listing holds each record exactly once). The
+        result is the model's authoritative M6 listing above (the
+        exact engine parse + deterministic (created_at, decision_id)
+        ASCENDING order) filtered by the persisted decision; complete
+        verbatim ``GateDecision`` payloads, no rewritten fields. A
+        valid decision with no gate decisions for the model returns
+        []. Decision results are model-scoped through the listing
+        itself — a model never sees another model's decisions.
+        Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API); the decision
+        # needs NO registry lookup and is NEVER recalculated — the
+        # persisted field is filtered verbatim
+        return [d for d in self.list_decisions(model_id)
+                if d.decision == decision]
+
     # ------------------------------------------------------------------ #
     # The gate run
     # ------------------------------------------------------------------ #

@@ -1605,11 +1605,58 @@ generation never trains, evaluates, scores, ranks or judges output.
   M39 comparisons-by-verdict and the M16–M39 surfaces are
   byte-identical before and after
 
+### Milestone 41 — gate-decision history by decision
+  (`gates/decisions/by-decision`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/gates/decisions/by-decision/{decision}` —
+  answers "which immutable gate decisions of this model produced
+  this decision result?" and nothing else
+- **exact filtering (persisted decision identity)**: every
+  `GateDecision` carries a top-level `decision` (the schema enum
+  passed/failed — the immutable policy verdict persisted at run time
+  by the M6 gate flow; the policy semantics may legitimately DIFFER
+  from the loss-only comparison verdict, e.g. an improved candidate
+  still fails a `minimum_loss` ceiling), and a decision belongs to
+  the request only when that persisted value matches VERBATIM —
+  never recalculated from loss deltas, tolerances, policy
+  thresholds, gate configuration or comparison results, never
+  resolved or rewritten, no gate re-evaluated. Each matching
+  decision appears EXACTLY ONCE; verbatim `GateDecision` payloads
+  (verdict/evidence chain/rollback suggestion included) in the exact
+  M6 authoritative order ((created_at, decision_id) ASCENDING)
+- **the 422-vs-404 contract (no decision registry)**: decision
+  results are a SCHEMA ENUM, not a registry — unlike the M23 policy /
+  M34 comparison axes there is nothing to 404 for an unsupported
+  decision value, so it is rejected with 422 by schema validation at
+  the API boundary (before the handler, matching M36–M40: even
+  unknown-model + invalid-decision is 422); unknown model with a
+  VALID decision -> existing 404; a valid decision with zero gate
+  decisions for the model is a deterministic `[]` — never a 404
+  (production currently holds passed -> 7 / failed -> 4 for
+  `4a0a871886ef` — both groups non-empty; every decision result of
+  `b5bc905326b6` is a natural valid-empty case)
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_decisions_for_decision(model_id, decision)` filters
+  the authoritative M6 `list_decisions()` by the persisted
+  `decision` (ZERO new `__init__` composition lines — no registry
+  handle is needed, and the gate engine's run path is never
+  invoked); the facade and route are thin pass-throughs registered
+  after the M34 by-comparison route and **before** the generic
+  `/gates/decisions/{decision_id}` detail getter (M23/M34/M41 are
+  different groupings of the same listing, all intact). No caches,
+  no new storage — repeated GETs are byte-identical and the
+  endpoint never writes
+- **isolation & boundaries**: unknown model -> existing 404;
+  unsupported decision value -> 422; valid decision without gate
+  decisions for the model -> `[]`. M6 (run, listing, getter), M23
+  by-policy, M34 by-comparison, M40 samples-by-strategy and the
+  M16–M40 surfaces are byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 510 tests
+pytest                       # 515 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2094,7 +2141,8 @@ ai-model-forge/
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
                        #   by-verdict grouping (M26/M29/M31/M37/M39)
     gates.py           # stage gates: policy-driven run decisions (M6)
-                       # + read-only by-policy/by-comparison grouping (M23/M34)
+                       # + read-only by-policy/by-comparison/by-decision
+                       #   grouping (M23/M34/M41)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
     dashboards.py      # read-only dashboard engine: deterministic views (M8/M13)
     policies.py        # policy registry + probe suites: immutable definitions (M9)
@@ -2108,7 +2156,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 510 tests across 20 suites
+  tests/               # 515 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

@@ -614,8 +614,9 @@ def test_m23_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M37 comparisons by-split)
     # + 1 (M38 evaluations by-state-kind)
     # + 1 (M39 comparisons by-verdict)
-    # + 1 (M40 samples by-strategy) = 72
-    assert len(spec["paths"]) == 72
+    # + 1 (M40 samples by-strategy)
+    # + 1 (M41 gate decisions by-decision) = 73
+    assert len(spec["paths"]) == 73
 
 
 # --------------------------------------------------------------------------- #
@@ -781,7 +782,7 @@ def test_m34_api_404s_isolation_regressions_openapi(api_client):
                           f"{tok}").json()
     assert cmpt == [c for c in comps if c["tokenizer_id"] == tok]
 
-    # OpenAPI: 72 paths, the new path exactly once, GET-only, tag
+    # OpenAPI: 73 paths, the new path exactly once, GET-only, tag
     # gates, GateDecision items; route order M23 by-policy <
     # by-comparison < generic decision detail
     spec = api_client.get("/openapi.json").json()
@@ -795,8 +796,9 @@ def test_m34_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M37 comparisons by-split)
     # + 1 (M38 evaluations by-state-kind)
     # + 1 (M39 comparisons by-verdict)
-    # + 1 (M40 samples by-strategy) = 72
-    assert len(spec["paths"]) == 72
+    # + 1 (M40 samples by-strategy)
+    # + 1 (M41 gate decisions by-decision) = 73
+    assert len(spec["paths"]) == 73
     path = ("/api/v1/models/{model_id}/gates/decisions/by-comparison"
             "/{comparison_id}")
     keys = list(spec["paths"])
@@ -811,5 +813,200 @@ def test_m34_api_404s_isolation_regressions_openapi(api_client):
     assert "post" not in item
     assert keys.index("/api/v1/models/{model_id}/gates/decisions/"
                       "by-policy/{policy_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/gates/decisions/{decision_id}")
+
+
+# --------------------------------------------------------------------------- #
+# M41: gate-decision history by decision (read-only grouping, enum contract)
+# --------------------------------------------------------------------------- #
+
+BY_DECISION = ("/api/v1/models/{model_id}/gates/decisions/by-decision/"
+               "{decision}")
+
+
+def test_m41_api_by_decision_grouping_partition_determinism(api_client):
+    env = _make_model(api_client, "m41a", epochs=30)
+    mid, ds, tok = env["model_id"], env["ds_id"], env["tok_id"]
+    ck_e = env["ckpts"][2]["checkpoint_id"]
+    ck_f = env["ckpts"][-1]["checkpoint_id"]
+
+    # PASS: improvement candidate; PASS: unchanged same-state candidate
+    d_p1 = api_client.post(GATES, json=_gate_body(
+        mid, ds, tok, baseline_ckpt=ck_e, seed=4101,
+        candidate={"state_kind": "checkpoint", "checkpoint_id": ck_f})).json()
+    d_p2 = api_client.post(GATES, json=_gate_body(
+        mid, ds, tok, baseline_ckpt=ck_f, seed=4102,
+        candidate={"state_kind": "checkpoint", "checkpoint_id": ck_f})).json()
+    # FAIL: the SAME improved candidate under an impossible minimum_loss
+    # ceiling — the policy verdict legitimately differs from the
+    # loss-only comparison verdict
+    final_loss = env["ckpts"][-1]["validation_loss"]
+    d_f1 = api_client.post(GATES, json=_gate_body(
+        mid, ds, tok, baseline_ckpt=ck_e, minimum_loss=final_loss * 0.99,
+        seed=4103,
+        candidate={"state_kind": "checkpoint", "checkpoint_id": ck_f})).json()
+    assert d_p1["decision"] == "passed" and d_p2["decision"] == "passed"
+    assert d_f1["decision"] == "failed" and d_f1["verdict"] == "improved"
+
+    listing = api_client.get(GATE_DECISIONS.format(model_id=mid)).json()
+    assert len(listing) == 3
+    url = BY_DECISION.format(model_id=mid, decision="passed")
+    got = api_client.get(url)
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # authoritative-filter parity: exact subset of the M6 listing
+    # whose persisted decision matches, in the same order
+    assert recs == [d for d in listing if d["decision"] == "passed"]
+    assert {d["decision_id"] for d in recs} == \
+        {d_p1["decision_id"], d_p2["decision_id"]}
+    keyed = [(d["created_at"], d["decision_id"]) for d in recs]
+    assert keyed == sorted(keyed)
+    # verbatim: each element equals its detail-getter payload
+    # (verdict/evidence chain included)
+    for d in recs:
+        one = api_client.get(
+            f"{GATE_DECISIONS.format(model_id=mid)}/{d['decision_id']}")
+        assert one.status_code == 200 and one.json() == d
+    # deterministic: three repeats return identical raw bytes
+    for decision in ("passed", "failed"):
+        raws = {api_client.get(
+            BY_DECISION.format(model_id=mid, decision=decision)).content
+            for _ in range(3)}
+        assert len(raws) == 1
+    # partition: the two groups are disjoint and cover the listing
+    recs_f = api_client.get(
+        BY_DECISION.format(model_id=mid, decision="failed")).json()
+    assert recs_f == [d for d in listing if d["decision"] == "failed"]
+    assert [d["decision_id"] for d in recs_f] == [d_f1["decision_id"]]
+    ids_p = {d["decision_id"] for d in recs}
+    ids_f = {d["decision_id"] for d in recs_f}
+    assert ids_p.isdisjoint(ids_f)
+    assert ids_p | ids_f == {d["decision_id"] for d in listing}
+    # no execution side effects: the filter itself added no records
+    assert len(api_client.get(
+        GATE_DECISIONS.format(model_id=mid)).json()) == 3
+
+
+def test_m41_api_by_decision_404_422s_isolation_regressions_openapi(
+        api_client):
+    env = _make_model(api_client, "m41b", epochs=10, eval_every=10)
+    mid, ds, tok = env["model_id"], env["ds_id"], env["tok_id"]
+    ck_e = env["ckpts"][2]["checkpoint_id"]
+    ck_f = env["ckpts"][-1]["checkpoint_id"]
+    other = _make_model(api_client, "m41c", epochs=10, eval_every=10)
+    url = BY_DECISION.format(model_id=mid, decision="") 
+
+    # one registered-policy decision + one inline decision
+    pol = _policy(mid, ds, tok, baseline_type="checkpoint",
+                  baseline_ckpt=ck_e, seed=4104, name="api41-pol")
+    assert api_client.post(POLICIES, json={
+        "policy_id": "api41-pol", "description": "d",
+        "policy": pol}).status_code == 201
+    d_reg = api_client.post(GATES, json={
+        "model_id": mid, "policy_id": "api41-pol",
+        "candidate": {"state_kind": "checkpoint",
+                      "checkpoint_id": ck_f}}).json()
+    d_inline = api_client.post(GATES, json=_gate_body(
+        mid, ds, tok, baseline_ckpt=ck_e, seed=4105,
+        candidate={"state_kind": "checkpoint", "checkpoint_id": ck_f})).json()
+
+    # 404: unknown model with a VALID decision (exactly like the
+    # sibling groupings)
+    assert api_client.get(
+        f"{MODELS}/ghost-model-41/gates/decisions/by-decision/passed"
+    ).status_code == 404
+    # 422: unsupported decision values are rejected by the schema enum
+    # at the API boundary — before the handler, so the 422 wins even
+    # for an UNKNOWN model (never a registry-style 404, never [])
+    for bad in ("PASSED", "pass%20ed", "1", "skipped"):
+        got = api_client.get(url + bad)
+        assert got.status_code == 422, (bad, got.status_code)
+    assert api_client.get(
+        f"{MODELS}/ghost-model-41/gates/decisions/by-decision/skipped"
+    ).status_code == 422
+
+    # cross-model isolation: the other model has NO gate decisions, so
+    # both groups are the natural valid empty
+    for decision in ("passed", "failed"):
+        iso = api_client.get(BY_DECISION.format(
+            model_id=other["model_id"], decision=decision))
+        assert iso.status_code == 200 and iso.json() == []
+
+    # M6 listing/getter intact; the generic detail getter still 404s
+    # ghost ids (no route capture by the new literal segment)
+    listing = api_client.get(GATE_DECISIONS.format(model_id=mid)).json()
+    assert {d["decision_id"] for d in listing} == \
+        {d_reg["decision_id"], d_inline["decision_id"]}
+    assert api_client.get(
+        f"{GATE_DECISIONS.format(model_id=mid)}/{d_reg['decision_id']}"
+    ).json() == d_reg
+    assert api_client.get(
+        f"{GATE_DECISIONS.format(model_id=mid)}/ghost-dec-41"
+    ).status_code == 404
+
+    # M23 by-policy regression: exactly the registered-policy decision
+    # (inline decisions never appear); M34 by-comparison regression:
+    # exactly the decision(s) judging d_reg's comparison
+    bypol = api_client.get(f"{MODELS}/{mid}/gates/decisions/by-policy/"
+                           f"api41-pol")
+    assert bypol.status_code == 200
+    assert bypol.json() == [d for d in listing
+                            if d.get("policy_id") == "api41-pol"]
+    bycmp = api_client.get(
+        f"{MODELS}/{mid}/gates/decisions/by-comparison/"
+        f"{d_reg['comparison_id']}")
+    assert bycmp.status_code == 200
+    assert bycmp.json() == [d for d in listing
+                            if d.get("comparison_id")
+                            == d_reg["comparison_id"]]
+    # M40 samples-by-strategy regression: this harness has no samples,
+    # so both strategies are the natural valid-empty with listing
+    # parity
+    samples = api_client.get(f"{MODELS}/{mid}/samples").json()
+    assert samples == []
+    for strategy in ("greedy", "temperature"):
+        g = api_client.get(
+            f"{MODELS}/{mid}/samples/by-strategy/{strategy}")
+        assert g.status_code == 200
+        assert g.json() == [x for x in samples
+                            if x["strategy"] == strategy]
+
+    # OpenAPI: 73 paths, the new path exactly once, GET-only, tag
+    # gates, GateDecision items, decision $ref GateDecisionResult;
+    # route order M34 by-comparison < by-decision < generic detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer)
+    # + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer)
+    # + 1 (M34 gate decisions by-comparison)
+    # + 1 (M35 workflows by-recipe)
+    # + 1 (M36 evaluations by-split)
+    # + 1 (M37 comparisons by-split)
+    # + 1 (M38 evaluations by-state-kind)
+    # + 1 (M39 comparisons by-verdict)
+    # + 1 (M40 samples by-strategy)
+    # + 1 (M41 gate decisions by-decision) = 73
+    assert len(spec["paths"]) == 73
+    path = ("/api/v1/models/{model_id}/gates/decisions/by-decision/"
+            "{decision}")
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["gates"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/GateDecision"}
+    decision_param = [p for p in item["get"]["parameters"]
+                      if p["name"] == "decision"][0]
+    assert decision_param["schema"] == {
+        "$ref": "#/components/schemas/GateDecisionResult"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/gates/decisions/"
+                      "by-comparison/{comparison_id}") < keys.index(path)
     assert keys.index(path) < keys.index(
         "/api/v1/models/{model_id}/gates/decisions/{decision_id}")

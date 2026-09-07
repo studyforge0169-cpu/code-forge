@@ -25,6 +25,7 @@ from .schemas import (
     EvaluationRecord,
     EvaluationSplit,
     GateDecision,
+    GateDecisionResult,
     GateRequest,
     HealthResponse,
     ModelDashboard,
@@ -530,6 +531,22 @@ def index() -> HTMLResponse:
         with no samples for the model -> []). Pure data access — no
         aggregates, no scoring, zero storage growth.</li>
 
+      <li><b>M41 gate-decision history by decision</b> — one read-only
+        access path, <code>GET /models/&#123;id&#125;/gates/decisions/by-decision/&#123;decision&#125;</code>,
+        answers "which immutable gate decisions of this model produced
+        this decision result?": the model's authoritative M6 listing
+        filtered by the persisted top-level decision (schema enum
+        passed/failed — the immutable policy verdict of the M6 run,
+        which may legitimately differ from the loss-only comparison
+        verdict), matched VERBATIM — NEVER recalculated from loss
+        deltas, policy thresholds or comparison results, never
+        re-evaluated; full record payloads, exact M6 ordering; unknown
+        model -> 404; an UNSUPPORTED decision value -> 422, because
+        decision results have no registry — the enum IS the contract;
+        a valid decision with no gate decisions for the model -> []).
+        Pure data access — no aggregates, no rankings, zero storage
+        growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -582,6 +599,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions</code> — immutable gate decision history</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-policy/&#123;policy_id&#125;</code> — gate decisions of ONE registered policy (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-comparison/&#123;comparison_id&#125;</code> — gate decisions that judged ONE M5 comparison (read-only, deterministic, no aggregation)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-decision/&#123;decision&#125;</code> — gate decisions of ONE model with ONE decision result (read-only, deterministic, persisted decision verbatim — never recalculated; unsupported decision 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/&#123;decision&#125;</code> — one gate decision</li>
       <li><code>POST  {prefix}/workflows/run</code> — execute one inline workflow plan synchronously</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows</code> — immutable workflow run history</li>
@@ -1320,7 +1338,8 @@ def get_comparison(model_id: str, comparison_id: str) -> ComparisonRecord:
 
 # Gate routes (Milestone 6 — policy-driven, evidence-based run decisions;
 # Milestone 23 adds the read-only by-policy grouping of the immutable history;
-# Milestone 34 adds the read-only by-comparison grouping of the same history)
+# Milestone 34 adds the read-only by-comparison grouping of the same history;
+# Milestone 41 adds the read-only by-decision grouping of the same history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/gates/evaluate", response_model=GateDecision, tags=["gates"])
@@ -1405,6 +1424,42 @@ def list_gate_decisions_by_comparison(model_id: str, comparison_id: str
     try:
         return _forge().list_gate_decisions_for_comparison(
             model_id, comparison_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/gates/decisions/by-decision/{decision}",
+         response_model=list[GateDecision], tags=["gates"])
+def list_gate_decisions_by_decision(model_id: str,
+                                    decision: GateDecisionResult
+                                    ) -> list[GateDecision]:
+    """Immutable gate decisions of ONE model with ONE decision result
+    (M41).
+
+    Read-only per-decision grouping: returns the model's authoritative
+    M6 listing filtered by the persisted decision recorded in each
+    GateDecision (top-level decision — the schema enum passed/failed,
+    the immutable policy verdict persisted at run time by the M6 gate
+    flow; matched VERBATIM — membership NEVER comes from recalculating
+    loss deltas, tolerances, policy thresholds, gate configuration or
+    comparison results, no gate is re-evaluated; the persisted value
+    is never resolved or rewritten). Complete verbatim payloads
+    (verdict/evidence chain/rollback suggestion included) in the exact
+    M6 (created_at, decision_id) order; a valid decision with no gate
+    decisions for the model returns []. Decision results have NO
+    registry (unlike the by-policy/by-comparison axes): the
+    GateDecisionResult enum IS the contract, so an UNSUPPORTED
+    decision value is rejected with 422 at the API boundary
+    (schema-level validation — never a registry-style 404, and the
+    validation fires BEFORE this handler even for an unknown model),
+    while an unknown model with a VALID decision raises
+    FileNotFoundError -> 404 exactly like the sibling groupings. No
+    aggregates, no rankings, no writes. (Must stay registered before
+    /gates/decisions/{decision_id}; the literal "by-decision" segment
+    is not a decision id.)"""
+    try:
+        return _forge().list_gate_decisions_for_decision(model_id,
+                                                         decision)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

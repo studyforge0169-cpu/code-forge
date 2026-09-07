@@ -29,6 +29,7 @@ from .schemas import (
     EvalStateKind,
     EvaluationRecord,
     EvaluationSplit,
+    GateDecisionResult,
     ModelCreateRequest,
     ModelRecord,
     PolicyCreateRequest,
@@ -533,6 +534,24 @@ class ModelForge:
         Read-only, never writes."""
         return self.gates.list_decisions_for_comparison(
             model_id, comparison_id)
+
+    def list_gate_decisions_for_decision(self, model_id: str,
+                                         decision: GateDecisionResult):
+        """Immutable gate decisions of ONE model with ONE decision
+        result (M41 read-only access).
+
+        The decision is the persisted schema enum (passed/failed) —
+        there is NO decision registry, so an unsupported value is
+        rejected at the API boundary with 422, while an unknown model
+        raises FileNotFoundError (404) exactly like the sibling
+        groupings. Returns the model's authoritative M6 listing
+        filtered by the persisted top-level decision (matched VERBATIM
+        — NEVER recalculated from loss deltas, policy thresholds or
+        comparison results; no gate is re-evaluated) in the M6
+        (created_at, decision_id) order, as complete verbatim records.
+        A valid decision with no gate decisions for the model returns
+        []. Read-only, never writes."""
+        return self.gates.list_decisions_for_decision(model_id, decision)
 
     # ------------------------------------------------------------------ #
     # Workflows (thin delegation; ordered orchestration over M3-M6; M7)
