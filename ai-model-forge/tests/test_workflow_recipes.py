@@ -1800,7 +1800,7 @@ def test_m35_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer) + 1 (M34 gate decisions
     # by-comparison) + 1 (M35 workflows by-recipe) = 67
-    assert len(spec["paths"]) == 68
+    assert len(spec["paths"]) == 69
     path = "/api/v1/models/{model_id}/workflows/by-recipe/{recipe_id}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1

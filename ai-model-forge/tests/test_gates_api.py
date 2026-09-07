@@ -610,8 +610,9 @@ def test_m23_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M33 sample-quality by-tokenizer)
     # + 1 (M34 gate decisions by-comparison)
     # + 1 (M35 workflows by-recipe)
-    # + 1 (M36 evaluations by-split) = 68
-    assert len(spec["paths"]) == 68
+    # + 1 (M36 evaluations by-split)
+    # + 1 (M37 comparisons by-split) = 69
+    assert len(spec["paths"]) == 69
 
 
 # --------------------------------------------------------------------------- #
@@ -777,7 +778,7 @@ def test_m34_api_404s_isolation_regressions_openapi(api_client):
                           f"{tok}").json()
     assert cmpt == [c for c in comps if c["tokenizer_id"] == tok]
 
-    # OpenAPI: 68 paths, the new path exactly once, GET-only, tag
+    # OpenAPI: 69 paths, the new path exactly once, GET-only, tag
     # gates, GateDecision items; route order M23 by-policy <
     # by-comparison < generic decision detail
     spec = api_client.get("/openapi.json").json()
@@ -787,8 +788,9 @@ def test_m34_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M33 sample-quality by-tokenizer)
     # + 1 (M34 gate decisions by-comparison)
     # + 1 (M35 workflows by-recipe)
-    # + 1 (M36 evaluations by-split) = 68
-    assert len(spec["paths"]) == 68
+    # + 1 (M36 evaluations by-split)
+    # + 1 (M37 comparisons by-split) = 69
+    assert len(spec["paths"]) == 69
     path = ("/api/v1/models/{model_id}/gates/decisions/by-comparison"
             "/{comparison_id}")
     keys = list(spec["paths"])

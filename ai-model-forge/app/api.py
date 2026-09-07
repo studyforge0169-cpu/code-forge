@@ -455,6 +455,21 @@ def index() -> HTMLResponse:
         with no comparisons for the model -> []). Pure data access —
         no aggregates, zero storage growth.</li>
 
+      <li><b>M37 comparison history by split</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/comparisons/by-split/&#123;split&#125;</code>,
+        answers "which immutable M5 comparisons of this model measured
+        this dataset split?": the model's authoritative M5 listing
+        filtered by the persisted shared-probe split (a comparison
+        persists exactly ONE top-level split — both sides measure the
+        same probe by construction), matched VERBATIM — never inferred
+        from datasets, checkpoints, nested evaluation records or
+        timestamps; full record payloads, exact M5 ordering; unknown
+        model -> 404; an UNSUPPORTED split value -> 422, because
+        splits have no registry — the EvaluationSplit enum IS the
+        contract; a valid split with no comparisons for the model ->
+        []). Pure data access — no aggregates, zero storage
+        growth.</li>
+
       <li><b>M32 sample history by tokenizer</b> — one read-only access
         path, <code>GET /models/&#123;id&#125;/samples/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M15 samples of this model were
@@ -511,6 +526,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-checkpoint/&#123;ckpt&#125;</code> — comparisons involving ONE checkpoint on either side (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-dataset/&#123;ds&#125;</code> — comparisons of ONE model over ONE dataset (read-only, deterministic, versions verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-tokenizer/&#123;tok&#125;</code> — comparisons of ONE model with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-split/&#123;split&#125;</code> — comparisons of ONE model on ONE dataset split (read-only, deterministic, persisted shared-probe split verbatim; unsupported split 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-tokenizer/&#123;tok&#125;</code> — samples of ONE model generated with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tok&#125;</code> — M16 sample-quality measurements of ONE model under ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/&#123;comp&#125;</code> — one comparison record</li>
@@ -1012,7 +1028,7 @@ def get_evaluation(model_id: str, eval_id: str) -> EvaluationRecord:
 # Milestone 26 adds the read-only by-checkpoint grouping of the immutable history;
 # Milestone 29 adds the read-only by-dataset grouping of the immutable history;
 # Milestone 31 adds the read-only by-tokenizer grouping of the immutable history;
-# Milestone 36 adds the read-only by-split grouping of the same history)
+# Milestone 37 adds the read-only by-split grouping of the same history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/comparisons/run", response_model=ComparisonRecord, tags=["comparison"])
@@ -1134,6 +1150,40 @@ def list_comparisons_by_tokenizer(model_id: str, tokenizer_id: str
     try:
         return _forge().list_comparisons_for_tokenizer(model_id,
                                                        tokenizer_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/comparisons/by-split/{split}",
+         response_model=list[ComparisonRecord], tags=["comparison"])
+def list_comparisons_by_split(model_id: str, split: EvaluationSplit
+                              ) -> list[ComparisonRecord]:
+    """Immutable M5 comparisons of ONE model measured on ONE dataset
+    split (M37).
+
+    Read-only per-split grouping: returns the model's authoritative
+    M5 listing filtered by the persisted shared-probe split recorded
+    in each ComparisonRecord (top-level split — a comparison is valid
+    only when BOTH sides measure the SAME dataset/version/split/
+    tokenizer/window/seed probe, so the split is a property of the
+    comparison itself; matched VERBATIM — membership never comes from
+    filenames, checkpoint ids, dataset identities, nested evaluation
+    records or hashes, and the persisted value is never resolved or
+    rewritten). Complete verbatim payloads (verdict/per-side losses
+    included) in the exact M5 (created_at, comparison_id) order; a
+    valid split with no comparisons for the model returns []. Splits
+    have NO registry (unlike the by-checkpoint/by-dataset/
+    by-tokenizer axes): the EvaluationSplit enum IS the contract, so
+    an UNSUPPORTED split value is rejected with 422 at the API
+    boundary (schema-level validation — never a registry-style 404,
+    and the validation fires BEFORE this handler even for an unknown
+    model), while an unknown model with a VALID split raises
+    FileNotFoundError -> 404 exactly like the sibling groupings. No
+    aggregates, no writes. (Must stay registered before
+    /comparisons/{comparison_id}; the literal "by-split" segment is
+    not a comparison id.)"""
+    try:
+        return _forge().list_comparisons_for_split(model_id, split)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

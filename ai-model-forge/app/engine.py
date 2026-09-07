@@ -426,6 +426,26 @@ class ModelForge:
         return self.comparison.list_comparisons_for_tokenizer(
             model_id, tokenizer_id)
 
+    def list_comparisons_for_split(self, model_id: str,
+                                   split: EvaluationSplit
+                                   ) -> list[ComparisonRecord]:
+        """Immutable M5 comparison records of ONE model measured on
+        ONE dataset split (M37 read-only access).
+
+        Splits have NO registry — the EvaluationSplit enum IS the
+        contract (unsupported values are rejected with 422 at the API
+        boundary; unknown model -> FileNotFoundError -> 404, exactly
+        like the sibling groupings). Returns the model's authoritative
+        M5 listing filtered by the persisted shared-probe split
+        identity (a comparison persists exactly ONE top-level split —
+        both sides measure the same probe by construction; matched
+        VERBATIM, never inferred from datasets, checkpoints or nested
+        evaluations), each record exactly once, in the M5
+        (created_at, comparison_id) order. A valid split with no
+        comparisons for the model returns []. Read-only, never
+        writes."""
+        return self.comparison.list_comparisons_for_split(model_id, split)
+
     # ------------------------------------------------------------------ #
     # Stage gates (thin delegation; M6)
     # ------------------------------------------------------------------ #

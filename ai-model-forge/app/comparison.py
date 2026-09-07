@@ -60,6 +60,7 @@ from .schemas import (
     EvalStateKind,
     EvaluationConfig,
     EvaluationRecord,
+    EvaluationSplit,
     ModelRecord,
 )
 from .storage import Storage, atomic_write_json, read_json
@@ -245,6 +246,47 @@ class ComparisonEngine:
         self.tokenizers.load(tokenizer_id)
         return [r for r in self.list_comparisons(model_id)
                 if r.tokenizer_id == tokenizer_id]
+
+    def list_comparisons_for_split(
+            self, model_id: str, split: EvaluationSplit
+    ) -> list[ComparisonRecord]:
+        """Immutable M5 comparisons of ONE model measured on ONE
+        dataset split (M37).
+
+        Membership comes from the persisted shared-probe split
+        identity ONLY: every ``ComparisonRecord`` carries a top-level
+        ``split: EvaluationSplit`` (the schema enum
+        train/validation/test — one half of the shared-probe contract:
+        a comparison is valid only when BOTH sides measure the SAME
+        dataset/version/**split**/tokenizer/window/cap/batch/seed, so
+        the split is a property of the comparison itself, never of a
+        side), and a comparison belongs to the request when its
+        persisted ``split`` equals the requested value — never
+        filenames, checkpoint ids, dataset identities, nested
+        evaluation records, hashes or timestamps, and never resolved
+        or rewritten into another value. Splits have NO registry
+        (unlike the M26 checkpoint / M29 dataset / M31 tokenizer
+        axes): the enum IS the contract, so an unsupported split value
+        is rejected at the API boundary with 422 (schema-level
+        validation — it never even reaches this method), while an
+        unknown model raises FileNotFoundError exactly like the
+        sibling groupings. Each comparison appears EXACTLY ONCE
+        (including same-checkpoint A=B records — the split is the
+        probe's, not a side's). The result is the model's
+        authoritative M5 listing above (the exact engine parse +
+        deterministic (created_at, comparison_id) ASCENDING order)
+        filtered by the persisted split; complete verbatim
+        ``ComparisonRecord`` payloads, no rewritten fields. A valid
+        split with no comparisons for the model returns []. Splits
+        are model-scoped through the listing itself — a model never
+        sees another model's comparisons. Read-only, never writes.
+        """
+        # existence: raises FileNotFoundError (404 at the API); the
+        # split itself needs NO registry lookup — the enum IS the
+        # contract (unsupported values are rejected with 422 at the
+        # API boundary before this method runs)
+        return [r for r in self.list_comparisons(model_id)
+                if r.split == split]
 
     # ------------------------------------------------------------------ #
     # Canonical flow (API): one model, one shared probe, two states

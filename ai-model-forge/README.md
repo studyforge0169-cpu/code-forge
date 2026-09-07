@@ -1416,11 +1416,58 @@ generation never trains, evaluates, scores, ranks or judges output.
   by-checkpoint, M28 by-dataset, M30 by-tokenizer and the M16–M35
   surfaces are byte-identical before and after
 
+### Milestone 37 — comparison history by split
+  (`comparisons/by-split`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/comparisons/by-split/{split}` — answers "which
+  immutable M5 comparisons of this model measured this dataset
+  split?" and nothing else
+- **exact filtering (persisted shared-probe split identity)**: every
+  `ComparisonRecord` carries a top-level `split` (the schema enum
+  train/validation/test — one half of the shared-probe contract: a
+  comparison exists only when BOTH sides measure the SAME
+  dataset/version/split/tokenizer/window/seed probe, so the split is
+  a property of the comparison itself, never of a side), and a
+  comparison belongs to the request only when that persisted value
+  matches VERBATIM — never filenames, checkpoint ids, dataset
+  identities, nested evaluation records or hashes, and never
+  resolved or rewritten. Each matching comparison appears EXACTLY
+  ONCE (including same-checkpoint A=B records); verbatim
+  `ComparisonRecord` payloads (verdict/per-side losses included) in
+  the exact M5 authoritative order ((created_at, comparison_id)
+  ASCENDING)
+- **the 422-vs-404 contract (no split registry)**: splits are a
+  SCHEMA ENUM, not a registry — unlike the M26 checkpoint / M29
+  dataset / M31 tokenizer axes there is nothing to 404 for an
+  unsupported split value, so it is rejected with 422 by schema
+  validation at the API boundary (before the handler, matching M36:
+  even unknown-model + invalid-split is 422); unknown model with a
+  VALID split -> existing 404; a valid split with zero comparisons
+  for the model is a deterministic `[]` — never a 404 (all 8
+  current production comparisons are `validation`; `train`/`test`
+  and every split of `b5bc905326b6` are natural valid-empty cases)
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_comparisons_for_split(model_id, split)` filters the
+  authoritative M5 `list_comparisons()` by the persisted `split`
+  (ZERO new `__init__` composition lines — no registry handle is
+  needed); the facade and route are thin pass-throughs registered
+  after the M31 by-tokenizer route and **before** the generic
+  `/comparisons/{comparison_id}` detail getter (M26/M29/M31/M37 are
+  different groupings of the same listing, all intact). No caches,
+  no new storage — repeated GETs are byte-identical and the endpoint
+  never writes
+- **isolation & boundaries**: unknown model -> existing 404;
+  unsupported split value -> 422; valid split without comparisons
+  for the model -> `[]`. M5 (run, listing, getter), M26
+  by-checkpoint, M29 by-dataset, M31 by-tokenizer, M36
+  evaluations-by-split and the M16–M36 surfaces are byte-identical
+  before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 490 tests
+pytest                       # 495 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1902,7 +1949,8 @@ ai-model-forge/
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split
                        #   grouping (M24/M28/M30/M36)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
-                       # + read-only by-checkpoint/by-dataset/by-tokenizer grouping (M26/M29/M31)
+                       # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split
+                       #   grouping (M26/M29/M31/M37)
     gates.py           # stage gates: policy-driven run decisions (M6)
                        # + read-only by-policy/by-comparison grouping (M23/M34)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
@@ -1917,7 +1965,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 490 tests across 20 suites
+  tests/               # 495 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

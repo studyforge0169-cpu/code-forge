@@ -380,8 +380,9 @@ def test_m26_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M33 sample-quality by-tokenizer)
     # + 1 (M34 gate decisions by-comparison)
     # + 1 (M35 workflows by-recipe)
-    # + 1 (M36 evaluations by-split) = 68
-    assert len(spec["paths"]) == 68
+    # + 1 (M36 evaluations by-split)
+    # + 1 (M37 comparisons by-split) = 69
+    assert len(spec["paths"]) == 69
 
 
 # =========================================================================== #
@@ -512,7 +513,7 @@ def test_m29_api_404s_isolation_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/comparisons/{comparison_id}"
     m26 = ("/api/v1/models/{model_id}/comparisons/by-checkpoint/"
            "{checkpoint_id}")
-    assert len(spec["paths"]) == 68
+    assert len(spec["paths"]) == 69
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["comparison"]
@@ -660,8 +661,9 @@ def test_m31_by_tokenizer_404s_isolation_regressions_openapi(api_client):
     # + 1 (M33 sample-quality by-tokenizer)
     # + 1 (M34 gate decisions by-comparison)
     # + 1 (M35 workflows by-recipe)
-    # + 1 (M36 evaluations by-split) = 68
-    assert len(spec["paths"]) == 68
+    # + 1 (M36 evaluations by-split)
+    # + 1 (M37 comparisons by-split) = 69
+    assert len(spec["paths"]) == 69
     path = ("/api/v1/models/{model_id}/comparisons/by-tokenizer"
             "/{tokenizer_id}")
     keys = list(spec["paths"])
@@ -676,5 +678,152 @@ def test_m31_by_tokenizer_404s_isolation_regressions_openapi(api_client):
     assert "post" not in item
     assert keys.index("/api/v1/models/{model_id}/comparisons/"
                       "by-dataset/{dataset_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/comparisons/{comparison_id}")
+
+
+# --------------------------------------------------------------------------- #
+# M37: comparison history by split (read-only grouping, enum contract)
+# --------------------------------------------------------------------------- #
+
+def test_m37_by_split_grouping_partition_determinism(api_client):
+    ds_id, tok_id, model_id, ckpts = _prepare(api_client, "m37a", TAIL_A,
+                                              epochs=30)
+    early, final = ckpts[2]["checkpoint_id"], ckpts[-1]["checkpoint_id"]
+
+    url = f"{MODELS}/{model_id}/comparisons/by-split"
+    c_val = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                                 early, final)).json()
+    c_trn = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                                 early, final,
+                                                 split="train",
+                                                 seed=5)).json()
+
+    g = api_client.get(f"{url}/validation")
+    assert g.status_code == 200, g.text
+    body = g.json()
+    # authoritative-filter parity: exact subset of the M5 listing whose
+    # persisted top-level split matches, in the same order
+    listing = api_client.get(f"{MODELS}/{model_id}/comparisons").json()
+    assert body == [r for r in listing if r["split"] == "validation"]
+    assert [r["comparison_id"] for r in body] == [c_val["comparison_id"]]
+    # verbatim: each element is byte-equal to its detail-getter payload
+    for r in body:
+        got = api_client.get(
+            f"{MODELS}/{model_id}/comparisons/{r['comparison_id']}")
+        assert got.status_code == 200 and got.json() == r
+    # deterministic: three repeats return identical raw bytes
+    raws = {api_client.get(f"{url}/validation").content for _ in range(3)}
+    assert len(raws) == 1
+    # partition: disjoint groups over ALL enum splits whose union is
+    # the full listing; `test` is the natural valid-enum empty case
+    ids_by = {sp: {r["comparison_id"] for r in
+                   api_client.get(f"{url}/{sp}").json()}
+              for sp in ("train", "validation", "test")}
+    assert ids_by["train"] == {c_trn["comparison_id"]}
+    assert ids_by["validation"] == {c_val["comparison_id"]}
+    assert ids_by["test"] == set()
+    assert ids_by["train"].isdisjoint(ids_by["validation"])
+    assert ids_by["train"] | ids_by["validation"] == \
+        {r["comparison_id"] for r in listing}
+    for sp in ("train", "test"):
+        got = api_client.get(f"{url}/{sp}")
+        assert got.status_code == 200
+    assert api_client.get(f"{url}/test").json() == []
+    # no execution side effects: the filter itself added no records
+    assert len(api_client.get(
+        f"{MODELS}/{model_id}/comparisons").json()) == 2
+
+
+def test_m37_by_split_404_422s_isolation_regressions_openapi(api_client):
+    ds_id, tok_id, model_id, ckpts = _prepare(api_client, "m37b", TAIL_A,
+                                              epochs=24)
+    early, final = ckpts[2]["checkpoint_id"], ckpts[-1]["checkpoint_id"]
+    _, _, other_model, _ = _prepare(api_client, "m37c", TAIL_B,
+                                    epochs=24)
+    url = f"{MODELS}/{model_id}/comparisons/by-split/"
+
+    c = api_client.post(COMP_RUN, json=_comp(model_id, ds_id, tok_id,
+                                             early, final)).json()
+
+    # 404: unknown model with a VALID split (exactly like the sibling
+    # groupings)
+    assert api_client.get(
+        f"{MODELS}/ghost-model-37/comparisons/by-split/validation"
+    ).status_code == 404
+    # 422: unsupported split values are rejected by the schema enum at
+    # the API boundary — before the handler, so the 422 wins even for
+    # an UNKNOWN model (never a registry-style 404, never [])
+    for bad in ("VALIDATION", "valid%20ation", "3", "banana-split"):
+        got = api_client.get(url + bad)
+        assert got.status_code == 422, (bad, got.status_code)
+    assert api_client.get(
+        f"{MODELS}/ghost-model-37/comparisons/by-split/banana-split"
+    ).status_code == 422
+
+    # cross-model isolation: the other model's group is empty under
+    # EVERY valid split (scoping from the model's own listing)
+    for sp in ("train", "validation", "test"):
+        iso = api_client.get(
+            f"{MODELS}/{other_model}/comparisons/by-split/{sp}")
+        assert iso.status_code == 200 and iso.json() == []
+
+    # M5 listing/getter intact; generic detail getter still 404s ghost
+    # ids (no route capture by the new literal segment)
+    listing = api_client.get(f"{MODELS}/{model_id}/comparisons").json()
+    assert [r["comparison_id"] for r in listing] == [c["comparison_id"]]
+    got = api_client.get(
+        f"{MODELS}/{model_id}/comparisons/{c['comparison_id']}")
+    assert got.status_code == 200 and got.json() == c
+    assert api_client.get(
+        f"{MODELS}/{model_id}/comparisons/ghost-comp-37").status_code == 404
+
+    # M26 by-checkpoint / M29 by-dataset / M31 by-tokenizer
+    # regressions: same listing, other groupings, unconfused
+    for ep, arg in (("by-checkpoint", early), ("by-dataset", ds_id),
+                    ("by-tokenizer", tok_id)):
+        g = api_client.get(f"{MODELS}/{model_id}/comparisons/{ep}/{arg}")
+        assert g.status_code == 200
+        assert [r["comparison_id"] for r in g.json()] == \
+            [c["comparison_id"]]
+    # M36 evaluations-by-split regression: the evaluation twin keeps
+    # its own contract on the same model
+    evs = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    evs_by = api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-split/validation")
+    assert evs_by.status_code == 200
+    assert evs_by.json() == [e for e in evs if e["split"] == "validation"]
+
+    # OpenAPI: 69 paths, the new path exactly once, GET-only, tag
+    # comparison, ComparisonRecord items, split $ref EvaluationSplit;
+    # route order M31 by-tokenizer < by-split < generic detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer)
+    # + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer)
+    # + 1 (M34 gate decisions by-comparison)
+    # + 1 (M35 workflows by-recipe)
+    # + 1 (M36 evaluations by-split)
+    # + 1 (M37 comparisons by-split) = 69
+    assert len(spec["paths"]) == 69
+    path = ("/api/v1/models/{model_id}/comparisons/by-split/{split}")
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["comparison"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/ComparisonRecord"}
+    split_param = [p for p in item["get"]["parameters"]
+                   if p["name"] == "split"][0]
+    assert split_param["schema"] == {
+        "$ref": "#/components/schemas/EvaluationSplit"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/comparisons/"
+                      "by-tokenizer/{tokenizer_id}") < keys.index(path)
     assert keys.index(path) < keys.index(
         "/api/v1/models/{model_id}/comparisons/{comparison_id}")

@@ -871,3 +871,108 @@ def test_m31_engine_repeated_calls_identical(env):
                  f.list_comparisons_for_tokenizer(env.model_id,
                                                  env.tok_id)]
         assert again == first
+
+
+# --------------------------------------------------------------------------- #
+# M37: comparison history by split (read-only grouping, enum contract)
+# --------------------------------------------------------------------------- #
+
+def _m37_env(env):
+    """M37 state on top of the shared module env (cached): ONE
+    comparison on the TRAIN split plus ONE fresh VALIDATION-split
+    comparison (the env's own earlier-test comparisons may not exist
+    when tests are deselected), giving a two-group partition; `test`
+    stays the natural valid-enum empty case. Returns (c_train,).
+    """
+    cached = getattr(env, "_m37_state", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    ckE, ckF = env.imp_early.checkpoint_id, env.imp_final.checkpoint_id
+    f.run_comparison(env.cmp(ckE, ckF, split="validation", seed=3701))
+    c_train = f.run_comparison(env.cmp(ckE, ckF, split="train",
+                                       seed=3700))
+    env._m37_state = (c_train,)
+    return env._m37_state
+
+
+def test_m37_engine_filters_by_persisted_split_identity(env):
+    (c_train,) = _m37_env(env)
+    f = env.forge
+    listing = f.list_comparisons(env.model_id)
+    for split in ("train", "validation", "test"):
+        got = f.list_comparisons_for_split(env.model_id, split)
+        # parity with the authoritative M5 listing filtered by the
+        # persisted shared-probe split; deterministic
+        # (created_at, comparison_id) order; unique comparison ids
+        assert got == [r for r in listing if r.split.value == split]
+        keyed = [(r.created_at, r.comparison_id) for r in got]
+        assert keyed == sorted(keyed)
+        ids = [r.comparison_id for r in got]
+        assert len(ids) == len(set(ids))
+        assert all(r.split.value == split and r.model_id == env.model_id
+                   for r in got)
+        for r in got:
+            assert r == f.get_comparison(env.model_id, r.comparison_id)
+    # the fixture's train record is in the train group with the
+    # persisted split VERBATIM (earlier module tests may have added
+    # other train-split comparisons — membership derives from the
+    # listing, never a hard-coded id list)
+    got_t = f.list_comparisons_for_split(env.model_id, "train")
+    assert c_train.comparison_id in {r.comparison_id for r in got_t}
+    assert all(r.split.value == "train" for r in got_t)
+    # explicit partition: disjoint groups over ALL enum splits whose
+    # union is the full listing (test contributes the natural [])
+    ids_by = {sp: {r.comparison_id for r in
+                   f.list_comparisons_for_split(env.model_id, sp)}
+              for sp in ("train", "validation", "test")}
+    assert ids_by["train"] and ids_by["validation"]
+    assert ids_by["test"] == set()
+    assert ids_by["train"].isdisjoint(ids_by["validation"])
+    assert ids_by["train"] | ids_by["validation"] == \
+        {r.comparison_id for r in listing}
+
+
+def test_m37_engine_empty_404s_model_scoping_read_only(env):
+    (c_train,) = _m37_env(env)
+    f = env.forge
+    _, _, _, _, _, _, _, b, b_ck = _m26_env(env)
+    # valid split with zero comparisons -> [] (natural `test` case;
+    # and the model-scoped empty case: b has none under ANY split)
+    assert f.list_comparisons_for_split(env.model_id, "test") == []
+    for sp in ("train", "validation", "test"):
+        assert f.list_comparisons_for_split(b, sp) == []
+    # unknown model -> FileNotFoundError (404 at the API); the enum
+    # itself needs NO registry lookup (unsupported values are 422 at
+    # the API boundary and never reach the engine)
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_split("ghost-model-37", "train")
+    # cross-model isolation: a's comparison ids never appear under b
+    leak = [r.comparison_id for r in
+            f.list_comparisons_for_split(b, "train")]
+    assert c_train.comparison_id not in leak
+    # read-only: the filter never writes comparison manifests
+    def comp_files(mid):
+        root = f.storage.model_dir(mid) / "comparisons"
+        if not root.exists():
+            return set()
+        return {p.relative_to(root).as_posix()
+                for p in root.rglob("*") if p.is_file()}
+    before = (comp_files(env.model_id), comp_files(b))
+    f.list_comparisons_for_split(env.model_id, "train")
+    f.list_comparisons_for_split(env.model_id, "validation")
+    f.list_comparisons_for_split(env.model_id, "test")
+    f.list_comparisons_for_split(b, "train")
+    assert (comp_files(env.model_id), comp_files(b)) == before
+
+
+def test_m37_engine_repeated_calls_identical(env):
+    _m37_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_comparisons_for_split(env.model_id, "validation")]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_comparisons_for_split(env.model_id,
+                                              "validation")]
+        assert again == first

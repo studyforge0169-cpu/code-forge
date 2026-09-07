@@ -1517,7 +1517,7 @@ def test_dashboard_sample_quality_openapi_and_http(api_client):
     assert "DashboardSampleQualityLatest" in \
         spec["components"]["schemas"]
     assert "/api/v1/models/{model_id}/dashboard" in spec["paths"]
-    # M17 added no endpoints; M18–M36 each added exactly one
-    # documented route, so the surface count is 68 (assertion stays
+    # M17 added no endpoints; M18–M37 each added exactly one
+    # documented route, so the surface count is 69 (assertion stays
     # exact)
-    assert len(spec["paths"]) == 68
+    assert len(spec["paths"]) == 69
