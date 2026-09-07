@@ -54,6 +54,7 @@ from .schemas import (
     WorkflowRecipe,
     WorkflowRecipeCreateRequest,
     WorkflowRecipeRunRequest,
+    WorkflowStatus,
 )
 
 forge_cfg.init_logging()
@@ -547,6 +548,22 @@ def index() -> HTMLResponse:
         Pure data access — no aggregates, no rankings, zero storage
         growth.</li>
 
+      <li><b>M42 workflow history by status</b> — one read-only
+        access path, <code>GET /models/&#123;id&#125;/workflows/by-status/&#123;status&#125;</code>,
+        answers "which immutable workflow runs of this model ended
+        with this terminal status?": the model's authoritative M11
+        listing filtered by the persisted top-level status (schema
+        enum completed/failed/stopped — the terminal state recorded
+        at run end by the M7 orchestration), matched VERBATIM —
+        NEVER inferred from stage results, failed stage ids,
+        timestamps, artifact existence or recipe information, never
+        re-executed; full record payloads, exact M11 ordering;
+        unknown model -> 404; an UNSUPPORTED status value -> 422,
+        because statuses have no registry — the enum IS the
+        contract; a valid status with no matching runs for the model
+        -> []). Pure data access — no aggregation, no analytics,
+        zero storage growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -604,6 +621,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/workflows/run</code> — execute one inline workflow plan synchronously</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows</code> — immutable workflow run history</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows/by-recipe/&#123;recipe_id&#125;</code> — workflow runs of ONE model executed from ONE registered recipe (read-only, deterministic, persisted identity verbatim)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/workflows/by-status/&#123;status&#125;</code> — workflow runs of ONE model with ONE terminal status (read-only, deterministic, persisted status verbatim — never recalculated; unsupported status 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows/&#123;run&#125;</code> — one workflow run</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/dashboard</code> — read-only history dashboard incl. sample-quality observability (deterministic, no writes)</li>
       <li><code>POST  {prefix}/policies</code> — register an immutable policy definition (idempotent; conflicts 409)</li>
@@ -1668,7 +1686,8 @@ def get_suite_run(model_id: str, suite_run_id: str) -> SuiteRunRecord:
 
 
 # Workflow routes (Milestone 7 — ordered orchestration over M3–M6;
-# Milestone 35 adds the read-only model-scoped by-recipe grouping of the history)
+# Milestone 35 adds the read-only model-scoped by-recipe grouping of the history;
+# Milestone 42 adds the read-only model-scoped by-status grouping of the history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/workflows/run", response_model=WorkflowRecord, tags=["workflows"])
@@ -1731,6 +1750,40 @@ def list_workflows_by_recipe(model_id: str, recipe_id: str
     "by-recipe" segment is not a workflow id.)"""
     try:
         return _forge().list_workflows_for_recipe(model_id, recipe_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/workflows/by-status/{status}",
+         response_model=list[WorkflowRecord], tags=["workflows"])
+def list_workflows_by_status(model_id: str, status: WorkflowStatus
+                             ) -> list[WorkflowRecord]:
+    """Immutable workflow runs of ONE model with ONE terminal status
+    (M42).
+
+    Read-only per-status grouping: returns the model's authoritative
+    M11 listing filtered by the persisted status recorded in each
+    WorkflowRecord (top-level status — the schema enum completed/
+    failed/stopped, the terminal state persisted at run end by the M7
+    orchestration; matched VERBATIM — membership NEVER comes from
+    inferring or recalculating stage results, failed stage ids,
+    timestamps, artifact existence or recipe information, nothing is
+    re-executed; the persisted value is never resolved or rewritten).
+    Complete verbatim payloads (stages, transitions, terminal_reason,
+    result_hash and recipe provenance included) in the exact M11
+    (created_at, workflow_id) order; a valid status with no matching
+    runs for the model returns []. Statuses have NO registry (unlike
+    the by-recipe axis): the WorkflowStatus enum IS the contract, so
+    an UNSUPPORTED status value is rejected with 422 at the API
+    boundary (schema-level validation — never a registry-style 404,
+    and the validation fires BEFORE this handler even for an unknown
+    model), while an unknown model with a VALID status raises
+    FileNotFoundError -> 404 exactly like the sibling grouping. No
+    aggregation, no analytics, no writes. (Must stay registered
+    before /workflows/{workflow_id}; the literal "by-status" segment
+    is not a workflow id.)"""
+    try:
+        return _forge().list_workflows_for_status(model_id, status)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

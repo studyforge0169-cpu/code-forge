@@ -42,6 +42,7 @@ from .schemas import (
     WorkflowRecord,
     WorkflowRecipe,
     WorkflowRecipeCreateRequest,
+    WorkflowStatus,
     SampleGenerateRequest,
     SampleEvaluationRecord,
     SampleRecord,
@@ -577,6 +578,26 @@ class ModelForge:
         []. Read-only, never writes, never executes anything."""
         return self.workflows.list_workflows_for_recipe(model_id,
                                                         recipe_id)
+
+    def list_workflows_for_status(self, model_id: str,
+                                  status: WorkflowStatus):
+        """Immutable workflow runs of ONE model with ONE terminal
+        status (M42 read-only access).
+
+        The status is the persisted schema enum (completed/failed/
+        stopped) — there is NO status registry, so an unsupported
+        value is rejected at the API boundary with 422, while an
+        unknown model raises FileNotFoundError (404) exactly like the
+        sibling grouping. Returns the model's authoritative M11
+        listing filtered by the persisted top-level status (matched
+        VERBATIM — NEVER inferred from stage results, failed stage
+        ids, timestamps, artifact existence or recipe information;
+        nothing is re-executed) in the M11 (created_at, workflow_id)
+        order, as complete verbatim records. A valid status with no
+        matching runs for the model returns []. Read-only, never
+        writes, never executes anything."""
+        return self.workflows.list_workflows_for_status(model_id,
+                                                        status)
 
     # ------------------------------------------------------------------ #
     # Dashboard (read-only aggregation over immutable histories; M8)

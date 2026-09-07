@@ -185,6 +185,51 @@ class WorkflowEngine:
         self.recipes.get(recipe_id)
         return [w for w in workflows if w.recipe_id == recipe_id]
 
+    def list_workflows_for_status(self, model_id: str,
+                                  status: WorkflowStatus
+                                  ) -> list[WorkflowRecord]:
+        """Immutable M11 workflow runs of ONE model with ONE terminal
+        status (M42; model-scoped).
+
+        Membership comes from the persisted run status identity ONLY:
+        every ``WorkflowRecord`` carries a top-level ``status:
+        WorkflowStatus`` (the THREE-value schema enum persisted at run
+        end by the M7 orchestration: completed = plan executed through
+        its last stage; failed = a stage raised a missing/corrupt/
+        invalid input; stopped = a gate decision failed and no on_fail
+        branch was declared; a mid-flight 'running' state is never
+        observable and deliberately not modelled — synchronous
+        execution persists the manifest only after the run ends), and
+        a run belongs to the request when its persisted ``status``
+        equals the requested value, matched VERBATIM — never inferred
+        from stage results, failed stage ids, workflow timestamps,
+        artifact existence or recipe information, and never
+        recalculated or resolved into another value (the persisted
+        status is the ONLY authority; this method never re-executes
+        or replays anything). Statuses have NO registry (unlike the
+        M35 recipe axis): the enum IS the contract, so an unsupported
+        status value is rejected at the API boundary with 422
+        (schema-level validation — it never even reaches this method),
+        while an unknown model raises FileNotFoundError exactly like
+        the sibling grouping. Each run appears EXACTLY ONCE (the
+        authoritative listing holds each record exactly once). The
+        result is the model's authoritative M11 listing above (the
+        exact engine parse + deterministic (created_at, workflow_id)
+        ASCENDING order) filtered by the persisted status; complete
+        verbatim ``WorkflowRecord`` payloads (stages, transitions,
+        failed_stage_id, terminal_reason, result_hash and recipe
+        provenance included), no rewritten fields. A valid status
+        with no matching runs for the model returns []. Statuses are
+        model-scoped through the listing itself — a model never sees
+        another model's runs. Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API); the status needs
+        # NO registry lookup and is NEVER recalculated — the persisted
+        # field is filtered verbatim
+        return [w for w in self.list_workflows(model_id)
+                if w.status == status]
+
     # ------------------------------------------------------------------ #
     # The run
     # ------------------------------------------------------------------ #

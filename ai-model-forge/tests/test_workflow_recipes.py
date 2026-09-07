@@ -659,7 +659,7 @@ def _http_env(api_client, tag: str):
                     "tokenizer_id": tok, "batch_size": 8,
                     "max_seq_len": 32, "seed": s}
                    for s in (91001, 91002)]})
-    return {"mid": mid, "suite": f"api12-{tag}-suite"}
+    return {"mid": mid, "suite": f"api12-{tag}-suite", "ds": ds, "tok": tok}
 
 
 def _current_suite_stage(sid: str, suite_id: str) -> dict:
@@ -1800,7 +1800,7 @@ def test_m35_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer) + 1 (M34 gate decisions
     # by-comparison) + 1 (M35 workflows by-recipe) = 67
-    assert len(spec["paths"]) == 73
+    assert len(spec["paths"]) == 74
     path = "/api/v1/models/{model_id}/workflows/by-recipe/{recipe_id}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -1814,5 +1814,381 @@ def test_m35_api_404s_isolation_regressions_openapi(api_client):
     assert "post" not in item
     assert keys.index("/api/v1/models/{model_id}/workflows") \
         < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/workflows/{workflow_id}")
+
+
+# =========================================================================== #
+# M42: read-only per-status grouping of the workflow history
+# =========================================================================== #
+
+def _wf_manifest_files(env, model_ids) -> set[str]:
+    out = set()
+    for mid in model_ids:
+        root = env.forge.storage.model_dir(mid) / "workflows"
+        if not root.exists():
+            continue
+        for p in root.rglob("*"):
+            if p.is_file():
+                out.add(f"{mid}:{p.relative_to(root).as_posix()}")
+    return out
+
+
+def _m42_state(env):
+    """M42 state on top of the shared module env (cached): ALL THREE
+    statuses deterministically — one COMPLETED suite run, one FAILED
+    run (a stage referencing an unknown suite; the failure IS
+    persisted), one STOPPED run (a checkpoint-baseline gate whose
+    regressed candidate fails with no on_fail branch) — plus a fresh
+    model with ONE completed run (cross-model isolation partner) and
+    a fresh model with NO workflows (the natural valid-empty case).
+    Returns (w_completed, w_failed, w_stopped, fresh, w_fresh,
+    empty_model).
+    """
+    cached = getattr(env, "_m42", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    w_completed = f.run_workflow(WorkflowPlan(
+        name="m42-done", model_id=env.model_id,
+        stages=[_suite_stage("s1", "m12-suite", ckpt=env.ck_main)]))
+    with pytest.raises(FileNotFoundError):
+        f.run_workflow(WorkflowPlan(
+            name="m42-fail", model_id=env.model_id,
+            stages=[_suite_stage("s1", "m42-no-such-suite", current=True)]))
+    w_failed = f.list_workflows(env.model_id)[-1]
+    w_stopped = f.run_workflow(WorkflowPlan(
+        name="m42-stop", model_id=env.model_id,
+        stages=[WorkflowStage(
+            stage_id="g1", type=StageType.GATE,
+            gate=WorkflowGateStage(
+                policy=GatePolicy(
+                    name="m42-gate", model_id=env.model_id,
+                    dataset_id=env.ds_a, split="validation",
+                    tokenizer_id=env.tok_id, batch_size=8,
+                    max_seq_len=32, seed=4201, tolerance=1e-4,
+                    baseline_type="checkpoint",
+                    baseline_checkpoint_id=env.ck_late),
+                candidate=StageStateRef(
+                    state_kind=EvalStateKind.CHECKPOINT,
+                    checkpoint_id=env.ck_main)))]))
+    fresh = env.fresh_model("m42-fresh")
+    w_fresh = f.run_workflow(WorkflowPlan(
+        name="m42-fresh-run", model_id=fresh,
+        stages=[_suite_stage("s1", "m12-suite", current=True)]))
+    empty_model = env.fresh_model("m42-empty")
+    assert w_completed.status == WorkflowStatus.COMPLETED
+    assert w_failed.status == WorkflowStatus.FAILED
+    assert w_stopped.status == WorkflowStatus.STOPPED
+    assert w_fresh.status == WorkflowStatus.COMPLETED
+    env._m42 = (w_completed, w_failed, w_stopped, fresh, w_fresh,
+                empty_model)
+    return env._m42
+
+
+def test_m42_engine_filters_by_persisted_status_identity(env):
+    w_completed, w_failed, w_stopped, fresh, w_fresh, empty_model = \
+        _m42_state(env)
+    f = env.forge
+    listing = f.list_workflows(env.model_id)
+    for status in (WorkflowStatus.COMPLETED, WorkflowStatus.FAILED,
+                   WorkflowStatus.STOPPED):
+        got = f.list_workflows_for_status(env.model_id, status)
+        # parity with the authoritative M11 listing filtered by the
+        # persisted status; deterministic (created_at, workflow_id)
+        # order; membership from the persisted field only
+        assert got == [w for w in listing if w.status == status]
+        keyed = [(x.created_at, x.workflow_id) for x in got]
+        assert keyed == sorted(keyed)
+        ids = [x.workflow_id for x in got]
+        assert len(ids) == len(set(ids))
+        assert all(x.status == status and x.model_id == env.model_id
+                   for x in got)
+        # verbatim payload parity with the M11 single-record getter
+        for x in got:
+            assert x == f.get_workflow(env.model_id, x.workflow_id)
+    # the fixture's records land in their own groups with the
+    # persisted status VERBATIM (earlier module tests may have added
+    # other runs — membership derives from the listing)
+    got_c = f.list_workflows_for_status(env.model_id,
+                                        WorkflowStatus.COMPLETED)
+    got_f = f.list_workflows_for_status(env.model_id,
+                                        WorkflowStatus.FAILED)
+    got_s = f.list_workflows_for_status(env.model_id,
+                                        WorkflowStatus.STOPPED)
+    assert w_completed.workflow_id in {x.workflow_id for x in got_c}
+    assert w_failed.workflow_id in {x.workflow_id for x in got_f}
+    assert w_stopped.workflow_id in {x.workflow_id for x in got_s}
+    # explicit partition: pairwise-disjoint groups over ALL THREE enum
+    # values whose union is the full listing
+    ids_c = {x.workflow_id for x in got_c}
+    ids_f = {x.workflow_id for x in got_f}
+    ids_s = {x.workflow_id for x in got_s}
+    assert ids_c and ids_f and ids_s
+    assert ids_c.isdisjoint(ids_f) and ids_c.isdisjoint(ids_s)
+    assert ids_f.isdisjoint(ids_s)
+    assert ids_c | ids_f | ids_s == {w.workflow_id for w in listing}
+
+
+def test_m42_engine_empty_404s_model_scoping_read_only(env):
+    w_completed, w_failed, w_stopped, fresh, w_fresh, empty_model = \
+        _m42_state(env)
+    f = env.forge
+    # a model whose ENTIRE M11 listing is empty -> [] for ALL THREE
+    # statuses (the fixture created it with no runs — never 404)
+    assert f.list_workflows(empty_model) == []
+    for status in (WorkflowStatus.COMPLETED, WorkflowStatus.FAILED,
+                   WorkflowStatus.STOPPED):
+        assert f.list_workflows_for_status(empty_model, status) == []
+    # unknown model -> FileNotFoundError (404 at the API); the enum
+    # itself needs NO registry lookup (unsupported values are 422 at
+    # the API boundary and never reach the engine)
+    with pytest.raises(FileNotFoundError):
+        f.list_workflows_for_status("ghost-model-42",
+                                    WorkflowStatus.COMPLETED)
+    # cross-model isolation: both models hold runs, the listings are
+    # disjoint, each group is a subset of its own model's listing,
+    # and the fresh model's failed/stopped groups are the natural
+    # valid-empty (it owns only its completed run)
+    a_ids = {w.workflow_id for w in f.list_workflows(env.model_id)}
+    b_ids = {w.workflow_id for w in f.list_workflows(fresh)}
+    assert a_ids and b_ids and a_ids.isdisjoint(b_ids)
+    for status in (WorkflowStatus.COMPLETED, WorkflowStatus.FAILED,
+                   WorkflowStatus.STOPPED):
+        for mid, ids in ((env.model_id, a_ids), (fresh, b_ids)):
+            group = {x.workflow_id for x in
+                     f.list_workflows_for_status(mid, status)}
+            assert group <= ids
+    assert [x.workflow_id for x in f.list_workflows_for_status(
+        fresh, WorkflowStatus.COMPLETED)] == [w_fresh.workflow_id]
+    assert f.list_workflows_for_status(
+        fresh, WorkflowStatus.FAILED) == []
+    assert f.list_workflows_for_status(
+        fresh, WorkflowStatus.STOPPED) == []
+    # read-only: the filter never writes workflow manifests
+    before = _wf_manifest_files(env, [env.model_id, fresh, empty_model])
+    for status in (WorkflowStatus.COMPLETED, WorkflowStatus.FAILED,
+                   WorkflowStatus.STOPPED):
+        f.list_workflows_for_status(env.model_id, status)
+        f.list_workflows_for_status(fresh, status)
+        f.list_workflows_for_status(empty_model, status)
+    after = _wf_manifest_files(env, [env.model_id, fresh, empty_model])
+    assert after == before
+
+
+def test_m42_engine_repeated_calls_identical(env):
+    w_completed, w_failed, w_stopped, fresh, w_fresh, empty_model = \
+        _m42_state(env)
+    f = env.forge
+    first = [w.model_dump(mode="json") for w in
+             f.list_workflows_for_status(env.model_id,
+                                         WorkflowStatus.COMPLETED)]
+    for _ in range(3):
+        again = [w.model_dump(mode="json") for w in
+                 f.list_workflows_for_status(env.model_id,
+                                             WorkflowStatus.COMPLETED)]
+        assert again == first
+
+
+# --------------------------------------------------------------------------- #
+# M42 API: workflow history by status (read-only grouping, enum contract)
+# --------------------------------------------------------------------------- #
+
+BY_STATUS = "/api/v1/models/{mid}/workflows/by-status/{status}"
+
+
+def _m42_gate_stage_dict(mid, ds, tok) -> dict:
+    """A minimum-loss gate over the model's CURRENT state with an
+    impossible ceiling: the decision fails deterministically and the
+    run (no on_fail branch) STOPs."""
+    return {"stage_id": "g1", "type": "gate",
+            "gate": {"policy": {
+                "name": "api42-gate", "model_id": mid, "dataset_id": ds,
+                "split": "validation", "tokenizer_id": tok,
+                "batch_size": 8, "max_seq_len": 32, "seed": 4202,
+                "tolerance": 1e-4, "baseline_type": "minimum_loss",
+                "minimum_loss": 1e-9},
+                "candidate": {"state_kind": "current"}}}
+
+
+def test_m42_api_by_status_grouping_partition_determinism(api_client):
+    h = _http_env(api_client, "m42a")
+    mid, suite = h["mid"], h["suite"]
+    # one run per status: completed (current-state suite run),
+    # stopped (impossible minimum-loss ceiling, no on_fail), failed
+    # (unknown suite at run time — the failure IS persisted)
+    w_c = api_client.post("/api/v1/workflows/run", json={
+        "name": "m42-done", "model_id": mid,
+        "stages": [_current_suite_stage("s1", suite)]}).json()
+    w_s = api_client.post("/api/v1/workflows/run", json={
+        "name": "m42-stop", "model_id": mid,
+        "stages": [_m42_gate_stage_dict(mid, h["ds"], h["tok"])]}).json()
+    n_before = len(api_client.get(f"{MODELS}/{mid}/workflows").json())
+    r = api_client.post("/api/v1/workflows/run", json={
+        "name": "m42-fail", "model_id": mid,
+        "stages": [_current_suite_stage("s1", "m42-no-such-suite")]})
+    assert r.status_code == 404                     # missing input
+    listing = api_client.get(f"{MODELS}/{mid}/workflows").json()
+    assert len(listing) == n_before + 1
+    w_f = listing[-1]
+    assert w_c["status"] == "completed"
+    assert w_s["status"] == "stopped"
+    assert w_f["status"] == "failed" and w_f["failed_stage_id"] == "s1"
+
+    # groups for ALL THREE statuses: authoritative-filter parity,
+    # ordering, verbatim detail-getter payloads
+    for status in ("completed", "failed", "stopped"):
+        got = api_client.get(BY_STATUS.format(mid=mid, status=status))
+        assert got.status_code == 200, got.text
+        recs = got.json()
+        assert recs == [x for x in listing if x["status"] == status]
+        keyed = [(x["created_at"], x["workflow_id"]) for x in recs]
+        assert keyed == sorted(keyed)
+        for x in recs:
+            one = api_client.get(
+                f"{MODELS}/{mid}/workflows/{x['workflow_id']}")
+            assert one.status_code == 200 and one.json() == x
+    # deterministic: three repeats per status return identical bytes
+    for status in ("completed", "failed", "stopped"):
+        raws = {api_client.get(
+            BY_STATUS.format(mid=mid, status=status)).content
+                for _ in range(3)}
+        assert len(raws) == 1
+    # partition: the three groups are pairwise disjoint and cover the
+    # full listing exactly
+    ids = {st: {x["workflow_id"] for x in api_client.get(
+        BY_STATUS.format(mid=mid, status=st)).json()}
+        for st in ("completed", "failed", "stopped")}
+    assert ids["completed"].isdisjoint(ids["failed"])
+    assert ids["completed"].isdisjoint(ids["stopped"])
+    assert ids["failed"].isdisjoint(ids["stopped"])
+    assert ids["completed"] | ids["failed"] | ids["stopped"] == \
+        {x["workflow_id"] for x in listing}
+    assert w_c["workflow_id"] in ids["completed"]
+    assert w_f["workflow_id"] in ids["failed"]
+    assert w_s["workflow_id"] in ids["stopped"]
+    # no execution side effects: the filter itself added no runs
+    assert len(api_client.get(
+        f"{MODELS}/{mid}/workflows").json()) == n_before + 1
+
+
+def test_m42_api_by_status_404_422s_isolation_regressions_openapi(
+        api_client):
+    h = _http_env(api_client, "m42b")
+    mid, suite = h["mid"], h["suite"]
+    other = _http_env(api_client, "m42c")     # second real model
+    stage = _current_suite_stage("s1", suite)
+    w1 = api_client.post("/api/v1/workflows/run", json={
+        "name": "m42-one", "model_id": mid,
+        "stages": [stage]}).json()
+
+    # 404: unknown model with a VALID status (exactly like the
+    # sibling grouping)
+    assert api_client.get(BY_STATUS.format(
+        mid="ghost-model-42", status="completed")).status_code == 404
+    # 422: unsupported status values are rejected by the schema enum
+    # at the API boundary — before the handler, so the 422 wins even
+    # for an UNKNOWN model (never a registry-style 404, never []; the
+    # mid-flight 'running' value is deliberately NOT modelled)
+    for bad in ("COMPLETED", "compl%20eted", "1", "running"):
+        got = api_client.get(BY_STATUS.format(mid=mid, status=bad))
+        assert got.status_code == 422, (bad, got.status_code)
+    assert api_client.get(BY_STATUS.format(
+        mid="ghost-model-42", status="running")).status_code == 422
+
+    # cross-model isolation: the other model has NO workflows, so all
+    # three groups are the natural valid empty
+    for status in ("completed", "failed", "stopped"):
+        iso = api_client.get(BY_STATUS.format(mid=other["mid"],
+                                              status=status))
+        assert iso.status_code == 200 and iso.json() == []
+
+    # M11 listing/getter intact; the generic detail getter still 404s
+    # ghost ids (no route capture by the new literal segment)
+    listing = api_client.get(f"{MODELS}/{mid}/workflows").json()
+    assert [x["workflow_id"] for x in listing] == [w1["workflow_id"]]
+    assert api_client.get(
+        f"{MODELS}/{mid}/workflows/{w1['workflow_id']}").json() == w1
+    assert api_client.get(
+        f"{MODELS}/{mid}/workflows/ghost-wf-42").status_code == 404
+
+    # M35 by-recipe regression: register + run a recipe, the
+    # by-recipe group is exactly the recipe-attributed runs with
+    # listing parity (ad-hoc runs never appear)
+    assert api_client.post(RECIPES, json={
+        "recipe_id": "api42-r1", "description": "d",
+        "stages": [stage]}).status_code == 201
+    wr = api_client.post(RUNS.format(rid="api42-r1"),
+                         json={"model_id": mid}).json()
+    listing = api_client.get(f"{MODELS}/{mid}/workflows").json()
+    byrec = api_client.get(
+        f"{MODELS}/{mid}/workflows/by-recipe/api42-r1")
+    assert byrec.status_code == 200
+    assert byrec.json() == [x for x in listing
+                            if x["recipe_id"] == "api42-r1"]
+    assert [x["workflow_id"] for x in byrec.json()] == \
+        [wr["workflow_id"]]
+    # and the by-status view of the same listing stays coherent
+    assert api_client.get(BY_STATUS.format(
+        mid=mid, status="completed")).json() == \
+        [x for x in listing if x["status"] == "completed"]
+
+    # M41 gate-decision by-decision regression: this harness has no
+    # gate decisions, so both groups are the natural valid empty with
+    # listing parity
+    gds = api_client.get(f"{MODELS}/{mid}/gates/decisions").json()
+    assert gds == []
+    for decision in ("passed", "failed"):
+        g = api_client.get(
+            f"{MODELS}/{mid}/gates/decisions/by-decision/{decision}")
+        assert g.status_code == 200
+        assert g.json() == [d for d in gds
+                            if d["decision"] == decision]
+    # M40 samples-by-strategy regression: natural valid empty too
+    samples = api_client.get(f"{MODELS}/{mid}/samples").json()
+    assert samples == []
+    for strategy in ("greedy", "temperature"):
+        g = api_client.get(
+            f"{MODELS}/{mid}/samples/by-strategy/{strategy}")
+        assert g.status_code == 200
+        assert g.json() == [x for x in samples
+                            if x["strategy"] == strategy]
+
+    # OpenAPI: 74 paths, the new path exactly once, GET-only, tag
+    # workflows, WorkflowRecord items, status $ref WorkflowStatus;
+    # route order M35 by-recipe < by-status < generic detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer)
+    # + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer)
+    # + 1 (M34 gate decisions by-comparison)
+    # + 1 (M35 workflows by-recipe)
+    # + 1 (M36 evaluations by-split)
+    # + 1 (M37 comparisons by-split)
+    # + 1 (M38 evaluations by-state-kind)
+    # + 1 (M39 comparisons by-verdict)
+    # + 1 (M40 samples by-strategy)
+    # + 1 (M41 gate decisions by-decision)
+    # + 1 (M42 workflows by-status) = 74
+    assert len(spec["paths"]) == 74
+    path = "/api/v1/models/{model_id}/workflows/by-status/{status}"
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["workflows"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/WorkflowRecord"}
+    status_param = [p for p in item["get"]["parameters"]
+                    if p["name"] == "status"][0]
+    assert status_param["schema"] == {
+        "$ref": "#/components/schemas/WorkflowStatus"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/workflows/by-recipe/"
+                      "{recipe_id}") < keys.index(path)
     assert keys.index(path) < keys.index(
         "/api/v1/models/{model_id}/workflows/{workflow_id}")

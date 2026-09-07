@@ -615,8 +615,9 @@ def test_m23_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M38 evaluations by-state-kind)
     # + 1 (M39 comparisons by-verdict)
     # + 1 (M40 samples by-strategy)
-    # + 1 (M41 gate decisions by-decision) = 73
-    assert len(spec["paths"]) == 73
+    # + 1 (M41 gate decisions by-decision)
+    # + 1 (M42 workflows by-status) = 74
+    assert len(spec["paths"]) == 74
 
 
 # --------------------------------------------------------------------------- #
@@ -782,7 +783,7 @@ def test_m34_api_404s_isolation_regressions_openapi(api_client):
                           f"{tok}").json()
     assert cmpt == [c for c in comps if c["tokenizer_id"] == tok]
 
-    # OpenAPI: 73 paths, the new path exactly once, GET-only, tag
+    # OpenAPI: 74 paths, the new path exactly once, GET-only, tag
     # gates, GateDecision items; route order M23 by-policy <
     # by-comparison < generic decision detail
     spec = api_client.get("/openapi.json").json()
@@ -797,8 +798,9 @@ def test_m34_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M38 evaluations by-state-kind)
     # + 1 (M39 comparisons by-verdict)
     # + 1 (M40 samples by-strategy)
-    # + 1 (M41 gate decisions by-decision) = 73
-    assert len(spec["paths"]) == 73
+    # + 1 (M41 gate decisions by-decision)
+    # + 1 (M42 workflows by-status) = 74
+    assert len(spec["paths"]) == 74
     path = ("/api/v1/models/{model_id}/gates/decisions/by-comparison"
             "/{comparison_id}")
     keys = list(spec["paths"])
@@ -972,7 +974,7 @@ def test_m41_api_by_decision_404_422s_isolation_regressions_openapi(
         assert g.json() == [x for x in samples
                             if x["strategy"] == strategy]
 
-    # OpenAPI: 73 paths, the new path exactly once, GET-only, tag
+    # OpenAPI: 74 paths, the new path exactly once, GET-only, tag
     # gates, GateDecision items, decision $ref GateDecisionResult;
     # route order M34 by-comparison < by-decision < generic detail
     spec = api_client.get("/openapi.json").json()
@@ -988,8 +990,9 @@ def test_m41_api_by_decision_404_422s_isolation_regressions_openapi(
     # + 1 (M38 evaluations by-state-kind)
     # + 1 (M39 comparisons by-verdict)
     # + 1 (M40 samples by-strategy)
-    # + 1 (M41 gate decisions by-decision) = 73
-    assert len(spec["paths"]) == 73
+    # + 1 (M41 gate decisions by-decision)
+    # + 1 (M42 workflows by-status) = 74
+    assert len(spec["paths"]) == 74
     path = ("/api/v1/models/{model_id}/gates/decisions/by-decision/"
             "{decision}")
     keys = list(spec["paths"])

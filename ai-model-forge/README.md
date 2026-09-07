@@ -1652,11 +1652,59 @@ generation never trains, evaluates, scores, ranks or judges output.
   by-policy, M34 by-comparison, M40 samples-by-strategy and the
   M16–M40 surfaces are byte-identical before and after
 
+### Milestone 42 — workflow history by status
+  (`workflows/by-status`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/workflows/by-status/{status}` — answers "which
+  immutable workflow runs of this model ended with this terminal
+  status?" and nothing else
+- **exact filtering (persisted status identity)**: every
+  `WorkflowRecord` carries a top-level `status` (the schema enum
+  completed/failed/stopped — the terminal state persisted at run end
+  by the M7 orchestration: completed = plan executed through its
+  last stage; failed = a stage raised a missing/corrupt/invalid
+  input; stopped = a gate decision failed and no on_fail branch was
+  declared; a mid-flight 'running' state is deliberately never
+  modelled), and a run belongs to the request only when that
+  persisted value matches VERBATIM — never inferred from stage
+  results, failed stage ids, workflow timestamps, artifact existence
+  or recipe information, never recalculated or rewritten, nothing
+  re-executed. Each matching run appears EXACTLY ONCE; verbatim
+  `WorkflowRecord` payloads (stages, transitions, terminal_reason,
+  result_hash and recipe provenance included) in the exact M11
+  authoritative order ((created_at, workflow_id) ASCENDING)
+- **the 422-vs-404 contract (no status registry)**: statuses are a
+  SCHEMA ENUM, not a registry — unlike the M35 recipe axis there is
+  nothing to 404 for an unsupported status value, so it is rejected
+  with 422 by schema validation at the API boundary (before the
+  handler, matching M36–M41: even unknown-model + invalid-status is
+  422); unknown model with a VALID status -> existing 404; a valid
+  status with zero matching runs is a deterministic `[]` — never a
+  404 (production currently holds completed -> 9 / failed -> 3 /
+  stopped -> 1 for `4a0a871886ef` — all three groups non-empty;
+  every status of `b5bc905326b6` is a natural valid-empty case)
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_workflows_for_status(model_id, status)` filters the
+  authoritative M11 `list_workflows()` by the persisted `status`
+  (ZERO new composition lines — no registry handle is needed, and
+  the orchestration run path is never invoked); the facade and route
+  are thin pass-throughs registered after the M35 by-recipe route
+  and **before** the generic `/workflows/{workflow_id}` detail
+  getter (M35/M42 are different groupings of the same listing, both
+  intact). No caches, no new storage — repeated GETs are
+  byte-identical and the endpoint never writes
+- **isolation & boundaries**: unknown model -> existing 404;
+  unsupported status value -> 422; valid status without matching
+  runs -> `[]`. M7 (run, listing, getter), M12/M14 recipes + the
+  GLOBAL recipe-runs lineage, M35 by-recipe, M41 gate
+  decisions-by-decision and the M16–M41 surfaces are byte-identical
+  before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 515 tests
+pytest                       # 520 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2144,6 +2192,7 @@ ai-model-forge/
                        # + read-only by-policy/by-comparison/by-decision
                        #   grouping (M23/M34/M41)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
+                       # + read-only by-recipe/by-status grouping (M35/M42)
     dashboards.py      # read-only dashboard engine: deterministic views (M8/M13)
     policies.py        # policy registry + probe suites: immutable definitions (M9)
     suite_runs.py      # explicit multi-probe M4 batches over named suites (M10)
@@ -2156,7 +2205,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 515 tests across 20 suites
+  tests/               # 520 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
