@@ -44,6 +44,7 @@ from .schemas import (
     SampleGenerateRequest,
     SampleEvaluationRecord,
     SampleRecord,
+    SampleStrategy,
     TokenizerConfig,
     TransformerConfig,
     utcnow,
@@ -753,6 +754,26 @@ class ModelForge:
         model returns []. Read-only, never writes."""
         return self.samples.list_samples_for_tokenizer(
             model_id, tokenizer_id)
+
+    def list_samples_for_strategy(self, model_id: str,
+                                  strategy: SampleStrategy
+                                  ) -> list[SampleRecord]:
+        """Immutable M15 samples of ONE model generated with ONE
+        decoding strategy (M40 read-only access).
+
+        The strategy is the persisted schema enum (greedy/temperature)
+        — there is NO strategy registry, so an unsupported value is
+        rejected at the API boundary with 422, while an unknown model
+        raises FileNotFoundError (404) exactly like the sibling
+        groupings. Returns the model's authoritative M15 listing
+        filtered by the persisted top-level strategy (matched VERBATIM
+        — NEVER recalculated from temperature, seed or any other
+        field; no sample is regenerated) in the M15 (created_at,
+        sample_id) order, as complete verbatim records. A valid
+        strategy with no samples for the model returns []. Read-only,
+        never writes."""
+        return self.samples.list_samples_for_strategy(model_id,
+                                                      strategy)
 
     # ------------------------------------------------------------------ #
     # Sample quality (per-sample likelihood measurement; M16)

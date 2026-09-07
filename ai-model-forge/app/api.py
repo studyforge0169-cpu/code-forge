@@ -41,6 +41,7 @@ from .schemas import (
     SampleGenerateRequest,
     SampleEvaluationRecord,
     SampleRecord,
+    SampleStrategy,
     RollbackRequest,
     TokenizerConfig,
     TrainingConfig,
@@ -515,6 +516,20 @@ def index() -> HTMLResponse:
         model -> []). Pure data access — no aggregates, no generation,
         zero storage growth.</li>
 
+      <li><b>M40 sample history by strategy</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/samples/by-strategy/&#123;strategy&#125;</code>,
+        answers "which immutable M15 samples of this model were
+        generated with this decoding strategy?": the model's
+        authoritative M15 listing filtered by the persisted top-level
+        strategy (schema enum greedy/temperature, persisted verbatim
+        at generation time), matched VERBATIM — NEVER recalculated
+        from temperature, seed or any other field, never regenerated;
+        full record payloads, exact M15 ordering; unknown model ->
+        404; an UNSUPPORTED strategy value -> 422, because strategies
+        have no registry — the enum IS the contract; a valid strategy
+        with no samples for the model -> []). Pure data access — no
+        aggregates, no scoring, zero storage growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -560,6 +575,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-split/&#123;split&#125;</code> — comparisons of ONE model on ONE dataset split (read-only, deterministic, persisted shared-probe split verbatim; unsupported split 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-verdict/&#123;verdict&#125;</code> — comparisons of ONE model with ONE verdict (read-only, deterministic, persisted verdict verbatim — never recalculated; unsupported verdict 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-tokenizer/&#123;tok&#125;</code> — samples of ONE model generated with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-strategy/&#123;strategy&#125;</code> — samples of ONE model generated with ONE decoding strategy (read-only, deterministic, persisted strategy verbatim — never recalculated; unsupported strategy 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tok&#125;</code> — M16 sample-quality measurements of ONE model under ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/&#123;comp&#125;</code> — one comparison record</li>
       <li><code>POST  {prefix}/gates/evaluate</code> — stage gate: policy + candidate → passed / failed decision</li>
@@ -1768,7 +1784,8 @@ def run_workflow_recipe(recipe_id: str,
 # --------------------------------------------------------------------------- #
 # Checkpoint sampling (Milestone 15 — deterministic text generation, inference;
 # Milestone 27 adds the read-only by-checkpoint grouping of the sample history;
-# Milestone 32 adds the read-only by-tokenizer grouping of the sample history)
+# Milestone 32 adds the read-only by-tokenizer grouping of the sample history;
+# Milestone 40 adds the read-only by-strategy grouping of the sample history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/samples/generate", response_model=SampleRecord,
@@ -1863,6 +1880,40 @@ def list_samples_by_tokenizer(model_id: str, tokenizer_id: str
     sample id.)"""
     try:
         return _forge().list_samples_for_tokenizer(model_id, tokenizer_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/samples/by-strategy/{strategy}",
+         response_model=list[SampleRecord], tags=["sampling"])
+def list_samples_by_strategy(model_id: str, strategy: SampleStrategy
+                             ) -> list[SampleRecord]:
+    """Immutable M15 samples of ONE model generated with ONE decoding
+    strategy (M40).
+
+    Read-only per-strategy grouping: returns the model's authoritative
+    M15 listing filtered by the persisted strategy recorded in each
+    SampleRecord (top-level strategy — the schema enum
+    greedy/temperature, persisted verbatim at generation time from the
+    explicit request; matched VERBATIM — membership NEVER comes from
+    sample ids, prompt text, generated token ids, temperature values,
+    seed presence, filenames or manifest paths, and the strategy is
+    NEVER recalculated from temperature/seed/other fields; no sample
+    is regenerated). Complete verbatim payloads (prompt, token ids,
+    output text, temperature, result_hash included) in the exact M15
+    (created_at, sample_id) order; a valid strategy with no samples
+    for the model returns []. Strategies have NO registry (unlike the
+    by-checkpoint/by-tokenizer axes): the SampleStrategy enum IS the
+    contract, so an UNSUPPORTED strategy value is rejected with 422 at
+    the API boundary (schema-level validation — never a registry-style
+    404, and the validation fires BEFORE this handler even for an
+    unknown model), while an unknown model with a VALID strategy
+    raises FileNotFoundError -> 404 exactly like the sibling
+    groupings. No aggregates, no scoring, no writes. (Must stay
+    registered before /samples/{sample_id}; the literal "by-strategy"
+    segment is not a sample id.)"""
+    try:
+        return _forge().list_samples_for_strategy(model_id, strategy)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

@@ -34,6 +34,7 @@ from app.sampling import SamplingEngine
 from app.schemas import (
     ModelCreateRequest,
     SampleGenerateRequest,
+    SampleStrategy,
     TokenizerConfig,
     TrainingConfig,
     TransformerConfig,
@@ -781,12 +782,12 @@ def test_m27_api_404s_isolation_regressions_openapi(api_client):
     cmp_ = api_client.get(f"{MODELS}/{h['mid']}/comparisons/"
                           f"by-checkpoint/{h['ckpt']}")
     assert cmp_.status_code == 200 and cmp_.json() == []
-    # OpenAPI: 71 paths, the new path exactly once, GET-only, sampling
+    # OpenAPI: 72 paths, the new path exactly once, GET-only, sampling
     # tag, array of SampleRecord, registered before the generic route
     spec = api_client.get("/openapi.json").json()
     path = "/api/v1/models/{model_id}/samples/by-checkpoint/{checkpoint_id}"
     generic = "/api/v1/models/{model_id}/samples/{sample_id}"
-    assert len(spec["paths"]) == 71
+    assert len(spec["paths"]) == 72
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["sampling"]
@@ -1064,8 +1065,9 @@ def test_m32_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M37 comparisons by-split)
     # + 1 (M38 evaluations by-state-kind)
     # + 1 (M39 comparisons by-verdict)
-    # = 71
-    assert len(spec["paths"]) == 71
+    # + 1 (M40 samples by-strategy)
+    # = 72
+    assert len(spec["paths"]) == 72
     path = ("/api/v1/models/{model_id}/samples/by-tokenizer"
             "/{tokenizer_id}")
     keys = list(spec["paths"])
@@ -1080,5 +1082,287 @@ def test_m32_api_404s_isolation_regressions_openapi(api_client):
     assert "post" not in item
     assert keys.index("/api/v1/models/{model_id}/samples/by-checkpoint/"
                       "{checkpoint_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/samples/{sample_id}")
+
+
+# --------------------------------------------------------------------------- #
+# M40: sample history by strategy (read-only grouping, enum contract)
+# --------------------------------------------------------------------------- #
+
+def _m40_state(env):
+    """M40 state on top of the shared module env (cached): BOTH
+    strategies on the big model (greedy x1 + temperature x1 — earlier
+    module tests' samples may not exist when tests are deselected),
+    plus a fresh model with NO samples at all (the natural valid-empty
+    case for both strategies). Returns (s_greedy, s_temp, empty_model).
+    """
+    cached = getattr(env, "_m40", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    s_greedy = f.generate_sample(_g(env))
+    s_temp = f.generate_sample(_g(env, strategy="temperature",
+                                  temperature=0.8, seed=40,
+                                  max_new_tokens=6))
+    empty_model = f.create_model(ModelCreateRequest(
+        config=_tiny_model("m40-empty", 300, seed=41)))[0].id
+    env._m40 = (s_greedy, s_temp, empty_model)
+    return env._m40
+
+
+def test_m40_engine_filters_by_persisted_strategy_identity(env):
+    s_greedy, s_temp, empty_model = _m40_state(env)
+    f = env.forge
+    assert s_greedy.strategy == SampleStrategy.GREEDY
+    assert s_temp.strategy == SampleStrategy.TEMPERATURE
+    listing = f.list_samples(env.big_model)
+    for strategy in (SampleStrategy.GREEDY, SampleStrategy.TEMPERATURE):
+        got = f.list_samples_for_strategy(env.big_model, strategy)
+        # parity with the authoritative M15 listing filtered by the
+        # persisted strategy; deterministic (created_at, sample_id)
+        # order; membership from the persisted field only
+        assert got == [r for r in listing if r.strategy == strategy]
+        keyed = [(r.created_at, r.sample_id) for r in got]
+        assert keyed == sorted(keyed)
+        ids = [r.sample_id for r in got]
+        assert len(ids) == len(set(ids))
+        assert all(r.strategy == strategy
+                   and r.model_id == env.big_model for r in got)
+        # verbatim payload parity with the M15 single-record getter
+        for r in got:
+            assert r == f.get_sample(env.big_model, r.sample_id)
+    # the fixture's records land in their own groups with the persisted
+    # strategy VERBATIM (earlier module tests may have added other
+    # samples — membership derives from the listing); greedy records
+    # persist temperature=None (the strategy is never inferred from it)
+    got_g = f.list_samples_for_strategy(env.big_model,
+                                        SampleStrategy.GREEDY)
+    got_t = f.list_samples_for_strategy(env.big_model,
+                                        SampleStrategy.TEMPERATURE)
+    assert s_greedy.sample_id in {r.sample_id for r in got_g}
+    assert s_temp.sample_id in {r.sample_id for r in got_t}
+    assert all(r.temperature is None for r in got_g)
+    # explicit partition: disjoint groups over BOTH enum values whose
+    # union is the full listing
+    ids_g = {r.sample_id for r in got_g}
+    ids_t = {r.sample_id for r in got_t}
+    assert ids_g and ids_t
+    assert ids_g.isdisjoint(ids_t)
+    assert ids_g | ids_t == {r.sample_id for r in listing}
+
+
+def test_m40_engine_empty_404s_model_scoping_read_only(env):
+    s_greedy, s_temp, empty_model = _m40_state(env)
+    f = env.forge
+    # a model whose ENTIRE M15 listing is empty -> [] for BOTH enum
+    # values (the fixture created it with no samples at all — never a
+    # 404)
+    assert f.list_samples(empty_model) == []
+    for strategy in (SampleStrategy.GREEDY, SampleStrategy.TEMPERATURE):
+        assert f.list_samples_for_strategy(empty_model, strategy) == []
+    # unknown model -> FileNotFoundError (404 at the API); the enum
+    # itself needs NO registry lookup (unsupported values are 422 at
+    # the API boundary and never reach the engine)
+    with pytest.raises(FileNotFoundError):
+        f.list_samples_for_strategy("ghost-model-40",
+                                    SampleStrategy.GREEDY)
+    # cross-model isolation: each model's group is a subset of its own
+    # listing and the two listings are disjoint
+    big_ids = {r.sample_id for r in f.list_samples(env.big_model)}
+    small_ids = {r.sample_id for r in f.list_samples(env.small_model)}
+    assert big_ids.isdisjoint(small_ids)
+    for strategy in (SampleStrategy.GREEDY, SampleStrategy.TEMPERATURE):
+        for mid, ids in ((env.big_model, big_ids),
+                         (env.small_model, small_ids)):
+            group = {r.sample_id for r in
+                     f.list_samples_for_strategy(mid, strategy)}
+            assert group <= ids
+    # read-only: the filter never writes sample manifests (the samples
+    # root is shared across models)
+    root = f.storage.root / "samples"
+    before = {p.relative_to(root).as_posix()
+              for p in root.rglob("*") if p.is_file()}
+    for strategy in (SampleStrategy.GREEDY, SampleStrategy.TEMPERATURE):
+        f.list_samples_for_strategy(env.big_model, strategy)
+        f.list_samples_for_strategy(env.small_model, strategy)
+        f.list_samples_for_strategy(empty_model, strategy)
+    after = {p.relative_to(root).as_posix()
+             for p in root.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_m40_engine_repeated_calls_identical(env):
+    s_greedy, s_temp, empty_model = _m40_state(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_samples_for_strategy(env.big_model,
+                                         SampleStrategy.GREEDY)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_samples_for_strategy(env.big_model,
+                                             SampleStrategy.GREEDY)]
+        assert again == first
+
+
+# --------------------------------------------------------------------------- #
+# M40 API: sample history by strategy (read-only grouping, enum contract)
+# --------------------------------------------------------------------------- #
+
+def test_m40_api_by_strategy_grouping_partition_determinism(api_client):
+    h = _http_env(api_client, "m40a")
+    # one record per strategy on each side: greedy x2 (different
+    # prompts) + temperature x1
+    s_g1 = api_client.post(GENERATE, json=_gen_body(h)).json()
+    s_g2 = api_client.post(
+        GENERATE, json=_gen_body(h, prompt=PROMPT_API + " valley")).json()
+    s_t1 = api_client.post(
+        GENERATE, json=_gen_body(h, strategy="temperature",
+                                 temperature=0.8, seed=40)).json()
+    assert {s_g1["strategy"], s_g2["strategy"]} == {"greedy"}
+    assert s_t1["strategy"] == "temperature"
+
+    listing = api_client.get(f"{MODELS}/{h['mid']}/samples").json()
+    assert len(listing) == 3
+    url = f"{MODELS}/{h['mid']}/samples/by-strategy"
+    got = api_client.get(f"{url}/greedy")
+    assert got.status_code == 200, got.text
+    recs = got.json()
+    # authoritative-filter parity: exact subset of the M15 listing
+    # whose persisted strategy matches, in the same order
+    assert recs == [r for r in listing if r["strategy"] == "greedy"]
+    assert {r["sample_id"] for r in recs} == \
+        {s_g1["sample_id"], s_g2["sample_id"]}
+    keyed = [(r["created_at"], r["sample_id"]) for r in recs]
+    assert keyed == sorted(keyed)
+    # verbatim: each element equals its detail-getter payload (prompt,
+    # token ids, output text, temperature included)
+    for r in recs:
+        one = api_client.get(
+            f"{MODELS}/{h['mid']}/samples/{r['sample_id']}")
+        assert one.status_code == 200 and one.json() == r
+    # deterministic: three repeats return identical raw bytes
+    for strategy in ("greedy", "temperature"):
+        raws = {api_client.get(f"{url}/{strategy}").content
+                for _ in range(3)}
+        assert len(raws) == 1
+    # partition: the two groups are disjoint and cover the listing
+    recs_t = api_client.get(f"{url}/temperature").json()
+    assert recs_t == [r for r in listing
+                      if r["strategy"] == "temperature"]
+    assert [r["sample_id"] for r in recs_t] == [s_t1["sample_id"]]
+    ids_g = {r["sample_id"] for r in recs}
+    ids_t = {r["sample_id"] for r in recs_t}
+    assert ids_g.isdisjoint(ids_t)
+    assert ids_g | ids_t == {r["sample_id"] for r in listing}
+    # no execution side effects: the filter itself added no records
+    assert len(api_client.get(
+        f"{MODELS}/{h['mid']}/samples").json()) == 3
+
+
+def test_m40_api_by_strategy_404_422s_isolation_regressions_openapi(
+        api_client):
+    h = _http_env(api_client, "m40b")
+    other = _http_env(api_client, "m40c")
+    s = api_client.post(GENERATE, json=_gen_body(h)).json()
+    url = f"{MODELS}/{h['mid']}/samples/by-strategy/"
+
+    # 404: unknown model with a VALID strategy (exactly like the
+    # sibling groupings)
+    assert api_client.get(
+        f"{MODELS}/ghost-model-40/samples/by-strategy/greedy"
+    ).status_code == 404
+    # 422: unsupported strategy values are rejected by the schema enum
+    # at the API boundary — before the handler, so the 422 wins even
+    # for an UNKNOWN model (never a registry-style 404, never [])
+    for bad in ("GREEDY", "temp%20erature", "3", "top_k"):
+        got = api_client.get(url + bad)
+        assert got.status_code == 422, (bad, got.status_code)
+    assert api_client.get(
+        f"{MODELS}/ghost-model-40/samples/by-strategy/top_k"
+    ).status_code == 422
+
+    # cross-model isolation: the other model's group is empty under
+    # BOTH strategies (scoping from the model's own listing)
+    for strategy in ("greedy", "temperature"):
+        iso = api_client.get(
+            f"{MODELS}/{other['mid']}/samples/by-strategy/{strategy}")
+        assert iso.status_code == 200 and iso.json() == []
+
+    # M15 listing/getter intact; the generic detail getter still 404s
+    # ghost ids (no route capture by the new literal segment)
+    listing = api_client.get(f"{MODELS}/{h['mid']}/samples").json()
+    assert [r["sample_id"] for r in listing] == [s["sample_id"]]
+    assert api_client.get(
+        f"{MODELS}/{h['mid']}/samples/{s['sample_id']}").json() == s
+    assert api_client.get(
+        f"{MODELS}/{h['mid']}/samples/ghost-sample-40"
+    ).status_code == 404
+
+    # M27 by-checkpoint / M32 by-tokenizer regressions: same listing,
+    # other groupings, unconfused (listing-derived parity)
+    byck = api_client.get(
+        f"{MODELS}/{h['mid']}/samples/by-checkpoint/{h['ckpt']}")
+    assert byck.status_code == 200
+    assert byck.json() == [r for r in listing
+                           if r["checkpoint_id"] == h["ckpt"]]
+    bytk = api_client.get(
+        f"{MODELS}/{h['mid']}/samples/by-tokenizer/{h['tok']}")
+    assert bytk.status_code == 200
+    assert bytk.json() == [r for r in listing
+                           if r["tokenizer_id"] == h["tok"]]
+    # M38 evaluations-by-state-kind regression: this harness's
+    # training run persists no M4 evaluation records, so both kinds
+    # are the natural valid-empty case with listing parity
+    evs = api_client.get(f"{MODELS}/{h['mid']}/evaluations").json()
+    assert evs == []
+    for kind in ("current", "checkpoint"):
+        g = api_client.get(
+            f"{MODELS}/{h['mid']}/evaluations/by-state-kind/{kind}")
+        assert g.status_code == 200
+        assert g.json() == [e for e in evs if e["state_kind"] == kind]
+    # M39 comparisons-by-verdict regression: the model has no
+    # comparisons, so every verdict group is the natural valid empty
+    comps = api_client.get(f"{MODELS}/{h['mid']}/comparisons").json()
+    assert comps == []
+    for v in ("improved", "regressed", "unchanged"):
+        g = api_client.get(
+            f"{MODELS}/{h['mid']}/comparisons/by-verdict/{v}")
+        assert g.status_code == 200 and g.json() == []
+
+    # OpenAPI: 72 paths, the new path exactly once, GET-only, tag
+    # sampling, SampleRecord items, strategy $ref SampleStrategy; route
+    # order M32 by-tokenizer < by-strategy < generic detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30 evaluations by-tokenizer)
+    # + 1 (M31 comparisons by-tokenizer)
+    # + 1 (M32 samples by-tokenizer)
+    # + 1 (M33 sample-quality by-tokenizer)
+    # + 1 (M34 gate decisions by-comparison)
+    # + 1 (M35 workflows by-recipe)
+    # + 1 (M36 evaluations by-split)
+    # + 1 (M37 comparisons by-split)
+    # + 1 (M38 evaluations by-state-kind)
+    # + 1 (M39 comparisons by-verdict)
+    # + 1 (M40 samples by-strategy) = 72
+    assert len(spec["paths"]) == 72
+    path = "/api/v1/models/{model_id}/samples/by-strategy/{strategy}"
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["sampling"]
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/SampleRecord"}
+    strategy_param = [p for p in item["get"]["parameters"]
+                      if p["name"] == "strategy"][0]
+    assert strategy_param["schema"] == {
+        "$ref": "#/components/schemas/SampleStrategy"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/samples/by-tokenizer/"
+                      "{tokenizer_id}") < keys.index(path)
     assert keys.index(path) < keys.index(
         "/api/v1/models/{model_id}/samples/{sample_id}")

@@ -1557,11 +1557,59 @@ generation never trains, evaluates, scores, ranks or judges output.
   evaluations-by-state-kind and the M16–M38 surfaces are
   byte-identical before and after
 
+### Milestone 40 — sample history by strategy
+  (`samples/by-strategy`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/samples/by-strategy/{strategy}` — answers "which
+  immutable M15 samples of this model were generated with this
+  decoding strategy?" and nothing else
+- **exact filtering (persisted strategy identity)**: every
+  `SampleRecord` carries a top-level `strategy` (the schema enum
+  greedy/temperature, persisted verbatim at generation time from the
+  explicit request — greedy is deterministic argmax with no RNG,
+  temperature draws from the temperature-scaled distribution using
+  ONE deterministic RNG stream seeded by the request's explicit
+  seed), and a sample belongs to the request only when that persisted
+  value matches VERBATIM — never sample ids, prompt text, generated
+  token ids, temperature values, seed presence, filenames or manifest
+  paths, and NEVER recalculated from temperature/seed/other fields;
+  no sample is regenerated. Each matching sample appears EXACTLY
+  ONCE; verbatim `SampleRecord` payloads (prompt, token ids, output
+  text, temperature, result_hash included) in the exact M15
+  authoritative order ((created_at, sample_id) ASCENDING)
+- **the 422-vs-404 contract (no strategy registry)**: strategies are
+  a SCHEMA ENUM, not a registry — unlike the M27 checkpoint / M32
+  tokenizer axes there is nothing to 404 for an unsupported strategy
+  value, so it is rejected with 422 by schema validation at the API
+  boundary (before the handler, matching M36–M39: even
+  unknown-model + invalid-strategy is 422); unknown model with a
+  VALID strategy -> existing 404; a valid strategy with zero samples
+  for the model is a deterministic `[]` — never a 404 (production
+  currently holds greedy -> 2 / temperature -> 2 for `4a0a871886ef`
+  — both groups non-empty; every strategy of `b5bc905326b6` is a
+  natural valid-empty case)
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_samples_for_strategy(model_id, strategy)` filters the
+  authoritative M15 `list_samples()` by the persisted `strategy`
+  (ZERO new `__init__` composition lines — no registry handle is
+  needed, and generation is never invoked); the facade and route are
+  thin pass-throughs registered after the M32 by-tokenizer route and
+  **before** the generic `/samples/{sample_id}` detail getter
+  (M27/M32/M40 are different groupings of the same listing, all
+  intact). No caches, no new storage — repeated GETs are
+  byte-identical and the endpoint never writes
+- **isolation & boundaries**: unknown model -> existing 404;
+  unsupported strategy value -> 422; valid strategy without samples
+  for the model -> `[]`. M15 (generate, listing, getter), M27
+  by-checkpoint, M32 by-tokenizer, M38 evaluations-by-state-kind,
+  M39 comparisons-by-verdict and the M16–M39 surfaces are
+  byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 505 tests
+pytest                       # 510 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2054,12 +2102,13 @@ ai-model-forge/
                        # + read-only by-suite/by-checkpoint grouping (M21/M22/M25)
     recipes.py         # workflow recipes: immutable plans + M14 composition (M12/M14)
     sampling.py         # checkpoint sampling: deterministic generation (M15)
-                       # + read-only by-checkpoint grouping of the history (M27)
+                       # + read-only by-checkpoint/by-tokenizer/by-strategy
+                       #   grouping of the history (M27/M32/M40)
     sample_quality.py  # per-sample likelihood measurement of samples (M16)
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 505 tests across 20 suites
+  tests/               # 510 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

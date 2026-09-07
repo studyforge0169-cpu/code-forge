@@ -211,6 +211,48 @@ class SamplingEngine:
         return [r for r in self.list_samples(model_id)
                 if r.tokenizer_id == tokenizer_id]
 
+    def list_samples_for_strategy(
+            self, model_id: str, strategy: SampleStrategy
+    ) -> list[SampleRecord]:
+        """Immutable M15 samples of ONE model generated with ONE
+        decoding strategy (M40).
+
+        Membership comes from the persisted strategy identity ONLY:
+        every ``SampleRecord`` carries a top-level ``strategy:
+        SampleStrategy`` (the schema enum greedy/temperature, persisted
+        verbatim at generation time from the explicit request — greedy
+        is deterministic argmax with no RNG, temperature draws from the
+        temperature-scaled distribution using ONE deterministic RNG
+        stream seeded by the request's explicit seed; a request never
+        mixes them), and a sample belongs to the request when its
+        persisted ``strategy`` equals the requested value — never
+        sample ids, prompt text, generated token ids, temperature
+        values, seed presence, filenames or manifest paths, and NEVER
+        recalculated from temperature/seed/other fields (the persisted
+        strategy is the only authority; this method NEVER invokes
+        sample generation). Strategies have NO registry (unlike the
+        M27 checkpoint / M32 tokenizer axes): the enum IS the
+        contract, so an unsupported strategy value is rejected at the
+        API boundary with 422 (schema-level validation — it never even
+        reaches this method), while an unknown model raises
+        FileNotFoundError exactly like the sibling groupings. Each
+        sample appears EXACTLY ONCE (the authoritative listing holds
+        each record exactly once). The result is the model's
+        authoritative M15 listing above (the exact engine parse +
+        deterministic (created_at, sample_id) ASCENDING order)
+        filtered by the persisted strategy; complete verbatim
+        ``SampleRecord`` payloads, no rewritten fields. A valid
+        strategy with no samples for the model returns []. Strategies
+        are model-scoped through the listing itself — a model never
+        sees another model's samples. Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API); the strategy
+        # needs NO registry lookup and is NEVER recalculated — the
+        # persisted field is filtered verbatim
+        return [r for r in self.list_samples(model_id)
+                if r.strategy == strategy]
+
 
     # ------------------------------------------------------------------ #
     # The run (preflight everything before creating any artifact)
