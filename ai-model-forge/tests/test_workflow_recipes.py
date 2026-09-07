@@ -1800,7 +1800,7 @@ def test_m35_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer) + 1 (M34 gate decisions
     # by-comparison) + 1 (M35 workflows by-recipe) = 67
-    assert len(spec["paths"]) == 74
+    assert len(spec["paths"]) == 75
     path = "/api/v1/models/{model_id}/workflows/by-recipe/{recipe_id}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -2154,7 +2154,7 @@ def test_m42_api_by_status_404_422s_isolation_regressions_openapi(
         assert g.json() == [x for x in samples
                             if x["strategy"] == strategy]
 
-    # OpenAPI: 74 paths, the new path exactly once, GET-only, tag
+    # OpenAPI: 75 paths, the new path exactly once, GET-only, tag
     # workflows, WorkflowRecord items, status $ref WorkflowStatus;
     # route order M35 by-recipe < by-status < generic detail
     spec = api_client.get("/openapi.json").json()
@@ -2171,8 +2171,9 @@ def test_m42_api_by_status_404_422s_isolation_regressions_openapi(
     # + 1 (M39 comparisons by-verdict)
     # + 1 (M40 samples by-strategy)
     # + 1 (M41 gate decisions by-decision)
-    # + 1 (M42 workflows by-status) = 74
-    assert len(spec["paths"]) == 74
+    # + 1 (M42 workflows by-status)
+    # + 1 (M43 gate decisions by-verdict) = 75
+    assert len(spec["paths"]) == 75
     path = "/api/v1/models/{model_id}/workflows/by-status/{status}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1

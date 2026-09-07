@@ -564,6 +564,25 @@ def index() -> HTMLResponse:
         -> []). Pure data access — no aggregation, no analytics,
         zero storage growth.</li>
 
+      <li><b>M43 gate-decision history by verdict</b> — one read-only
+        access path, <code>GET /models/&#123;id&#125;/gates/decisions/by-verdict/&#123;verdict&#125;</code>,
+        answers "which immutable gate decisions of this model
+        recorded this loss-only comparison verdict?": the model's
+        authoritative M6 listing filtered by the persisted top-level
+        verdict (the Optional[ComparisonVerdict] enum
+        improved/regressed/unchanged, recorded verbatim by the M6 run
+        — deliberately DISTINCT from the M41 decision result: an
+        improved candidate can still fail a policy), matched VERBATIM
+        — NEVER recalculated from losses, deltas, tolerances or
+        comparisons, never re-evaluated; full record payloads, exact
+        M6 ordering; unknown model -> 404; an UNSUPPORTED verdict
+        value -> 422, because verdicts have no registry — the enum IS
+        the contract; a valid verdict with no matching decisions ->
+        []; threshold-only gates keep verdict null — there is
+        deliberately NO route for None, and those decisions belong to
+        NO by-verdict group). Pure data access — no aggregates, no
+        rankings, zero storage growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -617,6 +636,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-policy/&#123;policy_id&#125;</code> — gate decisions of ONE registered policy (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-comparison/&#123;comparison_id&#125;</code> — gate decisions that judged ONE M5 comparison (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-decision/&#123;decision&#125;</code> — gate decisions of ONE model with ONE decision result (read-only, deterministic, persisted decision verbatim — never recalculated; unsupported decision 422)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-verdict/&#123;verdict&#125;</code> — gate decisions of ONE model with ONE recorded comparison verdict (read-only, deterministic, persisted verdict verbatim — never recalculated; null-verdict threshold-only decisions in no group; unsupported verdict 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/&#123;decision&#125;</code> — one gate decision</li>
       <li><code>POST  {prefix}/workflows/run</code> — execute one inline workflow plan synchronously</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows</code> — immutable workflow run history</li>
@@ -1357,7 +1377,8 @@ def get_comparison(model_id: str, comparison_id: str) -> ComparisonRecord:
 # Gate routes (Milestone 6 — policy-driven, evidence-based run decisions;
 # Milestone 23 adds the read-only by-policy grouping of the immutable history;
 # Milestone 34 adds the read-only by-comparison grouping of the same history;
-# Milestone 41 adds the read-only by-decision grouping of the same history)
+# Milestone 41 adds the read-only by-decision grouping of the same history;
+# Milestone 43 adds the read-only by-verdict grouping of the same history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/gates/evaluate", response_model=GateDecision, tags=["gates"])
@@ -1478,6 +1499,45 @@ def list_gate_decisions_by_decision(model_id: str,
     try:
         return _forge().list_gate_decisions_for_decision(model_id,
                                                          decision)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/gates/decisions/by-verdict/{verdict}",
+         response_model=list[GateDecision], tags=["gates"])
+def list_gate_decisions_by_verdict(model_id: str,
+                                   verdict: ComparisonVerdict
+                                   ) -> list[GateDecision]:
+    """Immutable gate decisions of ONE model with ONE recorded
+    comparison verdict (M43).
+
+    Read-only per-verdict grouping: returns the model's authoritative
+    M6 listing filtered by the persisted verdict recorded in each
+    GateDecision (top-level verdict — the Optional[ComparisonVerdict]
+    loss-only verdict recorded verbatim by the M6 run: improved /
+    regressed / unchanged from the measured evidence, deliberately
+    DISTINCT from the M41 decision result; matched VERBATIM —
+    membership NEVER comes from recalculating losses, deltas,
+    tolerances, policies or comparison results, no gate is
+    re-evaluated; the persisted value is never resolved or rewritten).
+    Complete verbatim payloads (decision/evidence chain/rollback
+    suggestion included) in the exact M6 (created_at, decision_id)
+    order; a valid verdict with no matching decisions returns [].
+    Verdicts have NO registry (exactly like M41): the
+    ComparisonVerdict enum IS the contract, so an UNSUPPORTED verdict
+    value is rejected with 422 at the API boundary (schema-level
+    validation — never a registry-style 404, and the validation fires
+    BEFORE this handler even for an unknown model), while an unknown
+    model with a VALID verdict raises FileNotFoundError -> 404 exactly
+    like the sibling groupings. The field is OPTIONAL and the endpoint
+    is for ENUM VALUES ONLY: threshold-only gates keep verdict null,
+    there is deliberately NO route representing None, and null-verdict
+    decisions belong to NO by-verdict group (they stay listed in the
+    generic M6 history). No aggregates, no rankings, no writes. (Must
+    stay registered before /gates/decisions/{decision_id}; the literal
+    "by-verdict" segment is not a decision id.)"""
+    try:
+        return _forge().list_gate_decisions_for_verdict(model_id, verdict)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

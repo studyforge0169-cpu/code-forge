@@ -804,8 +804,9 @@ def test_m21_api_existing_surfaces_and_openapi(api_client):
     # + 1 (M39 comparisons by-verdict)
     # + 1 (M40 samples by-strategy)
     # + 1 (M41 gate decisions by-decision)
-    # + 1 (M42 workflows by-status) = 74
-    assert len(spec["paths"]) == 74
+    # + 1 (M42 workflows by-status)
+    # + 1 (M43 gate decisions by-verdict) = 75
+    assert len(spec["paths"]) == 75
 
 
 # =========================================================================== #
@@ -1013,8 +1014,9 @@ def test_m22_api_openapi_documented(api_client):
     # + 1 (M39 comparisons by-verdict)
     # + 1 (M40 samples by-strategy)
     # + 1 (M41 gate decisions by-decision)
-    # + 1 (M42 workflows by-status) = 74
-    assert len(spec["paths"]) == 74
+    # + 1 (M42 workflows by-status)
+    # + 1 (M43 gate decisions by-verdict) = 75
+    assert len(spec["paths"]) == 75
 
 
 # =========================================================================== #
@@ -1275,5 +1277,6 @@ def test_m25_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M39 comparisons by-verdict)
     # + 1 (M40 samples by-strategy)
     # + 1 (M41 gate decisions by-decision)
-    # + 1 (M42 workflows by-status) = 74
-    assert len(spec["paths"]) == 74
+    # + 1 (M42 workflows by-status)
+    # + 1 (M43 gate decisions by-verdict) = 75
+    assert len(spec["paths"]) == 75

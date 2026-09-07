@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from app.schemas import (
     ComparisonRequest,
     ComparisonState,
+    ComparisonVerdict,
     EvaluationConfig,
     GateDecisionResult,
     GatePolicy,
@@ -1135,4 +1136,156 @@ def test_m41_engine_repeated_calls_identical(env):
         again = [r.model_dump(mode="json") for r in
                  f.list_gate_decisions_for_decision(
                      env.model_id, GateDecisionResult.PASSED)]
+        assert again == first
+
+
+# =========================================================================== #
+# M43: read-only per-verdict grouping of the gate-decision history
+# =========================================================================== #
+
+def _m43_state(env):
+    """M43 state on top of the shared module env (cached): ALL THREE
+    verdicts deterministically — improved (early -> final A
+    checkpoint), regressed (final A -> final B checkpoint on the A
+    probe), unchanged (same checkpoint both sides) — plus TWO
+    threshold-only gates (baseline_type=minimum_loss: one impossible
+    ceiling -> failed, one generous ceiling -> passed) which judge NO
+    comparison and keep verdict None, and a fresh model with NO gate
+    decisions. Returns (d_imp, d_reg, d_unch, d_none1, d_none2,
+    empty_model).
+    """
+    cached = getattr(env, "_m43", None)
+    if cached is not None:
+        return cached
+    f = env.forge
+    ck_e = env.imp_early.checkpoint_id
+    ck_f = env.imp_final.checkpoint_id
+    ck_r = env.reg_final.checkpoint_id
+    d_imp = env.run_gate(baseline_ckpt=ck_e, cand_ckpt=ck_f,
+                         seed=4301, name="m43-g1")
+    d_reg = env.run_gate(baseline_ckpt=ck_f, cand_ckpt=ck_r,
+                         seed=4302, name="m43-g2")
+    d_unch = env.run_gate(baseline_ckpt=ck_f, cand_ckpt=ck_f,
+                          seed=4303, name="m43-g3")
+    d_none1 = env.run_gate(baseline_type="minimum_loss",
+                           minimum_loss=1e-9, cand_ckpt=ck_f,
+                           seed=4304, name="m43-g4")
+    d_none2 = env.run_gate(baseline_type="minimum_loss",
+                           minimum_loss=1e9, cand_ckpt=ck_f,
+                           seed=4305, name="m43-g5")
+    empty_model = f.create_model(ModelCreateRequest(config=TransformerConfig(
+        name="m43-empty", vocab_size=640, context_length=64,
+        hidden_size=64, n_layers=2, n_heads=4, n_kv_heads=2,
+        intermediate_size=128, seed=44)))[0].id
+    assert d_imp.verdict == ComparisonVerdict.IMPROVED
+    assert d_reg.verdict == ComparisonVerdict.REGRESSED
+    assert d_unch.verdict == ComparisonVerdict.UNCHANGED
+    assert d_none1.verdict is None and d_none2.verdict is None
+    assert d_none1.decision != d_none2.decision
+    env._m43 = (d_imp, d_reg, d_unch, d_none1, d_none2, empty_model)
+    return env._m43
+
+
+def test_m43_engine_filters_by_persisted_verdict_identity(env):
+    d_imp, d_reg, d_unch, d_none1, d_none2, empty_model = _m43_state(env)
+    f = env.forge
+    listing = f.list_gate_decisions(env.model_id)
+    for verdict in (ComparisonVerdict.IMPROVED, ComparisonVerdict.REGRESSED,
+                    ComparisonVerdict.UNCHANGED):
+        got = f.list_gate_decisions_for_verdict(env.model_id, verdict)
+        # parity with the authoritative M6 listing filtered by the
+        # persisted verdict; deterministic (created_at, decision_id)
+        # order; membership from the persisted field only
+        assert got == [d for d in listing if d.verdict == verdict]
+        keyed = [(x.created_at, x.decision_id) for x in got]
+        assert keyed == sorted(keyed)
+        ids = [x.decision_id for x in got]
+        assert len(ids) == len(set(ids))
+        assert all(x.verdict == verdict and x.model_id == env.model_id
+                   for x in got)
+        # verbatim payload parity with the M6 single-record getter
+        for x in got:
+            assert x == f.get_gate_decision(env.model_id, x.decision_id)
+    # the fixture's records land in their own groups with the
+    # persisted verdict VERBATIM (earlier module tests may have added
+    # other decisions — membership derives from the listing)
+    got_i = f.list_gate_decisions_for_verdict(
+        env.model_id, ComparisonVerdict.IMPROVED)
+    got_r = f.list_gate_decisions_for_verdict(
+        env.model_id, ComparisonVerdict.REGRESSED)
+    got_u = f.list_gate_decisions_for_verdict(
+        env.model_id, ComparisonVerdict.UNCHANGED)
+    assert d_imp.decision_id in {x.decision_id for x in got_i}
+    assert d_reg.decision_id in {x.decision_id for x in got_r}
+    assert d_unch.decision_id in {x.decision_id for x in got_u}
+    # None NEVER matches any enum value: the threshold-only records
+    # are excluded from ALL THREE groups
+    none_ids = {d_none1.decision_id, d_none2.decision_id}
+    for got in (got_i, got_r, got_u):
+        assert none_ids.isdisjoint({x.decision_id for x in got})
+        assert all(x.verdict is not None for x in got)
+    # explicit partition: pairwise-disjoint groups over ALL THREE enum
+    # values whose union is EXACTLY the non-null-verdict decisions
+    ids_i = {x.decision_id for x in got_i}
+    ids_r = {x.decision_id for x in got_r}
+    ids_u = {x.decision_id for x in got_u}
+    assert ids_i and ids_r and ids_u
+    assert ids_i.isdisjoint(ids_r) and ids_i.isdisjoint(ids_u)
+    assert ids_r.isdisjoint(ids_u)
+    non_null = {d.decision_id for d in listing if d.verdict is not None}
+    assert ids_i | ids_r | ids_u == non_null
+    # the null-verdict records stay listed in the generic M6 history
+    assert none_ids <= {d.decision_id for d in listing}
+
+
+def test_m43_engine_empty_404s_model_scoping_read_only(env):
+    d_imp, d_reg, d_unch, d_none1, d_none2, empty_model = _m43_state(env)
+    f = env.forge
+    _, _, _, _, m_b, d_b = _m23_env(env)      # m_b has its OWN decision
+    # a model whose ENTIRE M6 listing is empty -> [] for ALL THREE
+    # verdicts (the fixture created it with no gates at all)
+    assert f.list_gate_decisions(empty_model) == []
+    for verdict in (ComparisonVerdict.IMPROVED, ComparisonVerdict.REGRESSED,
+                    ComparisonVerdict.UNCHANGED):
+        assert f.list_gate_decisions_for_verdict(empty_model,
+                                                 verdict) == []
+    # unknown model -> FileNotFoundError (404 at the API); the enum
+    # itself needs NO registry lookup (unsupported values are 422 at
+    # the API boundary and never reach the engine)
+    with pytest.raises(FileNotFoundError):
+        f.list_gate_decisions_for_verdict("ghost-model-43",
+                                          ComparisonVerdict.IMPROVED)
+    # cross-model isolation: both models hold decisions, the listings
+    # are disjoint, and each group is a subset of its own model's
+    # listing (a's ids never appear under b, and vice versa)
+    a_ids = {d.decision_id for d in f.list_gate_decisions(env.model_id)}
+    b_ids = {d.decision_id for d in f.list_gate_decisions(m_b)}
+    assert a_ids and b_ids and a_ids.isdisjoint(b_ids)
+    for verdict in (ComparisonVerdict.IMPROVED, ComparisonVerdict.REGRESSED,
+                    ComparisonVerdict.UNCHANGED):
+        for mid, ids in ((env.model_id, a_ids), (m_b, b_ids)):
+            group = {x.decision_id for x in
+                     f.list_gate_decisions_for_verdict(mid, verdict)}
+            assert group <= ids
+    # read-only: the filter never writes gate manifests
+    before = _m23_gate_files(env, [env.model_id, m_b, empty_model])
+    for verdict in (ComparisonVerdict.IMPROVED, ComparisonVerdict.REGRESSED,
+                    ComparisonVerdict.UNCHANGED):
+        f.list_gate_decisions_for_verdict(env.model_id, verdict)
+        f.list_gate_decisions_for_verdict(m_b, verdict)
+        f.list_gate_decisions_for_verdict(empty_model, verdict)
+    after = _m23_gate_files(env, [env.model_id, m_b, empty_model])
+    assert after == before
+
+
+def test_m43_engine_repeated_calls_identical(env):
+    d_imp, d_reg, d_unch, d_none1, d_none2, empty_model = _m43_state(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_gate_decisions_for_verdict(
+                 env.model_id, ComparisonVerdict.IMPROVED)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_gate_decisions_for_verdict(
+                     env.model_id, ComparisonVerdict.IMPROVED)]
         assert again == first

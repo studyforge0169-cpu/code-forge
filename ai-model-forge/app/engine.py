@@ -554,6 +554,25 @@ class ModelForge:
         []. Read-only, never writes."""
         return self.gates.list_decisions_for_decision(model_id, decision)
 
+    def list_gate_decisions_for_verdict(self, model_id: str,
+                                        verdict: ComparisonVerdict):
+        """Immutable gate decisions of ONE model with ONE recorded
+        comparison verdict (M43 read-only access).
+
+        The verdict is the persisted loss-only comparison enum
+        (improved/regressed/unchanged) — there is NO verdict registry,
+        so an unsupported value is rejected at the API boundary with
+        422, while an unknown model raises FileNotFoundError (404)
+        exactly like the sibling groupings. Returns the model's
+        authoritative M6 listing filtered by the persisted top-level
+        verdict (matched VERBATIM — NEVER recalculated from losses,
+        deltas, tolerances or comparison records; no gate is
+        re-evaluated) in the M6 (created_at, decision_id) order, as
+        complete verbatim records. Threshold-only decisions (verdict
+        None) belong to NO by-verdict group. A valid verdict with no
+        matching decisions returns []. Read-only, never writes."""
+        return self.gates.list_decisions_for_verdict(model_id, verdict)
+
     # ------------------------------------------------------------------ #
     # Workflows (thin delegation; ordered orchestration over M3-M6; M7)
     # ------------------------------------------------------------------ #

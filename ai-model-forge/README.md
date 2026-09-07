@@ -1700,11 +1700,67 @@ generation never trains, evaluates, scores, ranks or judges output.
   decisions-by-decision and the M16–M41 surfaces are byte-identical
   before and after
 
+### Milestone 43 — gate-decision history by verdict
+  (`gates/decisions/by-verdict`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/gates/decisions/by-verdict/{verdict}` — answers
+  "which immutable gate decisions of this model recorded this
+  loss-only comparison verdict?" and nothing else. Completes the
+  gate-decision history family alongside M23 (by-policy), M34
+  (by-comparison), M41 (by-decision)
+- **exact filtering (persisted verdict identity)**: every
+  `GateDecision` carries a top-level `verdict:
+  Optional[ComparisonVerdict]` (improved / regressed / unchanged —
+  the LOSS-ONLY comparison verdict recorded verbatim by the M6 run,
+  deliberately DISTINCT from the M41 policy decision: an improved
+  candidate can still fail a `minimum_loss` ceiling), and a decision
+  belongs to the request only when that persisted value matches
+  VERBATIM — never recalculated from losses, deltas, tolerances,
+  policies or comparison records, never resolved or rewritten, no
+  gate re-evaluated. Each matching decision appears EXACTLY ONCE;
+  verbatim `GateDecision` payloads (decision/evidence chain/rollback
+  suggestion included) in the exact M6 authoritative order
+  ((created_at, decision_id) ASCENDING)
+- **the None contract (threshold-only decisions)**: the field is
+  OPTIONAL — threshold-only gates (`baseline_type="minimum_loss"`)
+  judge NO comparison and keep `verdict=None`; None is not an enum
+  value and NEVER matches any request; there is deliberately NO
+  route representing None; null-verdict decisions belong to NO
+  by-verdict group and stay listed in the generic M6 history
+  untouched (production currently holds improved -> 4 / regressed ->
+  3 / unchanged -> 2 for `4a0a871886ef` — all three groups non-empty
+  — plus 2 threshold-only null-verdict decisions outside every
+  group; every verdict of `b5bc905326b6` is a natural valid-empty
+  case)
+- **the 422-vs-404 contract (no verdict registry)**: verdicts are a
+  SCHEMA ENUM, not a registry — exactly like M41, an unsupported
+  verdict value is rejected with 422 by schema validation at the API
+  boundary (before the handler, matching M36–M42: even
+  unknown-model + invalid-verdict is 422); unknown model with a
+  VALID verdict -> existing 404; a valid verdict with zero matching
+  decisions is a deterministic `[]` — never a 404
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_decisions_for_verdict(model_id, verdict)` filters the
+  authoritative M6 `list_decisions()` by the persisted `verdict`
+  (ZERO new composition lines — no registry handle is needed, and
+  the gate run path is never invoked); the facade and route are thin
+  pass-throughs registered after the M41 by-decision route and
+  **before** the generic `/gates/decisions/{decision_id}` detail
+  getter (M23/M34/M41/M43 are different groupings of the same
+  listing, all intact). No caches, no new storage — repeated GETs
+  are byte-identical and the endpoint never writes
+- **isolation & boundaries**: unknown model -> existing 404;
+  unsupported verdict value -> 422; valid verdict without matching
+  decisions -> `[]`; null-verdict decisions in no group. M6 (run,
+  listing, getter), M23 by-policy, M34 by-comparison, M41
+  by-decision, M42 workflows-by-status and the M16–M42 surfaces are
+  byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 520 tests
+pytest                       # 525 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2189,8 +2245,8 @@ ai-model-forge/
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
                        #   by-verdict grouping (M26/M29/M31/M37/M39)
     gates.py           # stage gates: policy-driven run decisions (M6)
-                       # + read-only by-policy/by-comparison/by-decision
-                       #   grouping (M23/M34/M41)
+                       # + read-only by-policy/by-comparison/by-decision/
+                       #   by-verdict grouping (M23/M34/M41/M43)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
                        # + read-only by-recipe/by-status grouping (M35/M42)
     dashboards.py      # read-only dashboard engine: deterministic views (M8/M13)
@@ -2205,7 +2261,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 520 tests across 20 suites
+  tests/               # 525 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

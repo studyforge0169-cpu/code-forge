@@ -245,6 +245,50 @@ class GateEngine:
         return [d for d in self.list_decisions(model_id)
                 if d.decision == decision]
 
+    def list_decisions_for_verdict(
+            self, model_id: str, verdict: ComparisonVerdict
+    ) -> list[GateDecision]:
+        """Immutable gate decisions of ONE model with ONE recorded
+        comparison verdict (M43).
+
+        Membership comes from the persisted verdict identity ONLY:
+        every ``GateDecision`` carries a top-level ``verdict:
+        Optional[ComparisonVerdict]`` — the LOSS-ONLY comparison
+        verdict recorded verbatim by the M6 run (improved / regressed /
+        unchanged from the measured evidence; deliberately DISTINCT
+        from the policy ``decision`` of M41: an improved candidate can
+        still fail a minimum_loss ceiling) — and a decision belongs to
+        the request when its persisted ``verdict`` equals the
+        requested value, matched VERBATIM — never recalculated from
+        losses, deltas, tolerances, policies or comparison records,
+        and never resolved or rewritten. The field is OPTIONAL:
+        threshold-only gates (``baseline_type="minimum_loss"``) judge
+        NO comparison and keep ``verdict=None``; None is not an enum
+        value and NEVER matches any request (there is deliberately NO
+        route for None — threshold-only decisions belong to NO
+        by-verdict group and stay in the generic M6 listing
+        untouched). Verdicts have NO registry (the enum IS the
+        contract, exactly like M41): an unsupported verdict value is
+        rejected at the API boundary with 422 and never reaches this
+        method, while an unknown model raises FileNotFoundError
+        exactly like the sibling groupings. Each decision appears
+        EXACTLY ONCE (the authoritative listing holds each record
+        exactly once). The result is the model's authoritative M6
+        listing above (the exact engine parse + deterministic
+        (created_at, decision_id) ASCENDING order) filtered by the
+        persisted verdict; complete verbatim ``GateDecision``
+        payloads, no rewritten fields. A valid verdict with no
+        matching decisions returns []. Verdicts are model-scoped
+        through the listing itself — a model never sees another
+        model's decisions. Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API); the verdict is
+        # NEVER recalculated and None NEVER matches — the persisted
+        # field is filtered verbatim
+        return [d for d in self.list_decisions(model_id)
+                if d.verdict == verdict]
+
     # ------------------------------------------------------------------ #
     # The gate run
     # ------------------------------------------------------------------ #
