@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from app.model_builder import content_hash
 from app.schemas import (
+    EvalStateKind,
     EvaluationConfig,
     EvaluationSplit,
     ModelCreateRequest,
@@ -859,4 +860,114 @@ def test_m36_engine_repeated_calls_identical(env):
         again = [r.model_dump(mode="json") for r in
                  f.list_evaluations_for_split(
                      a, EvaluationSplit.VALIDATION)]
+        assert again == first
+
+
+# --------------------------------------------------------------------------- #
+# M38: evaluation history by state kind (read-only grouping, enum contract)
+# --------------------------------------------------------------------------- #
+
+def _m38_env(env):
+    """M38 state on top of the shared module env (cached): a TRAINED
+    model with evaluations over BOTH state kinds (checkpoint x2 over
+    its first stored checkpoint, current x1 over the published
+    weights), plus the M28 empty-history model b. Returns
+    (a, b, e_c1, e_c2, e_cu).
+    """
+    cached = getattr(env, "_m38_state", None)
+    if cached is not None:
+        return cached
+    _, b, _, _, _, _ = _m28_env(env)      # b: NO evaluations at all
+    f = env.forge
+    a = env.new_model("m38-main", seed=38)
+    env.run_training(a, ds_key="base", steps=30)
+    ck = f.list_checkpoints(a)[0].checkpoint_id
+    e_c1 = f.run_evaluation(env.eval_cfg(a, ds_key="base",
+                                         checkpoint_id=ck, seed=3811))
+    e_c2 = f.run_evaluation(env.eval_cfg(a, ds_key="base",
+                                         checkpoint_id=ck, seed=3812))
+    e_cu = f.run_evaluation(env.eval_cfg(a, ds_key="base", seed=3813))
+    env._m38_state = (a, b, e_c1, e_c2, e_cu)
+    return env._m38_state
+
+
+def test_m38_engine_filters_by_persisted_state_kind_identity(env):
+    a, b, e_c1, e_c2, e_cu = _m38_env(env)
+    f = env.forge
+    listing = f.list_evaluations(a)
+    for kind in (EvalStateKind.CHECKPOINT, EvalStateKind.CURRENT):
+        got = f.list_evaluations_for_state_kind(a, kind)
+        # parity with the authoritative M4 listing filtered by the
+        # persisted state_kind; deterministic (created_at, eval_id)
+        # order; membership from the persisted field only
+        assert got == [r for r in listing if r.state_kind == kind]
+        keyed = [(r.created_at, r.eval_id) for r in got]
+        assert keyed == sorted(keyed)
+        ids = [r.eval_id for r in got]
+        assert len(ids) == len(set(ids))
+        assert all(r.state_kind == kind and r.model_id == a for r in got)
+        # the nullability is a schema CONSEQUENCE of the persisted
+        # kind, never the membership source
+        assert all((r.checkpoint_id is None)
+                   == (kind == EvalStateKind.CURRENT) for r in got)
+        for r in got:
+            assert r == f.get_evaluation(a, r.eval_id)
+    # the fixture's records land in their own groups with the
+    # persisted kind VERBATIM (earlier module tests may have added
+    # other evaluations — membership derives from the listing)
+    got_ck = f.list_evaluations_for_state_kind(a, EvalStateKind.CHECKPOINT)
+    got_cu = f.list_evaluations_for_state_kind(a, EvalStateKind.CURRENT)
+    assert {e_c1.eval_id, e_c2.eval_id} <= {r.eval_id for r in got_ck}
+    assert e_cu.eval_id in {r.eval_id for r in got_cu}
+    # explicit partition: disjoint groups over BOTH enum values whose
+    # union is the full listing
+    ids_ck = {r.eval_id for r in got_ck}
+    ids_cu = {r.eval_id for r in got_cu}
+    assert ids_ck and ids_cu
+    assert ids_ck.isdisjoint(ids_cu)
+    assert ids_ck | ids_cu == {r.eval_id for r in listing}
+
+
+def test_m38_engine_empty_404s_model_scoping_read_only(env):
+    a, b, e_c1, e_c2, e_cu = _m38_env(env)
+    f = env.forge
+    # valid state kind with zero evaluations -> [] (the model-scoped
+    # empty case: b has no evaluations under EITHER kind)
+    for kind in (EvalStateKind.CHECKPOINT, EvalStateKind.CURRENT):
+        assert f.list_evaluations_for_state_kind(b, kind) == []
+    # unknown model -> FileNotFoundError (404 at the API); the enum
+    # itself needs NO registry lookup (unsupported values are 422 at
+    # the API boundary and never reach the engine)
+    with pytest.raises(FileNotFoundError):
+        f.list_evaluations_for_state_kind("ghost-model-38",
+                                          EvalStateKind.CURRENT)
+    # cross-model isolation: a's eval ids never appear under b
+    for kind in (EvalStateKind.CHECKPOINT, EvalStateKind.CURRENT):
+        leak = [r.eval_id for r in
+                f.list_evaluations_for_state_kind(b, kind)]
+        assert e_c1.eval_id not in leak and e_cu.eval_id not in leak
+    # read-only: the filter never writes evaluation manifests
+    def eval_files(mid):
+        root = f.storage.model_dir(mid) / "evaluations"
+        if not root.exists():
+            return set()
+        return {p.relative_to(root).as_posix()
+                for p in root.rglob("*") if p.is_file()}
+    before = (eval_files(a), eval_files(b))
+    for kind in (EvalStateKind.CHECKPOINT, EvalStateKind.CURRENT):
+        f.list_evaluations_for_state_kind(a, kind)
+        f.list_evaluations_for_state_kind(b, kind)
+    assert (eval_files(a), eval_files(b)) == before
+
+
+def test_m38_engine_repeated_calls_identical(env):
+    a, b, e_c1, e_c2, e_cu = _m38_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_evaluations_for_state_kind(a,
+                                               EvalStateKind.CHECKPOINT)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_evaluations_for_state_kind(a,
+                                                   EvalStateKind.CHECKPOINT)]
         assert again == first

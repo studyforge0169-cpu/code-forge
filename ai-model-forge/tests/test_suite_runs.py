@@ -799,8 +799,9 @@ def test_m21_api_existing_surfaces_and_openapi(api_client):
     # + 1 (M34 gate decisions by-comparison)
     # + 1 (M35 workflows by-recipe)
     # + 1 (M36 evaluations by-split)
-    # + 1 (M37 comparisons by-split) = 69
-    assert len(spec["paths"]) == 69
+    # + 1 (M37 comparisons by-split)
+    # + 1 (M38 evaluations by-state-kind) = 70
+    assert len(spec["paths"]) == 70
 
 
 # =========================================================================== #
@@ -1003,8 +1004,9 @@ def test_m22_api_openapi_documented(api_client):
     # + 1 (M34 gate decisions by-comparison)
     # + 1 (M35 workflows by-recipe)
     # + 1 (M36 evaluations by-split)
-    # + 1 (M37 comparisons by-split) = 69
-    assert len(spec["paths"]) == 69
+    # + 1 (M37 comparisons by-split)
+    # + 1 (M38 evaluations by-state-kind) = 70
+    assert len(spec["paths"]) == 70
 
 
 # =========================================================================== #
@@ -1260,5 +1262,6 @@ def test_m25_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M34 gate decisions by-comparison)
     # + 1 (M35 workflows by-recipe)
     # + 1 (M36 evaluations by-split)
-    # + 1 (M37 comparisons by-split) = 69
-    assert len(spec["paths"]) == 69
+    # + 1 (M37 comparisons by-split)
+    # + 1 (M38 evaluations by-state-kind) = 70
+    assert len(spec["paths"]) == 70

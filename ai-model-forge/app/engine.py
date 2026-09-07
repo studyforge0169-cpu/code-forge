@@ -25,6 +25,7 @@ from .sampling import SamplingEngine
 from .sample_quality import SampleQualityEngine
 from .schemas import (
     ComparisonRecord,
+    EvalStateKind,
     EvaluationRecord,
     EvaluationSplit,
     ModelCreateRequest,
@@ -352,6 +353,26 @@ class ModelForge:
         evaluations for the model returns []. Read-only, never
         writes."""
         return self.evaluation.list_evaluations_for_split(model_id, split)
+
+    def list_evaluations_for_state_kind(self, model_id: str,
+                                        state_kind: EvalStateKind
+                                        ) -> list[EvaluationRecord]:
+        """Immutable M4 evaluation records of ONE model measuring ONE
+        kind of model state (M38 read-only access).
+
+        The state kind is the persisted schema enum
+        (current/checkpoint) — there is NO state-kind registry, so an
+        unsupported value is rejected at the API boundary with 422,
+        while an unknown model raises FileNotFoundError (404) exactly
+        like the sibling groupings. Returns the model's authoritative
+        M4 listing filtered by the persisted top-level state_kind
+        (matched VERBATIM — never inferred from checkpoint_id
+        nullability, filenames or timestamps, never rewritten) in the
+        M4 (created_at, eval_id) order, as complete verbatim records.
+        A valid state kind with no evaluations for the model returns
+        []. Read-only, never writes."""
+        return self.evaluation.list_evaluations_for_state_kind(
+            model_id, state_kind)
 
     # ------------------------------------------------------------------ #
     # Comparison (thin delegation; read-only orchestration over evaluations)

@@ -264,6 +264,45 @@ class EvaluationEngine:
         return [r for r in self.list_evaluations(model_id)
                 if r.split == split]
 
+    def list_evaluations_for_state_kind(
+            self, model_id: str, state_kind: EvalStateKind
+    ) -> list[EvaluationRecord]:
+        """Immutable M4 evaluations of ONE model measuring ONE kind of
+        model state (M38).
+
+        Membership comes from the persisted state-kind identity ONLY:
+        every ``EvaluationRecord`` carries a top-level ``state_kind:
+        EvalStateKind`` (the schema enum current/checkpoint, persisted
+        verbatim at run time from the resolved evaluation request —
+        ``current`` measured the model's published weights.pt,
+        ``checkpoint`` measured one immutable stored checkpoint), and
+        an evaluation belongs to the request when its persisted
+        ``state_kind`` equals the requested value — never filenames,
+        directories, timestamps, eval ids or hashes, and NEVER the
+        ``checkpoint_id`` nullability (that nullability is a schema
+        consequence of the persisted state kind, not its source; the
+        persisted field is the only membership authority and is never
+        resolved or rewritten). State kinds have NO registry (unlike
+        the M24 checkpoint / M28 dataset / M30 tokenizer axes): the
+        enum IS the contract, so an unsupported state-kind value is
+        rejected at the API boundary with 422 (schema-level
+        validation), while an unknown model raises FileNotFoundError
+        exactly like the sibling groupings. Each evaluation appears
+        EXACTLY ONCE (the authoritative listing holds each record
+        exactly once). The result is the model's authoritative M4
+        listing above (the exact engine parse + deterministic
+        (created_at, eval_id) ASCENDING order) filtered by the
+        persisted state kind; complete verbatim ``EvaluationRecord``
+        payloads, no rewritten fields. A valid state kind with no
+        evaluations for the model returns []. State kinds are
+        model-scoped through the listing itself — a model never sees
+        another model's evaluations. Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API)
+        return [r for r in self.list_evaluations(model_id)
+                if r.state_kind == state_kind]
+
     # ------------------------------------------------------------------ #
     # The run (preflight everything before creating any artifact)
     # ------------------------------------------------------------------ #

@@ -1463,11 +1463,58 @@ generation never trains, evaluates, scores, ranks or judges output.
   evaluations-by-split and the M16–M36 surfaces are byte-identical
   before and after
 
+### Milestone 38 — evaluation history by state kind
+  (`evaluations/by-state-kind`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/evaluations/by-state-kind/{state_kind}` —
+  answers "which immutable M4 evaluations of this model measured
+  which kind of model state?" and nothing else
+- **exact filtering (persisted state-kind identity)**: every
+  `EvaluationRecord` carries a top-level `state_kind` (the schema
+  enum current/checkpoint, persisted verbatim at run time —
+  `current` measured the model's published weights, `checkpoint`
+  measured one immutable stored checkpoint), and an evaluation
+  belongs to the request only when that persisted value matches
+  VERBATIM — never filenames, timestamps, eval ids or hashes, and
+  NEVER the `checkpoint_id` nullability (that nullability is a
+  schema CONSEQUENCE of the persisted state kind, not its source).
+  Each matching evaluation appears EXACTLY ONCE; verbatim
+  `EvaluationRecord` payloads (loss/perplexity/state identity
+  included) in the exact M4 authoritative order ((created_at,
+  eval_id) ASCENDING)
+- **the 422-vs-404 contract (no state-kind registry)**: state kinds
+  are a SCHEMA ENUM, not a registry — unlike the M24 checkpoint /
+  M28 dataset / M30 tokenizer axes there is nothing to 404 for an
+  unsupported state-kind value, so it is rejected with 422 by
+  schema validation at the API boundary (before the handler,
+  matching M36/M37: even unknown-model + invalid-state-kind is
+  422); unknown model with a VALID state kind -> existing 404; a
+  valid state kind with zero evaluations for the model is a
+  deterministic `[]` — never a 404 (production currently holds
+  checkpoint -> 9 / current -> 7 for `4a0a871886ef`; every state
+  kind of `b5bc905326b6` is a natural valid-empty case)
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_evaluations_for_state_kind(model_id, state_kind)`
+  filters the authoritative M4 `list_evaluations()` by the persisted
+  `state_kind` (ZERO new `__init__` composition lines — no registry
+  handle is needed); the facade and route are thin pass-throughs
+  registered after the M36 by-split route and **before** the
+  generic `/evaluations/{eval_id}` detail getter
+  (M24/M28/M30/M36/M38 are different groupings of the same listing,
+  all intact). No caches, no new storage — repeated GETs are
+  byte-identical and the endpoint never writes
+- **isolation & boundaries**: unknown model -> existing 404;
+  unsupported state-kind value -> 422; valid state kind without
+  evaluations for the model -> `[]`. M4 (run, listing, getter), M24
+  by-checkpoint, M28 by-dataset, M30 by-tokenizer, M36 by-split,
+  M37 comparisons-by-split and the M16–M37 surfaces are
+  byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 495 tests
+pytest                       # 500 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -1946,8 +1993,8 @@ ai-model-forge/
     tokenizer.py       # byte-level BPE engine
     training.py        # training engine: schedules, streams, run, checkpoints, rollback
     evaluation.py      # evaluation engine: read-only state measurement (M4)
-                       # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split
-                       #   grouping (M24/M28/M30/M36)
+                       # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
+                       #   by-state-kind grouping (M24/M28/M30/M36/M38)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split
                        #   grouping (M26/M29/M31/M37)
@@ -1965,7 +2012,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 495 tests across 20 suites
+  tests/               # 500 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

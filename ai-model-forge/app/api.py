@@ -19,6 +19,7 @@ from .engine import ModelForge, get_forge
 from .schemas import (
     ComparisonRecord,
     ComparisonRequest,
+    EvalStateKind,
     EvaluationConfig,
     EvaluationRecord,
     EvaluationSplit,
@@ -351,6 +352,19 @@ def index() -> HTMLResponse:
         []). Pure data access — no aggregates, zero storage
         growth.</li>
 
+      <li><b>M38 evaluation history by state kind</b> — one read-only
+        access path, <code>GET /models/&#123;id&#125;/evaluations/by-state-kind/&#123;state_kind&#125;</code>,
+        answers "which immutable M4 evaluations of this model measured
+        which kind of model state?": the model's authoritative M4
+        listing filtered by the persisted top-level state_kind
+        (schema enum current/checkpoint, matched VERBATIM — never
+        inferred from filenames, checkpoint_id nullability or
+        timestamps; full record payloads, exact M4 ordering; unknown
+        model -> 404; an UNSUPPORTED state-kind value -> 422, because
+        state kinds have no registry — the enum IS the contract; a
+        valid state kind with no evaluations for the model -> []).
+        Pure data access — no aggregates, zero storage growth.</li>
+
       <li><b>M24 evaluation history by checkpoint</b> — one read-only access
         path, <code>GET /models/&#123;id&#125;/evaluations/by-checkpoint/&#123;checkpoint&#125;</code>,
         answers "which immutable M4 evaluations measured this checkpoint?":
@@ -520,6 +534,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-dataset/&#123;ds&#125;</code> — evaluations of ONE model over ONE dataset (read-only, deterministic, versions verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-tokenizer/&#123;tok&#125;</code> — evaluations of ONE model with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-split/&#123;split&#125;</code> — evaluations of ONE model on ONE dataset split (read-only, deterministic; unsupported split 422)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-state-kind/&#123;state_kind&#125;</code> — evaluations of ONE model over ONE kind of model state (read-only, deterministic, persisted state_kind verbatim; unsupported state kind 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/&#123;eval&#125;</code> — one evaluation record</li>
       <li><code>POST  {prefix}/comparisons/run</code> — A/B comparison (improved / regressed / unchanged)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons</code> — immutable comparison history</li>
@@ -867,7 +882,9 @@ def rollback_model(model_id: str, request: RollbackRequest) -> ModelRecord:
 # --------------------------------------------------------------------------- #
 # Evaluation routes (Milestone 4 — read-only measurement;
 # Milestone 28 adds the read-only by-dataset grouping of the history;
-# Milestone 30 adds the read-only by-tokenizer grouping of the history)
+# Milestone 30 adds the read-only by-tokenizer grouping of the history;
+# Milestone 36 adds the read-only by-split grouping of the same history;
+# Milestone 38 adds the read-only by-state-kind grouping of the same history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/evaluations/run", response_model=EvaluationRecord, tags=["evaluation"])
@@ -1009,6 +1026,42 @@ def list_evaluations_by_split(model_id: str, split: EvaluationSplit
     literal "by-split" segment is not an evaluation id.)"""
     try:
         return _forge().list_evaluations_for_split(model_id, split)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/evaluations/by-state-kind/{state_kind}",
+         response_model=list[EvaluationRecord], tags=["evaluation"])
+def list_evaluations_by_state_kind(model_id: str,
+                                   state_kind: EvalStateKind
+                                   ) -> list[EvaluationRecord]:
+    """Immutable M4 evaluations of ONE model measuring ONE kind of
+    model state (M38).
+
+    Read-only per-state-kind grouping: returns the model's
+    authoritative M4 listing filtered by the persisted state_kind
+    recorded in each EvaluationRecord (top-level state_kind, matched
+    VERBATIM — membership never comes from filenames, directories,
+    timestamps, eval ids or hashes, and NEVER from checkpoint_id
+    nullability: that nullability is a schema consequence of the
+    persisted state kind, not its source; the persisted value is
+    never resolved or rewritten). Complete verbatim payloads
+    (loss_nats/perplexity/state/dataset identity included) in the
+    exact M4 (created_at, eval_id) order; a valid state kind with no
+    evaluations for the model returns []. State kinds have NO
+    registry (unlike the by-checkpoint/by-dataset/by-tokenizer
+    axes): the EvalStateKind enum IS the contract, so an UNSUPPORTED
+    state-kind value is rejected with 422 at the API boundary
+    (schema-level validation — never a registry-style 404, and the
+    validation fires BEFORE this handler even for an unknown model),
+    while an unknown model with a VALID state kind raises
+    FileNotFoundError -> 404 exactly like the sibling groupings. No
+    aggregates, no writes. (Must stay registered before
+    /evaluations/{eval_id}; the literal "by-state-kind" segment is
+    not an evaluation id.)"""
+    try:
+        return _forge().list_evaluations_for_state_kind(model_id,
+                                                        state_kind)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
