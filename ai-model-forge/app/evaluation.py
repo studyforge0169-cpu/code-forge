@@ -337,6 +337,40 @@ class EvaluationEngine:
         return [r for r in self.list_evaluations(model_id)
                 if r.truncated == truncated]
 
+    def list_evaluations_for_seed(
+            self, model_id: str, seed: int
+    ) -> list[EvaluationRecord]:
+        """Immutable M4 evaluations of ONE model by persisted effective
+        seed (M48).
+
+        Membership comes from the persisted REQUIRED integer ONLY:
+        every ``EvaluationRecord`` carries ``seed: int`` (the
+        effective seed used for the evaluation, default derived from
+        the config and persisted verbatim at run time), and an
+        evaluation belongs to the request when that persisted value
+        equals the requested integer — matched VERBATIM, never
+        recalculated, never normalized and never derived from the
+        embedded config dict, request parameters, dataset identity,
+        splits, tokenizers, state kinds, losses, ids, timestamps or
+        any other field. The seed is an OPEN integer value axis (no
+        registry, no enum): any integer is type-valid, so an
+        unmatched seed on a valid model returns [] (a natural
+        valid-empty), a non-integer spelling is rejected at the API
+        boundary with 422 (schema-level validation), and an unknown
+        model raises FileNotFoundError exactly like the sibling
+        groupings. Each evaluation appears EXACTLY ONCE; the per-seed
+        groups form a TRUE disjoint partition of the listing with no
+        None case (the field is required). The result is the model's
+        authoritative M4 listing (the exact engine parse +
+        deterministic (created_at, eval_id) ASCENDING order) filtered
+        by the persisted seed; complete verbatim
+        ``EvaluationRecord`` payloads. Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API)
+        return [r for r in self.list_evaluations(model_id)
+                if r.seed == seed]
+
     # ------------------------------------------------------------------ #
     # The run (preflight everything before creating any artifact)
     # ------------------------------------------------------------------ #

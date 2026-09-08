@@ -1929,11 +1929,44 @@ generation never trains, evaluates, scores, ranks or judges output.
   enforcement, no new storage — repeated GETs are byte-identical and
   the endpoint never writes
 
+### Milestone 48 — evaluation history by seed
+  (`evaluations/by-seed`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/evaluations/by-seed/{seed}` — answers "which
+  immutable evaluations of this model ran with this effective
+  seed?" and nothing else. Membership comes from the REQUIRED
+  integer `seed` persisted on every `EvaluationRecord` at run time
+  (the effective seed used, default derived from the config)
+- **exact filtering (persisted integer)**: the listing is the
+  authoritative M4 evaluation history filtered VERBATIM by the
+  record's own persisted value — NEVER recalculated, NEVER
+  normalized, NEVER derived from the embedded config dict, request
+  parameters, dataset identity, splits, tokenizers, state kinds,
+  losses, ids, timestamps or any other field. The seed is
+  bookkeeping identity, not a quality metric — no seed is better
+  than another, and this endpoint is not a model-quality measure.
+  Each evaluation appears EXACTLY ONCE; verbatim `EvaluationRecord`
+  payloads in the exact M4 authoritative order ((created_at,
+  eval_id) ascending, preserved)
+- **boundaries**: the seed is an OPEN integer value axis — no
+  registry, no enum, no artificial range constraint: any integer is
+  type-valid, an unmatched seed on a valid model -> `200 []`
+  (natural valid-empty), a non-integer spelling -> 422
+  (schema-level validation at the API boundary, pre-handler —
+  integers are never silently reinterpreted), unknown model + valid
+  integer -> 404; the per-seed groups form a TRUE disjoint
+  partition of the listing with no None case. M4 (run, listing,
+  getter), M24/M28/M30/M36/M38/M47 evaluation groupings, M46
+  checkpoint-by-run and the other M22–M45 surfaces are byte-identical
+  before and after. No seed registry/index/cache, no aggregation, no
+  new storage — repeated GETs are byte-identical and the endpoint
+  never writes
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 545 tests
+pytest                       # 550 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2414,8 +2447,8 @@ ai-model-forge/
                        # + read-only by-run grouping of the checkpoint history (M46)
     evaluation.py      # evaluation engine: read-only state measurement (M4)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
-                       #   by-state-kind/by-truncated grouping
-                       #   (M24/M28/M30/M36/M38/M47)
+                       #   by-state-kind/by-truncated/by-seed grouping
+                       #   (M24/M28/M30/M36/M38/M47/M48)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
                        #   by-verdict/by-state-kind grouping
@@ -2438,7 +2471,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 545 tests across 20 suites
+  tests/               # 550 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

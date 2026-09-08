@@ -404,6 +404,24 @@ class ModelForge:
         return self.evaluation.list_evaluations_for_truncated(
             model_id, truncated)
 
+    def list_evaluations_for_seed(self, model_id: str,
+                                  seed: int) -> list[EvaluationRecord]:
+        """Immutable M4 evaluation records of ONE model by persisted
+        effective seed (M48 read-only access).
+
+        ``seed`` is the REQUIRED integer persisted on every record
+        (the effective seed used, default derived from the config) —
+        an OPEN value axis with NO registry, so a non-integer
+        spelling is rejected at the API boundary with 422, while an
+        unknown model raises FileNotFoundError (404) exactly like the
+        sibling groupings. Returns the model's authoritative M4
+        listing filtered by the persisted record value (matched
+        VERBATIM — never recalculated, never normalized, never
+        derived from the config) in the M4 (created_at, eval_id)
+        order, as complete verbatim records. An unmatched seed on a
+        valid model returns []. Read-only, never writes."""
+        return self.evaluation.list_evaluations_for_seed(model_id, seed)
+
     # ------------------------------------------------------------------ #
     # Comparison (thin delegation; read-only orchestration over evaluations)
     # ------------------------------------------------------------------ #

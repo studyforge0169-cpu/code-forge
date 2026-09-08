@@ -657,6 +657,24 @@ def index() -> HTMLResponse:
         ordering. Pure data access — no aggregates, no re-runs, no
         automatic coverage enforcement, zero storage growth.</li>
 
+      <li><b>M48 evaluation history by seed</b> — one
+        read-only access path, <code>GET /models/&#123;id&#125;/evaluations/by-seed/&#123;seed&#125;</code>,
+        answers "which immutable evaluations of this model ran with
+        this effective seed?": the model's authoritative M4 listing
+        filtered by the REQUIRED integer <code>seed</code> persisted
+        on each record at run time (the effective seed used, default
+        derived from the config) — matched VERBATIM, never
+        recalculated, never normalized, never derived from the
+        embedded config dict, dataset identity, splits, tokenizers,
+        state kinds, losses, ids or timestamps. The seed is
+        bookkeeping identity, not a quality metric — no seed is
+        better than another. The seed is an OPEN integer value axis
+        (no registry, no enum): any integer is type-valid — an
+        unmatched seed -> 200 [] — while a non-integer spelling ->
+        422 (schema-level, pre-handler); unknown model -> 404; full
+        record payloads, exact M4 ordering. Pure data access — no
+        aggregates, no seed sweeps, zero storage growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -695,6 +713,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-split/&#123;split&#125;</code> — evaluations of ONE model on ONE dataset split (read-only, deterministic; unsupported split 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-state-kind/&#123;state_kind&#125;</code> — evaluations of ONE model over ONE kind of model state (read-only, deterministic, persisted state_kind verbatim; unsupported state kind 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-truncated/&#123;truncated&#125;</code> — evaluations of ONE model by persisted truncation status (read-only, deterministic, boolean verbatim, no quality judgment; non-boolean 422)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-seed/&#123;seed&#125;</code> — evaluations of ONE model by persisted effective seed (read-only, deterministic, persisted integer verbatim, open value axis; unmatched -> [], non-integer 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/&#123;eval&#125;</code> — one evaluation record</li>
       <li><code>POST  {prefix}/comparisons/run</code> — A/B comparison (improved / regressed / unchanged)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons</code> — immutable comparison history</li>
@@ -1080,7 +1099,8 @@ def rollback_model(model_id: str, request: RollbackRequest) -> ModelRecord:
 # Milestone 30 adds the read-only by-tokenizer grouping of the history;
 # Milestone 36 adds the read-only by-split grouping of the same history;
 # Milestone 38 adds the read-only by-state-kind grouping of the same history;
-# Milestone 47 adds the read-only by-truncated grouping of the same history)
+# Milestone 47 adds the read-only by-truncated grouping of the same history;
+# Milestone 48 adds the read-only by-seed grouping of the same history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/evaluations/run", response_model=EvaluationRecord, tags=["evaluation"])
@@ -1294,6 +1314,39 @@ def list_evaluations_by_truncated(model_id: str,
     try:
         return _forge().list_evaluations_for_truncated(model_id,
                                                        truncated)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/evaluations/by-seed/{seed}",
+         response_model=list[EvaluationRecord], tags=["evaluation"])
+def list_evaluations_by_seed(model_id: str,
+                             seed: int) -> list[EvaluationRecord]:
+    """Immutable M4 evaluations of ONE model by persisted effective
+    seed (M48).
+
+    Read-only per-seed grouping: returns the model's authoritative
+    M4 listing filtered by the REQUIRED integer ``seed`` persisted
+    on each EvaluationRecord at run time (the effective seed used,
+    default derived from the config) — matched VERBATIM, never
+    recalculated, never normalized, never derived from the embedded
+    config dict, request parameters, dataset identity, splits,
+    tokenizers, state kinds, losses, ids, timestamps or any other
+    field. The seed is bookkeeping identity, not a quality metric —
+    no seed is better than another. Complete verbatim payloads in
+    the exact M4 (created_at, eval_id) order. The seed is an OPEN
+    integer value axis (no registry, no enum): any integer is
+    type-valid — an unmatched seed on a valid model returns 200 []
+    — while a non-integer spelling is rejected with 422 at the API
+    boundary (schema-level validation — never a silent
+    reinterpretation, and the validation fires BEFORE this handler
+    even for an unknown model); an unknown model with a VALID
+    integer raises FileNotFoundError -> 404 exactly like the sibling
+    groupings. No aggregates, no writes. (Must stay registered
+    before /evaluations/{eval_id}; the literal "by-seed" segment is
+    not an evaluation id.)"""
+    try:
+        return _forge().list_evaluations_for_seed(model_id, seed)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

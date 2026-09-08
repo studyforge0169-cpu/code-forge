@@ -621,8 +621,9 @@ def test_m23_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
     # + 1 (M46 checkpoints by-run)
-    # + 1 (M47 evaluations by-truncated) = 79
-    assert len(spec["paths"]) == 79
+    # + 1 (M47 evaluations by-truncated)
+    # + 1 (M48 evaluations by-seed) = 80
+    assert len(spec["paths"]) == 80
 
 
 # --------------------------------------------------------------------------- #
@@ -809,8 +810,9 @@ def test_m34_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
     # + 1 (M46 checkpoints by-run)
-    # + 1 (M47 evaluations by-truncated) = 79
-    assert len(spec["paths"]) == 79
+    # + 1 (M47 evaluations by-truncated)
+    # + 1 (M48 evaluations by-seed) = 80
+    assert len(spec["paths"]) == 80
     path = ("/api/v1/models/{model_id}/gates/decisions/by-comparison"
             "/{comparison_id}")
     keys = list(spec["paths"])
@@ -1006,8 +1008,9 @@ def test_m41_api_by_decision_404_422s_isolation_regressions_openapi(
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
     # + 1 (M46 checkpoints by-run)
-    # + 1 (M47 evaluations by-truncated) = 79
-    assert len(spec["paths"]) == 79
+    # + 1 (M47 evaluations by-truncated)
+    # + 1 (M48 evaluations by-seed) = 80
+    assert len(spec["paths"]) == 80
     path = ("/api/v1/models/{model_id}/gates/decisions/by-decision/"
             "{decision}")
     keys = list(spec["paths"])
@@ -1247,8 +1250,9 @@ def test_m43_api_by_verdict_404_422s_isolation_regressions_openapi(
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
     # + 1 (M46 checkpoints by-run)
-    # + 1 (M47 evaluations by-truncated) = 79
-    assert len(spec["paths"]) == 79
+    # + 1 (M47 evaluations by-truncated)
+    # + 1 (M48 evaluations by-seed) = 80
+    assert len(spec["paths"]) == 80
     path = ("/api/v1/models/{model_id}/gates/decisions/by-verdict/"
             "{verdict}")
     keys = list(spec["paths"])
@@ -1471,8 +1475,9 @@ def test_m45_api_by_baseline_type_404_422s_isolation_regressions_openapi(
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
     # + 1 (M46 checkpoints by-run)
-    # + 1 (M47 evaluations by-truncated) = 79
-    assert len(spec["paths"]) == 79
+    # + 1 (M47 evaluations by-truncated)
+    # + 1 (M48 evaluations by-seed) = 80
+    assert len(spec["paths"]) == 80
     path = ("/api/v1/models/{model_id}/gates/decisions/by-baseline-type/"
             "{baseline_type}")
     keys = list(spec["paths"])

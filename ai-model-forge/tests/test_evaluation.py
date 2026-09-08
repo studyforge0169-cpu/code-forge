@@ -1047,3 +1047,65 @@ def test_m47_engine_unknown_model_not_found(env):
         env.forge.list_evaluations_for_truncated("ghost-model-47", True)
     with pytest.raises(FileNotFoundError):
         env.forge.list_evaluations_for_truncated("ghost-model-47", False)
+
+
+# =========================================================================== #
+# M48: evaluation history by seed (read-only integer value grouping)
+# =========================================================================== #
+
+def test_m48_engine_filters_by_persisted_seed(env):
+    a, b, e_trunc = _m47_env(env)
+    f = env.forge
+    listing = f.list_evaluations(a)
+    seeds = sorted({r.seed for r in listing})
+    # multiple groups with different cardinalities exist in the
+    # listing (the module fixtures seed 3811/3812/3813/4711 and more)
+    assert len(seeds) >= 4
+    for seed in seeds:
+        got = f.list_evaluations_for_seed(a, seed)
+        # parity with the authoritative M4 listing filtered by the
+        # persisted record value; deterministic (created_at, eval_id)
+        # order; membership from the persisted field only
+        assert got == [r for r in listing if r.seed == seed]
+        keyed = [(r.created_at, r.eval_id) for r in got]
+        assert keyed == sorted(keyed)
+        assert all(r.seed == seed and r.model_id == a for r in got)
+        for r in got:
+            assert r == f.get_evaluation(a, r.eval_id)
+    # the fixture's records land in their own one-record groups with
+    # the persisted seed VERBATIM (never derived from the config)
+    for e in (e_trunc,):
+        got = f.list_evaluations_for_seed(a, e.seed)
+        assert e.eval_id in {r.eval_id for r in got}
+
+
+def test_m48_engine_seed_partition_unmatched_and_empty_model(env):
+    a, b, e_trunc = _m47_env(env)
+    f = env.forge
+    listing = f.list_evaluations(a)
+    seeds = sorted({r.seed for r in listing})
+    groups = {s: f.list_evaluations_for_seed(a, s) for s in seeds}
+    # TRUE disjoint partition: pairwise-disjoint groups whose union is
+    # the full listing; no None case — the int is REQUIRED
+    assert all(isinstance(r.seed, int) for r in listing)
+    all_ids: set = set()
+    for s in seeds:
+        ids = {r.eval_id for r in groups[s]}
+        assert all_ids.isdisjoint(ids)
+        all_ids |= ids
+    assert all_ids == {r.eval_id for r in listing}
+    # unmatched valid integer -> [] (natural valid-empty)
+    assert f.list_evaluations_for_seed(a, 987654) == []
+    # empty-history model -> [] for any seed
+    assert f.list_evaluations(b) == []
+    assert f.list_evaluations_for_seed(b, seeds[0]) == []
+    assert f.list_evaluations_for_seed(b, 987654) == []
+
+
+def test_m48_engine_unknown_model_not_found(env):
+    # unknown model -> FileNotFoundError (404 at the API), exactly
+    # like the sibling groupings
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_evaluations_for_seed("ghost-model-48", 11)
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_evaluations_for_seed("ghost-model-48", 987654)
