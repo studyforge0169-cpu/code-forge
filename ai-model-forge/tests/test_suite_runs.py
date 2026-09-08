@@ -808,8 +808,9 @@ def test_m21_api_existing_surfaces_and_openapi(api_client):
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
-    # + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 78
+    # + 1 (M46 checkpoints by-run)
+    # + 1 (M47 evaluations by-truncated) = 79
+    assert len(spec["paths"]) == 79
 
 
 # =========================================================================== #
@@ -1021,8 +1022,9 @@ def test_m22_api_openapi_documented(api_client):
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
-    # + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 78
+    # + 1 (M46 checkpoints by-run)
+    # + 1 (M47 evaluations by-truncated) = 79
+    assert len(spec["paths"]) == 79
 
 
 # =========================================================================== #
@@ -1287,5 +1289,6 @@ def test_m25_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
-    # + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 78
+    # + 1 (M46 checkpoints by-run)
+    # + 1 (M47 evaluations by-truncated) = 79
+    assert len(spec["paths"]) == 79

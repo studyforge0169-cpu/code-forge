@@ -971,3 +971,79 @@ def test_m38_engine_repeated_calls_identical(env):
                  f.list_evaluations_for_state_kind(a,
                                                    EvalStateKind.CHECKPOINT)]
         assert again == first
+
+
+# =========================================================================== #
+# M47: evaluation history by truncation (read-only boolean grouping)
+# =========================================================================== #
+
+def _m47_env(env):
+    """M47 state on top of the shared module env (cached): the M38
+    model a (its full evaluations are all untruncated) plus ONE
+    capped TRAIN-split evaluation (truncated=True through the REAL
+    engine), plus the M28 empty-history model b.
+    Returns (a, b, e_trunc)."""
+    cached = getattr(env, "_m47_state", None)
+    if cached is not None:
+        return cached
+    a, b, _, _, _ = _m38_env(env)      # b: NO evaluations at all
+    f = env.forge
+    e_trunc = f.run_evaluation(env.eval_cfg(
+        a, split=EvaluationSplit.TRAIN, max_eval_tokens=100, seed=4711))
+    assert e_trunc.truncated is True   # the cap really stopped it
+    env._m47_state = (a, b, e_trunc)
+    return env._m47_state
+
+
+def test_m47_engine_filters_by_persisted_truncated_boolean(env):
+    a, b, e_trunc = _m47_env(env)
+    f = env.forge
+    listing = f.list_evaluations(a)
+    for value in (False, True):
+        got = f.list_evaluations_for_truncated(a, value)
+        # parity with the authoritative M4 listing filtered by the
+        # persisted boolean; deterministic (created_at, eval_id)
+        # order; membership from the persisted field only
+        assert got == [r for r in listing if r.truncated == value]
+        keyed = [(r.created_at, r.eval_id) for r in got]
+        assert keyed == sorted(keyed)
+        assert all(r.truncated == value and r.model_id == a for r in got)
+        for r in got:
+            assert r == f.get_evaluation(a, r.eval_id)
+    # the fixture's capped record lands in the True group VERBATIM
+    # (never recategorized from records_covered/token_count) and in
+    # no other group
+    got_t = f.list_evaluations_for_truncated(a, True)
+    got_f = f.list_evaluations_for_truncated(a, False)
+    assert e_trunc.eval_id in {r.eval_id for r in got_t}
+    assert e_trunc.eval_id not in {r.eval_id for r in got_f}
+    assert e_trunc.records_covered is None and e_trunc.token_count == 100
+
+
+def test_m47_engine_true_false_partition_and_empty_model(env):
+    a, b, e_trunc = _m47_env(env)
+    f = env.forge
+    listing = f.list_evaluations(a)
+    got_t = f.list_evaluations_for_truncated(a, True)
+    got_f = f.list_evaluations_for_truncated(a, False)
+    # both groups non-empty; TRUE disjoint partition of the listing
+    assert got_t and got_f
+    ids_t = {r.eval_id for r in got_t}
+    ids_f = {r.eval_id for r in got_f}
+    assert ids_t.isdisjoint(ids_f)
+    assert ids_t | ids_f == {r.eval_id for r in listing}
+    # no None case: the boolean is REQUIRED on every record
+    assert all(isinstance(r.truncated, bool) for r in listing)
+    # empty-history model: BOTH values -> [] (a valid empty, not 404)
+    assert f.list_evaluations(b) == []
+    assert f.list_evaluations_for_truncated(b, False) == []
+    assert f.list_evaluations_for_truncated(b, True) == []
+
+
+def test_m47_engine_unknown_model_not_found(env):
+    # unknown model -> FileNotFoundError (404 at the API), exactly
+    # like the sibling groupings, for BOTH boolean values
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_evaluations_for_truncated("ghost-model-47", True)
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_evaluations_for_truncated("ghost-model-47", False)

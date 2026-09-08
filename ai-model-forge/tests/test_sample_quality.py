@@ -847,8 +847,9 @@ def test_api_openapi_exposes_sample_quality(api_client):
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
-    # + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 78
+    # + 1 (M46 checkpoints by-run)
+    # + 1 (M47 evaluations by-truncated) = 79
+    assert len(spec["paths"]) == 79
 
 
 # =========================================================================== #
@@ -1098,8 +1099,9 @@ def test_api_openapi_records_route(api_client):
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
-    # + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 78
+    # + 1 (M46 checkpoints by-run)
+    # + 1 (M47 evaluations by-truncated) = 79
+    assert len(spec["paths"]) == 79
 
 
 # =========================================================================== #
@@ -1336,7 +1338,7 @@ def test_api_openapi_by_sample_route(api_client):
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type) -> 77
-    assert len(spec["paths"]) == 78
+    assert len(spec["paths"]) == 79
 
 
 # =========================================================================== #
@@ -1573,7 +1575,7 @@ def test_api_openapi_by_checkpoint_route(api_client):
     assert ("/api/v1/models/{model_id}/sample-quality/{evaluation_id}"
             in spec["paths"])
     # M18–M28 each added exactly one documented route -> 60
-    assert len(spec["paths"]) == 78
+    assert len(spec["paths"]) == 79
 
 
 # =========================================================================== #
@@ -1891,8 +1893,9 @@ def test_m33_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
-    # + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 78
+    # + 1 (M46 checkpoints by-run)
+    # + 1 (M47 evaluations by-truncated) = 79
+    assert len(spec["paths"]) == 79
     path = ("/api/v1/models/{model_id}/sample-quality/by-tokenizer"
             "/{tokenizer_id}")
     keys = list(spec["paths"])

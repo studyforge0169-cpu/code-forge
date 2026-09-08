@@ -361,8 +361,9 @@ def test_m24_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
-    # + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 78
+    # + 1 (M46 checkpoints by-run)
+    # + 1 (M47 evaluations by-truncated) = 79
+    assert len(spec["paths"]) == 79
 
 
 # =========================================================================== #
@@ -469,7 +470,7 @@ def test_m28_api_404s_scoping_regressions_openapi(api_client):
     path = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
             "{dataset_id}")
     generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
-    assert len(spec["paths"]) == 78
+    assert len(spec["paths"]) == 79
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
@@ -596,7 +597,7 @@ def test_m30_api_404s_scoping_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
     m28 = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
            "{dataset_id}")
-    assert len(spec["paths"]) == 78
+    assert len(spec["paths"]) == 79
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
@@ -759,8 +760,9 @@ def test_m36_api_404_422_isolation_regressions_openapi(api_client):
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
     # + 1 (M45 gate decisions by-baseline-type)
-    # + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 78
+    # + 1 (M46 checkpoints by-run)
+    # + 1 (M47 evaluations by-truncated) = 79
+    assert len(spec["paths"]) == 79
     path = "/api/v1/models/{model_id}/evaluations/by-split/{split}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -906,7 +908,7 @@ def test_m38_api_by_state_kind_404_422s_isolation_regressions_openapi(
     # evaluation, EvaluationRecord items, state_kind $ref
     # EvalStateKind; route order by-split < by-state-kind < generic
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 78
+    assert len(spec["paths"]) == 79
     path = ("/api/v1/models/{model_id}/evaluations/by-state-kind/"
             "{state_kind}")
     keys = list(spec["paths"])
@@ -926,3 +928,151 @@ def test_m38_api_by_state_kind_404_422s_isolation_regressions_openapi(
                       "{split}") < keys.index(path)
     assert keys.index(path) < keys.index(
         "/api/v1/models/{model_id}/evaluations/{eval_id}")
+
+
+# --------------------------------------------------------------------------- #
+# M47: evaluation history by truncation (read-only boolean grouping)
+# --------------------------------------------------------------------------- #
+
+BY_TRUNCATED = "/api/v1/models/{mid}/evaluations/by-truncated/{truncated}"
+
+
+def test_m47_api_by_truncated_grouping_partition_determinism(api_client):
+    ds_id, tok_id, model_id, _ = _prepare(api_client, "m47a")
+    # a full evaluation (no cap) -> truncated False; a capped
+    # TRAIN-split evaluation -> truncated True — BOTH through the
+    # REAL engine, never fabricated records
+    full = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, seed=4711)).json()
+    cap = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, split="train", max_eval_tokens=100,
+        seed=4712)).json()
+    assert full["truncated"] is False and cap["truncated"] is True
+
+    listing = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    keyed = [(x["created_at"], x["eval_id"]) for x in listing]
+    assert keyed == sorted(keyed)
+    got_f = api_client.get(BY_TRUNCATED.format(mid=model_id,
+                                               truncated="false"))
+    got_t = api_client.get(BY_TRUNCATED.format(mid=model_id,
+                                               truncated="true"))
+    assert got_f.status_code == 200 and got_t.status_code == 200
+    # authoritative-filter parity: exact subsets of the M4 listing
+    # whose persisted boolean matches, in the same order
+    assert got_f.json() == [x for x in listing
+                            if x["truncated"] is False]
+    assert got_t.json() == [x for x in listing
+                            if x["truncated"] is True]
+    # TRUE disjoint partition: False + True == all, no overlap
+    ids_f = {x["eval_id"] for x in got_f.json()}
+    ids_t = {x["eval_id"] for x in got_t.json()}
+    assert ids_f.isdisjoint(ids_t)
+    assert ids_f | ids_t == {x["eval_id"] for x in listing}
+    assert full["eval_id"] in ids_f and cap["eval_id"] in ids_t
+    # verbatim: each element equals its detail-getter payload
+    # (loss/perplexity/state identity included)
+    for x in got_f.json() + got_t.json():
+        one = api_client.get(
+            f"{MODELS}/{model_id}/evaluations/{x['eval_id']}")
+        assert one.status_code == 200 and one.json() == x
+    # determinism: byte-identical repeats
+    again = api_client.get(BY_TRUNCATED.format(mid=model_id,
+                                               truncated="true"))
+    assert again.content == got_t.content
+
+
+def test_m47_api_errors_isolation_regressions_openapi(api_client):
+    ds_id, tok_id, model_id, run = _prepare(api_client, "m47b")
+    o_ds, o_tok, other_id, o_run = _prepare(api_client, "m47iso")
+    full = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, seed=4721)).json()
+    other = api_client.post(EVAL_RUN, json=_eval_cfg(
+        other_id, o_ds, o_tok, seed=4722)).json()
+
+    # valid boolean with no matches -> 200 []
+    empty_t = api_client.get(BY_TRUNCATED.format(mid=model_id,
+                                                 truncated="true"))
+    assert empty_t.status_code == 200 and empty_t.json() == []
+    # unknown model + valid boolean -> 404
+    assert api_client.get(BY_TRUNCATED.format(
+        mid="ghost", truncated="true")).status_code == 404
+    # non-boolean spellings -> 422 (schema-level validation at the
+    # API boundary, pre-handler — booleans are never silently
+    # reinterpreted), on the known model AND on an unknown model
+    for bad in ("maybe", "2", "yes-no"):
+        assert api_client.get(
+            f"{MODELS}/{model_id}/evaluations/by-truncated/{bad}"
+        ).status_code == 422
+        assert api_client.get(
+            f"{MODELS}/ghost/evaluations/by-truncated/{bad}"
+        ).status_code == 422
+    # cross-model isolation: the other model's evaluation never leaks
+    listing_o = api_client.get(f"{MODELS}/{other_id}/evaluations").json()
+    got_o = api_client.get(BY_TRUNCATED.format(mid=other_id,
+                                               truncated="false"))
+    assert got_o.status_code == 200 and got_o.json() == listing_o
+    assert other["eval_id"] not in {
+        x["eval_id"] for x in api_client.get(
+            BY_TRUNCATED.format(mid=model_id, truncated="false")).json()}
+
+    # M4 regressions: listing + detail unchanged
+    listing = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert {full["eval_id"]} <= {x["eval_id"] for x in listing}
+    one = api_client.get(
+        f"{MODELS}/{model_id}/evaluations/{full['eval_id']}")
+    assert one.status_code == 200 and one.json() == full
+    # M24/M36/M38 by-* regressions with listing parity
+    ck_id = api_client.get(
+        f"{MODELS}/{model_id}/checkpoints").json()[0]["checkpoint_id"]
+    ck_eval = api_client.post(EVAL_RUN, json=_eval_cfg(
+        model_id, ds_id, tok_id, checkpoint_id=ck_id, seed=4723)).json()
+    listing = api_client.get(f"{MODELS}/{model_id}/evaluations").json()
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-checkpoint/{ck_id}"
+    ).json() == [x for x in listing if x["checkpoint_id"] == ck_id]
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-split/validation"
+    ).json() == [x for x in listing if x["split"] == "validation"]
+    assert api_client.get(
+        f"{MODELS}/{model_id}/evaluations/by-state-kind/checkpoint"
+    ).json() == [x for x in listing if x["state_kind"] == "checkpoint"]
+    # M46 checkpoint-by-run regression: the training run still groups
+    by_run = api_client.get(
+        f"{MODELS}/{model_id}/checkpoints/by-run/{run['run_id']}")
+    assert by_run.status_code == 200 and by_run.json() == [
+        c for c in api_client.get(
+            f"{MODELS}/{model_id}/checkpoints").json()
+        if c["run_id"] == run["run_id"]]
+    assert ck_eval["checkpoint_id"] == ck_id
+
+    # OpenAPI: 79 paths, the new path exactly once, GET-only, tag
+    # evaluation, EvaluationRecord items, boolean parameter; route
+    # order by-state-kind < by-truncated < generic eval detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30) + 1 (M31) + 1 (M32) + 1 (M33)
+    # + 1 (M34) + 1 (M35) + 1 (M36) + 1 (M37) + 1 (M38) + 1 (M39)
+    # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
+    # + 1 (M45) + 1 (M46) + 1 (M47 evaluations by-truncated) = 79
+    assert len(spec["paths"]) == 79
+    path = "/api/v1/models/{model_id}/evaluations/by-truncated/{truncated}"
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["evaluation"]
+    params = {p["name"]: p for p in item["get"]["parameters"]}
+    assert set(params) == {"model_id", "truncated"}
+    assert params["truncated"]["schema"]["type"] == "boolean"
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/EvaluationRecord"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/evaluations/"
+                      "by-state-kind/{state_kind}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/evaluations/{eval_id}")
+    # the M46 route is still present exactly once
+    assert keys.count("/api/v1/models/{model_id}/checkpoints/"
+                      "by-run/{run_id}") == 1

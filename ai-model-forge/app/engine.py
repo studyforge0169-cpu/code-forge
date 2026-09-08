@@ -382,6 +382,28 @@ class ModelForge:
         return self.evaluation.list_evaluations_for_state_kind(
             model_id, state_kind)
 
+    def list_evaluations_for_truncated(self, model_id: str,
+                                       truncated: bool
+                                       ) -> list[EvaluationRecord]:
+        """Immutable M4 evaluation records of ONE model by persisted
+        truncation status (M47 read-only access).
+
+        ``truncated`` is the persisted REQUIRED boolean the engine
+        recorded at run time (True = ``max_eval_tokens`` stopped the
+        evaluation before the split ended) — a closed two-value
+        contract with NO registry, so an unsupported spelling is
+        rejected at the API boundary with 422, while an unknown model
+        raises FileNotFoundError (404) exactly like the sibling
+        groupings. Returns the model's authoritative M4 listing
+        filtered by the persisted boolean (matched VERBATIM — never
+        recalculated, never derived from records_covered, token
+        counts, config or timestamps) in the M4 (created_at, eval_id)
+        order, as complete verbatim records. A model with no
+        evaluations of one status returns []. Read-only, never
+        writes."""
+        return self.evaluation.list_evaluations_for_truncated(
+            model_id, truncated)
+
     # ------------------------------------------------------------------ #
     # Comparison (thin delegation; read-only orchestration over evaluations)
     # ------------------------------------------------------------------ #

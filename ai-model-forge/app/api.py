@@ -637,6 +637,26 @@ def index() -> HTMLResponse:
         IS the registry. Pure data access — no aggregates, no
         lineage graphs, zero storage growth.</li>
 
+      <li><b>M47 evaluation history by truncation</b> — one
+        read-only access path, <code>GET /models/&#123;id&#125;/evaluations/by-truncated/&#123;truncated&#125;</code>,
+        answers "which immutable evaluations of this model were
+        stopped early by the max_eval_tokens cap?": the model's
+        authoritative M4 listing filtered by the persisted REQUIRED
+        boolean <code>truncated</code> the engine recorded at run
+        time (True = the cap stopped the evaluation before the split
+        ended; False = the configured/permitted stream was consumed
+        without the cap cutting it short) — matched VERBATIM, never
+        recalculated, never derived from records_covered, token
+        counts, split length, configuration, timestamps or
+        durations; the boolean carries NO quality judgment — it is
+        engine metadata about how far the evaluation stream was
+        consumed, nothing more. The closed two-value contract makes
+        the groups a TRUE disjoint partition with no None case;
+        non-boolean spellings -> 422 (schema-level, pre-handler);
+        unknown model -> 404; full record payloads, exact M4
+        ordering. Pure data access — no aggregates, no re-runs, no
+        automatic coverage enforcement, zero storage growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -674,6 +694,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-tokenizer/&#123;tok&#125;</code> — evaluations of ONE model with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-split/&#123;split&#125;</code> — evaluations of ONE model on ONE dataset split (read-only, deterministic; unsupported split 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-state-kind/&#123;state_kind&#125;</code> — evaluations of ONE model over ONE kind of model state (read-only, deterministic, persisted state_kind verbatim; unsupported state kind 422)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/by-truncated/&#123;truncated&#125;</code> — evaluations of ONE model by persisted truncation status (read-only, deterministic, boolean verbatim, no quality judgment; non-boolean 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations/&#123;eval&#125;</code> — one evaluation record</li>
       <li><code>POST  {prefix}/comparisons/run</code> — A/B comparison (improved / regressed / unchanged)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons</code> — immutable comparison history</li>
@@ -1058,7 +1079,8 @@ def rollback_model(model_id: str, request: RollbackRequest) -> ModelRecord:
 # Milestone 28 adds the read-only by-dataset grouping of the history;
 # Milestone 30 adds the read-only by-tokenizer grouping of the history;
 # Milestone 36 adds the read-only by-split grouping of the same history;
-# Milestone 38 adds the read-only by-state-kind grouping of the same history)
+# Milestone 38 adds the read-only by-state-kind grouping of the same history;
+# Milestone 47 adds the read-only by-truncated grouping of the same history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/evaluations/run", response_model=EvaluationRecord, tags=["evaluation"])
@@ -1236,6 +1258,42 @@ def list_evaluations_by_state_kind(model_id: str,
     try:
         return _forge().list_evaluations_for_state_kind(model_id,
                                                         state_kind)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/evaluations/by-truncated/{truncated}",
+         response_model=list[EvaluationRecord], tags=["evaluation"])
+def list_evaluations_by_truncated(model_id: str,
+                                  truncated: bool
+                                  ) -> list[EvaluationRecord]:
+    """Immutable M4 evaluations of ONE model by persisted truncation
+    status (M47).
+
+    Read-only per-status grouping: returns the model's authoritative
+    M4 listing filtered by the persisted REQUIRED boolean
+    ``truncated`` recorded in each EvaluationRecord (True =
+    ``max_eval_tokens`` stopped the evaluation before the split
+    ended; False = the configured/permitted evaluation stream was
+    consumed without the cap cutting it short) — matched VERBATIM,
+    never recalculated, never derived from records_covered, token
+    counts, split length, the evaluation configuration, timestamps,
+    durations, state kinds or any other field. The boolean carries
+    no quality judgment — it is engine metadata about how far the
+    evaluation stream was consumed, nothing more. Complete verbatim
+    payloads in the exact M4 (created_at, eval_id) order; a model
+    with no evaluations of one status returns []. The boolean is a
+    closed two-value contract (no registry): non-boolean spellings
+    are rejected with 422 at the API boundary (schema-level
+    validation — never a silent reinterpretation, and the validation
+    fires BEFORE this handler even for an unknown model), while an
+    unknown model with a VALID boolean raises FileNotFoundError ->
+    404 exactly like the sibling groupings. No aggregates, no
+    writes. (Must stay registered before /evaluations/{eval_id};
+    the literal "by-truncated" segment is not an evaluation id.)"""
+    try:
+        return _forge().list_evaluations_for_truncated(model_id,
+                                                       truncated)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

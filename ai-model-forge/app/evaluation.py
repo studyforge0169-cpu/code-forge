@@ -303,6 +303,40 @@ class EvaluationEngine:
         return [r for r in self.list_evaluations(model_id)
                 if r.state_kind == state_kind]
 
+    def list_evaluations_for_truncated(
+            self, model_id: str, truncated: bool
+    ) -> list[EvaluationRecord]:
+        """Immutable M4 evaluations of ONE model by persisted
+        truncation status (M47).
+
+        Membership comes from the persisted REQUIRED boolean ONLY:
+        every ``EvaluationRecord`` carries ``truncated: bool`` (the
+        engine's verbatim record of whether ``max_eval_tokens``
+        stopped the evaluation before the split ended — False means
+        the configured/permitted evaluation stream was consumed
+        without the cap cutting it short), and an evaluation belongs
+        to the request when that persisted boolean equals the
+        requested value — matched VERBATIM, never recalculated and
+        never derived from ``records_covered``, token counts, split
+        length, the evaluation configuration, timestamps, durations,
+        state kinds or any other field. The boolean is a closed
+        two-value contract (no registry): True and False are the
+        complete value space, so the two groups form a TRUE disjoint
+        partition of the listing with no None case; an unsupported
+        spelling is rejected at the API boundary with 422
+        (schema-level validation), while an unknown model raises
+        FileNotFoundError exactly like the sibling groupings. The
+        result is the model's authoritative M4 listing (the exact
+        engine parse + deterministic (created_at, eval_id) ASCENDING
+        order) filtered by the persisted boolean; complete verbatim
+        ``EvaluationRecord`` payloads. A model with no evaluations of
+        one status returns []. Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API)
+        return [r for r in self.list_evaluations(model_id)
+                if r.truncated == truncated]
+
     # ------------------------------------------------------------------ #
     # The run (preflight everything before creating any artifact)
     # ------------------------------------------------------------------ #

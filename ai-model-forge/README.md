@@ -1896,11 +1896,44 @@ generation never trains, evaluates, scores, ranks or judges output.
   byte-identical before and after. No caches, no new storage —
   repeated GETs are byte-identical and the endpoint never writes
 
+### Milestone 47 — evaluation history by truncation
+  (`evaluations/by-truncated`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/evaluations/by-truncated/{truncated}` —
+  answers "which immutable evaluations of this model were stopped
+  early by the `max_eval_tokens` cap?" and nothing else. Membership
+  comes from the persisted REQUIRED boolean `truncated` the engine
+  records on every `EvaluationRecord` at run time
+- **exact filtering (persisted boolean)**: True = `max_eval_tokens`
+  stopped the evaluation before the split ended; False = the
+  configured/permitted evaluation stream was consumed without the
+  cap cutting it short. The listing is the authoritative M4
+  evaluation history filtered VERBATIM by that persisted boolean —
+  NEVER recalculated, NEVER derived from `records_covered`, token
+  counts, split length, the evaluation configuration, timestamps,
+  durations, state kinds or any other field. The boolean carries NO
+  quality judgment — it is engine metadata about how far the
+  evaluation stream was consumed, nothing more; `truncated=True` is
+  not intrinsically better or worse. Each evaluation appears EXACTLY
+  ONCE; verbatim `EvaluationRecord` payloads in the exact M4
+  authoritative order ((created_at, eval_id) ascending, preserved)
+- **boundaries**: the closed two-value contract makes the two groups
+  a TRUE disjoint partition of the listing with no None case;
+  non-boolean spellings -> 422 (schema-level validation at the API
+  boundary, pre-handler — booleans are never silently reinterpreted
+  from arbitrary strings); unknown model + valid boolean -> 404; a
+  model with no evaluations of one status -> `200 []`. M4 (run,
+  listing, getter), M24/M28/M30/M36/M38 evaluation groupings, M46
+  checkpoint-by-run and the other M22–M45 surfaces are byte-identical
+  before and after. No caches, no re-runs, no automatic coverage
+  enforcement, no new storage — repeated GETs are byte-identical and
+  the endpoint never writes
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 540 tests
+pytest                       # 545 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2381,7 +2414,8 @@ ai-model-forge/
                        # + read-only by-run grouping of the checkpoint history (M46)
     evaluation.py      # evaluation engine: read-only state measurement (M4)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
-                       #   by-state-kind grouping (M24/M28/M30/M36/M38)
+                       #   by-state-kind/by-truncated grouping
+                       #   (M24/M28/M30/M36/M38/M47)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
                        #   by-verdict/by-state-kind grouping
@@ -2404,7 +2438,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 540 tests across 20 suites
+  tests/               # 545 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
