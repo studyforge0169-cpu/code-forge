@@ -500,3 +500,94 @@ def test_warmup_lr_trace_in_checkpoints(env):
     lrs = [c["learning_rate"] for c in report.checkpoints]
     assert lrs[0] < lrs[1] <= 1e-2          # warmup ramps
     assert lrs[0] > 0
+
+
+# =========================================================================== #
+# M46: checkpoint history by training run (read-only grouping)
+# =========================================================================== #
+
+def test_m46_checkpoints_by_run_parity_partition_order(env):
+    model_id = env.new_model("t3-m46-runs")
+    run_a = env.forge.run_training(
+        env.cfg(model_id, steps=10, eval_every_steps=5)).run_id
+    run_b = env.forge.run_training(
+        env.cfg(model_id, steps=5, eval_every_steps=5)).run_id
+    assert run_a != run_b
+    # both runs are registered in the model's own provenance registry
+    prov = {p.run_id for p in
+            env.forge.get_model(model_id).training_provenance}
+    assert {run_a, run_b} <= prov
+    all_ckpts = env.forge.list_checkpoints(model_id)
+    # authoritative M3 ordering is (step, created_at) ascending
+    assert [(c.step, c.created_at) for c in all_ckpts] == \
+        sorted((c.step, c.created_at) for c in all_ckpts)
+    a = env.forge.list_checkpoints_for_run(model_id, run_a)
+    b = env.forge.list_checkpoints_for_run(model_id, run_b)
+    # exact listing parity: each group is the listing filtered VERBATIM
+    # by the checkpoints' own persisted run_id
+    assert a == [c for c in all_ckpts if c.run_id == run_a]
+    assert b == [c for c in all_ckpts if c.run_id == run_b]
+    assert len(a) == 2 and len(b) == 1
+    # TRUE disjoint partition (run_id is REQUIRED — no None case)
+    assert {c.checkpoint_id for c in a}.isdisjoint(
+        {c.checkpoint_id for c in b})
+    assert ({c.checkpoint_id for c in a} | {c.checkpoint_id for c in b}) \
+        == {c.checkpoint_id for c in all_ckpts}
+    # 2 + 1 == every checkpoint, each exactly once; per-group order is
+    # the exact authoritative (step, created_at) order preserved
+    for group, run_id in ((a, run_a), (b, run_b)):
+        assert [(c.step, c.created_at) for c in group] == \
+            sorted((c.step, c.created_at) for c in group)
+        assert all(c.run_id == run_id and c.model_id == model_id
+                   for c in group)
+
+
+def test_m46_zero_checkpoint_run_reached_via_listing_resilience(env):
+    # Engine reality: steps >= 1 and the FINAL step is always an eval
+    # point (training.py builds eval_points as
+    # range(eval_every, total+1, eval_every) | {total_steps}), so a
+    # healthy registered run ALWAYS produces >= 1 checkpoint. The
+    # zero-checkpoint case therefore surfaces only through the M3
+    # listing's corruption resilience: unreadable checkpoint manifests
+    # are SKIPPED by design, so a registered run whose only manifest
+    # is unreadable yields [] — never a 404, never fabricated ids.
+    model_id = env.new_model("t3-m46-empty")
+    report = env.forge.run_training(
+        env.cfg(model_id, steps=2, eval_every_steps=5))
+    # the run IS registered in the model's own training_provenance ...
+    prov_ids = {p.run_id for p in
+                env.forge.get_model(model_id).training_provenance}
+    assert report.run_id in prov_ids
+    # ... and a healthy run always owns at least one checkpoint
+    ckpts = env.forge.list_checkpoints(model_id)
+    assert len(ckpts) == 1 and ckpts[0].run_id == report.run_id
+    # corrupt the checkpoint manifest (the M3 listing skips it) — the
+    # SAME tampering convention as the M3 corruption tests above
+    mpath = (env.forge.training._ckpt_dir(model_id, ckpts[0].checkpoint_id)
+             / "manifest.json")
+    mpath.write_text("{ not json")
+    assert env.forge.list_checkpoints(model_id) == []
+    # registered run + zero readable checkpoints -> [] (valid empty)
+    assert env.forge.list_checkpoints_for_run(
+        model_id, report.run_id) == []
+
+
+def test_m46_unknown_run_model_and_cross_model_isolation(env):
+    model_a = env.new_model("t3-m46-iso-a")
+    model_b = env.new_model("t3-m46-iso-b")
+    run_a = env.forge.run_training(env.cfg(model_a, steps=5)).run_id
+    run_b = env.forge.run_training(env.cfg(model_b, steps=5)).run_id
+    assert len(env.forge.list_checkpoints_for_run(model_a, run_a)) == 1
+    assert len(env.forge.list_checkpoints_for_run(model_b, run_b)) == 1
+    # unknown model -> FileNotFoundError (404 at the API)
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_checkpoints_for_run("ghost-model-46", run_a)
+    # unknown run on a valid model -> FileNotFoundError
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_checkpoints_for_run(model_a, "no-such-run-46")
+    # a run id belonging to another model -> FileNotFoundError
+    # (model-scoped ownership via each model's own provenance)
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_checkpoints_for_run(model_a, run_b)
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_checkpoints_for_run(model_b, run_a)

@@ -622,6 +622,21 @@ def index() -> HTMLResponse:
         access — no aggregates, no rankings, zero storage
         growth.</li>
 
+      <li><b>M46 checkpoint history by training run</b> — one
+        read-only access path, <code>GET /models/&#123;id&#125;/checkpoints/by-run/&#123;run&#125;</code>,
+        answers "which immutable checkpoints did ONE training run of
+        this model produce?": the model's authoritative M3 listing
+        filtered by each checkpoint's own persisted
+        <code>run_id</code>, validated against the model's OWN
+        manifest <code>training_provenance</code> (an unknown run or
+        a run belonging to another model -> 404; membership NEVER
+        inferred from checkpoint directories, steps, epochs,
+        timestamps, losses or parent ids); exact (step, created_at)
+        ordering; a registered run with zero checkpoints -> 200 [];
+        no separate run registry is introduced — the model manifest
+        IS the registry. Pure data access — no aggregates, no
+        lineage graphs, zero storage growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -649,6 +664,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/tokenizers/train</code> — deterministic byte-level BPE</li>
       <li><code>POST  {prefix}/training/run</code> — train (CPT/SFT), synchronous</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints</code> — immutable checkpoint store</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/by-run/&#123;run&#125;</code> — checkpoints of one training run (provenance-validated, M46)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/&#123;ckpt&#125;</code> — one checkpoint</li>
       <li><code>POST  {prefix}/models/&#123;id&#125;/rollback</code> — verified restore of a checkpoint</li>
       <li><code>POST  {prefix}/evaluations/run</code> — read-only evaluation (current state or checkpoint)</li>
@@ -949,6 +965,8 @@ def delete_tokenizer(tokenizer_id: str) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------- #
 # Training
+# Milestone 46 adds the read-only by-run grouping of the checkpoint history
+#   (validated against the model's own training_provenance)
 # --------------------------------------------------------------------------- #
 
 
@@ -982,6 +1000,32 @@ def list_checkpoints(model_id: str) -> list[dict[str, Any]]:
     try:
         _forge().get_model(model_id)  # 404 for unknown models
         return [c.model_dump(mode="json") for c in _forge().list_checkpoints(model_id)]
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/checkpoints/by-run/{run_id}",
+         response_model=list[dict], tags=["training"])
+def list_checkpoints_by_run(model_id: str, run_id: str) -> list[dict[str, Any]]:
+    """Immutable checkpoints of ONE training run (M46; run-lineage
+    grouping validated against the model's own provenance).
+
+    Read-only per-run grouping: the run must be registered in the
+    model's own manifest training_provenance — an unknown model, an
+    unknown run or a run id that belongs to another model is 404 (run
+    ids are validated against the persisted provenance registry,
+    never inferred from checkpoint directories, steps, timestamps,
+    losses or parent relationships). Returns the authoritative M3
+    listing filtered VERBATIM by each checkpoint's own persisted
+    run_id, in the exact (step, created_at) ASCENDING order; a
+    registered run with zero checkpoints returns 200 []. No separate
+    training-run registry is introduced — the model manifest IS the
+    registry. Pure data access, never writes.
+    """
+    try:
+        return [c.model_dump(mode="json")
+                for c in _forge().list_checkpoints_for_run(model_id,
+                                                           run_id)]
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

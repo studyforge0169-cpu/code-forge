@@ -184,6 +184,32 @@ class TrainingEngine:
                 f"checkpoint '{ckpt_id}' not found for model '{model_id}'")
         return CheckpointRecord(**read_json(path))
 
+    def list_checkpoints_for_run(self, model_id: str, run_id: str
+                                 ) -> list[CheckpointRecord]:
+        """Immutable checkpoints of ONE training run (M46 read-only access).
+
+        Ownership: the run must be registered in the model's OWN
+        manifest training_provenance (RunProvenance.run_id) — an
+        unknown model, an unknown run or a run id that belongs to
+        another model raises FileNotFoundError (404 at the API); run
+        membership is NEVER inferred from checkpoint directories,
+        steps, epochs, timestamps, losses or parent relationships.
+        Returns the model's authoritative M3 listing (deterministic
+        (step, created_at) ASCENDING order) filtered VERBATIM by each
+        checkpoint's own persisted run_id, so every record is a
+        complete verbatim CheckpointRecord and checkpoints of other
+        runs/models never appear. A registered run with zero
+        checkpoints returns []. Read-only, never writes.
+        """
+        # model + run ownership: raises FileNotFoundError (404 at the API)
+        record = self.storage.load_record(model_id)
+        if run_id not in {p.run_id for p in record.training_provenance}:
+            raise FileNotFoundError(
+                f"training run '{run_id}' not found for model "
+                f"'{model_id}'")
+        return [c for c in self.list_checkpoints(model_id)
+                if c.run_id == run_id]
+
     # ------------------------------------------------------------------ #
     # Preflight
     # ------------------------------------------------------------------ #

@@ -272,6 +272,9 @@ class ModelForge:
     def get_checkpoint(self, model_id: str, checkpoint_id: str):
         return self.training.get_checkpoint(model_id, checkpoint_id)
 
+    def list_checkpoints_for_run(self, model_id: str, run_id: str):
+        return self.training.list_checkpoints_for_run(model_id, run_id)
+
     def rollback_model(self, model_id: str, checkpoint_id: str):
         return self.training.rollback(model_id, checkpoint_id)
 

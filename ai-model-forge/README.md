@@ -1863,11 +1863,44 @@ generation never trains, evaluates, scores, ranks or judges output.
   comparisons-by-state-kind and the M16–M44 surfaces are
   byte-identical before and after
 
+### Milestone 46 — checkpoint history by training run
+  (`checkpoints/by-run`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/checkpoints/by-run/{run_id}` — answers "which
+  immutable checkpoints did ONE training run of this model produce?"
+  and nothing else. Membership comes from each checkpoint's own
+  persisted `run_id` (REQUIRED identity field, "lineage within/across
+  runs"), and run ownership is validated against the model's OWN
+  manifest `training_provenance` — no separate training-run registry
+  is introduced; the model manifest IS the registry
+- **exact filtering (persisted checkpoint field)**: the listing is
+  the authoritative M3 checkpoint store filtered VERBATIM by
+  `c.run_id == run_id` — membership NEVER derived from checkpoint
+  directories, steps, epochs, timestamps, losses, parent
+  relationships or any provenance field other than the checkpoint's
+  own `run_id`; the provenance list is used ONLY for existence
+  validation (the 404), never for building the response. Each
+  checkpoint appears EXACTLY ONCE; verbatim `CheckpointRecord`
+  payloads in the exact M3 authoritative order ((step, created_at)
+  ascending, preserved — not replaced by another ordering)
+- **validation & boundaries**: unknown model -> existing 404;
+  unknown run on a valid model -> 404 (the run must appear in that
+  model's `training_provenance`); a run id belonging to another
+  model -> 404 (model-scoped ownership — the other model's manifest
+  does not register it); a registered run with zero checkpoints
+  (constructible through the real engine when configured steps
+  finish before checkpoint creation) -> `200 []`. `run_id` is a
+  persisted identifier, not an enum — no artificial validation rules
+  beyond the provenance registry. M3 (training run, listing, detail,
+  rollback), M24–M45 history surfaces, dashboards and registries are
+  byte-identical before and after. No caches, no new storage —
+  repeated GETs are byte-identical and the endpoint never writes
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 535 tests
+pytest                       # 540 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2345,6 +2378,7 @@ ai-model-forge/
     dataset.py         # data engine: ingestion, dedup, splits, versions, verify, tokenize
     tokenizer.py       # byte-level BPE engine
     training.py        # training engine: schedules, streams, run, checkpoints, rollback
+                       # + read-only by-run grouping of the checkpoint history (M46)
     evaluation.py      # evaluation engine: read-only state measurement (M4)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
                        #   by-state-kind grouping (M24/M28/M30/M36/M38)
@@ -2370,7 +2404,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 535 tests across 20 suites
+  tests/               # 540 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

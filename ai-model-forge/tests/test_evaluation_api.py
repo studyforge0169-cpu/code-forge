@@ -360,8 +360,9 @@ def test_m24_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M42 workflows by-status)
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
-    # + 1 (M45 gate decisions by-baseline-type) = 77
-    assert len(spec["paths"]) == 77
+    # + 1 (M45 gate decisions by-baseline-type)
+    # + 1 (M46 checkpoints by-run) = 78
+    assert len(spec["paths"]) == 78
 
 
 # =========================================================================== #
@@ -468,7 +469,7 @@ def test_m28_api_404s_scoping_regressions_openapi(api_client):
     path = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
             "{dataset_id}")
     generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
-    assert len(spec["paths"]) == 77
+    assert len(spec["paths"]) == 78
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
@@ -595,7 +596,7 @@ def test_m30_api_404s_scoping_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
     m28 = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
            "{dataset_id}")
-    assert len(spec["paths"]) == 77
+    assert len(spec["paths"]) == 78
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
@@ -757,8 +758,9 @@ def test_m36_api_404_422_isolation_regressions_openapi(api_client):
     # + 1 (M42 workflows by-status)
     # + 1 (M43 gate decisions by-verdict)
     # + 1 (M44 comparisons by-state-kind)
-    # + 1 (M45 gate decisions by-baseline-type) = 77
-    assert len(spec["paths"]) == 77
+    # + 1 (M45 gate decisions by-baseline-type)
+    # + 1 (M46 checkpoints by-run) = 78
+    assert len(spec["paths"]) == 78
     path = "/api/v1/models/{model_id}/evaluations/by-split/{split}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -904,7 +906,7 @@ def test_m38_api_by_state_kind_404_422s_isolation_regressions_openapi(
     # evaluation, EvaluationRecord items, state_kind $ref
     # EvalStateKind; route order by-split < by-state-kind < generic
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 77
+    assert len(spec["paths"]) == 78
     path = ("/api/v1/models/{model_id}/evaluations/by-state-kind/"
             "{state_kind}")
     keys = list(spec["paths"])
