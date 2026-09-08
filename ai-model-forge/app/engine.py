@@ -492,6 +492,28 @@ class ModelForge:
         return self.comparison.list_comparisons_for_verdict(
             model_id, verdict)
 
+    def list_comparisons_for_state_kind(self, model_id: str,
+                                        state_kind: EvalStateKind):
+        """Immutable M5 comparisons of ONE model involving ONE kind of
+        model state on EITHER side (M44 read-only access; M26's
+        either-side semantics).
+
+        The state kind is the persisted schema enum (current/checkpoint)
+        of each comparison side — there is NO state-kind registry, so
+        an unsupported value is rejected at the API boundary with 422,
+        while an unknown model raises FileNotFoundError (404) exactly
+        like the sibling groupings. Returns the model's authoritative
+        M5 listing filtered by the persisted side state kinds — a
+        comparison belongs to the request when EITHER side records the
+        requested kind (a both-sides match appears EXACTLY ONCE;
+        matched VERBATIM, never inferred from checkpoint ids or
+        hashes; nothing recalculated or re-executed) in the M5
+        (created_at, comparison_id) order, as complete verbatim
+        records. A valid state kind with no matching comparisons
+        returns []. Read-only, never writes."""
+        return self.comparison.list_comparisons_for_state_kind(
+            model_id, state_kind)
+
     # ------------------------------------------------------------------ #
     # Stage gates (thin delegation; M6)
     # ------------------------------------------------------------------ #

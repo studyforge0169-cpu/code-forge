@@ -583,6 +583,23 @@ def index() -> HTMLResponse:
         NO by-verdict group). Pure data access — no aggregates, no
         rankings, zero storage growth.</li>
 
+      <li><b>M44 comparison history by state kind</b> — one read-only
+        access path, <code>GET /models/&#123;id&#125;/comparisons/by-state-kind/&#123;state_kind&#125;</code>,
+        answers "which immutable comparisons of this model involve
+        the requested kind of model state on either side?": the
+        model's authoritative M5 listing filtered by the persisted
+        state kind of the comparison sides (the schema enum
+        current/checkpoint on each persisted side — M26's
+        either-side semantics: a comparison belongs when EITHER side
+        records the kind; a both-sides match appears exactly once),
+        matched VERBATIM — NEVER inferred from checkpoint ids or
+        hashes, never recalculated, nothing re-executed; full record
+        payloads, exact M5 ordering; unknown model -> 404; an
+        UNSUPPORTED state-kind value -> 422, because state kinds have
+        no registry — the enum IS the contract; a valid state kind
+        with no matching comparisons -> []). Pure data access — no
+        aggregates, no rankings, zero storage growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -627,6 +644,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-tokenizer/&#123;tok&#125;</code> — comparisons of ONE model with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-split/&#123;split&#125;</code> — comparisons of ONE model on ONE dataset split (read-only, deterministic, persisted shared-probe split verbatim; unsupported split 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-verdict/&#123;verdict&#125;</code> — comparisons of ONE model with ONE verdict (read-only, deterministic, persisted verdict verbatim — never recalculated; unsupported verdict 422)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-state-kind/&#123;state_kind&#125;</code> — comparisons of ONE model involving ONE kind of model state on EITHER side (read-only, deterministic, persisted side state kinds verbatim — never inferred; both-sides match appears once; unsupported state kind 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-tokenizer/&#123;tok&#125;</code> — samples of ONE model generated with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-strategy/&#123;strategy&#125;</code> — samples of ONE model generated with ONE decoding strategy (read-only, deterministic, persisted strategy verbatim — never recalculated; unsupported strategy 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tok&#125;</code> — M16 sample-quality measurements of ONE model under ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
@@ -1171,7 +1189,8 @@ def get_evaluation(model_id: str, eval_id: str) -> EvaluationRecord:
 # Milestone 29 adds the read-only by-dataset grouping of the immutable history;
 # Milestone 31 adds the read-only by-tokenizer grouping of the immutable history;
 # Milestone 37 adds the read-only by-split grouping of the same history;
-# Milestone 39 adds the read-only by-verdict grouping of the same history)
+# Milestone 39 adds the read-only by-verdict grouping of the same history;
+# Milestone 44 adds the read-only by-state-kind grouping with either-side semantics)
 # --------------------------------------------------------------------------- #
 
 @api.post("/comparisons/run", response_model=ComparisonRecord, tags=["comparison"])
@@ -1360,6 +1379,44 @@ def list_comparisons_by_verdict(model_id: str, verdict: ComparisonVerdict
     not a comparison id.)"""
     try:
         return _forge().list_comparisons_for_verdict(model_id, verdict)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/comparisons/by-state-kind/{state_kind}",
+         response_model=list[ComparisonRecord], tags=["comparison"])
+def list_comparisons_by_state_kind(model_id: str,
+                                   state_kind: EvalStateKind
+                                   ) -> list[ComparisonRecord]:
+    """Immutable comparisons of ONE model involving ONE kind of model
+    state on EITHER side (M44).
+
+    Read-only per-state-kind grouping with M26's either-side
+    semantics: returns the model's authoritative M5 listing filtered
+    by the persisted state kind of the comparison sides — a
+    comparison belongs to the request when EITHER persisted side
+    (state_a / state_b) records the requested state_kind (the
+    schema enum current/checkpoint; matched VERBATIM — membership
+    NEVER comes from inferring the kind from checkpoint ids, state
+    hashes, losses or evaluation results, nothing is recalculated or
+    re-executed; the persisted values are never resolved or
+    rewritten). Because the listing holds each record exactly once, a
+    comparison matching on BOTH sides appears EXACTLY ONCE. Complete
+    verbatim payloads (both sides, losses, verdict verbatim) in the
+    exact M5 (created_at, comparison_id) order; a valid state kind
+    with no matching comparisons returns []. State kinds have NO
+    registry (exactly like M38): the EvalStateKind enum IS the
+    contract, so an UNSUPPORTED state-kind value is rejected with 422
+    at the API boundary (schema-level validation — never a
+    registry-style 404, and the validation fires BEFORE this handler
+    even for an unknown model), while an unknown model with a VALID
+    state kind raises FileNotFoundError -> 404 exactly like the
+    sibling groupings. No aggregates, no rankings, no writes. (Must
+    stay registered before /comparisons/{comparison_id}; the literal
+    "by-state-kind" segment is not a comparison id.)"""
+    try:
+        return _forge().list_comparisons_for_state_kind(model_id,
+                                                        state_kind)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

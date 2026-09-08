@@ -1756,11 +1756,60 @@ generation never trains, evaluates, scores, ranks or judges output.
   by-decision, M42 workflows-by-status and the M16–M42 surfaces are
   byte-identical before and after
 
+### Milestone 44 — comparison history by state kind
+  (`comparisons/by-state-kind`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/comparisons/by-state-kind/{state_kind}` — answers
+  "which immutable comparisons of this model involve the requested
+  kind of model state on either side?" and nothing else. The
+  enum-contract sibling of M38 (evaluation history by state kind),
+  with M26's either-side semantics because comparison records persist
+  TWO states
+- **exact filtering (persisted side state kinds, EITHER side)**:
+  every `ComparisonRecord` persists both sides (`state_a` /
+  `state_b`, each with `state_kind: EvalStateKind` — current = the
+  model's published weights, checkpoint = an immutable stored
+  checkpoint), and a comparison belongs to the request only when
+  EITHER side's persisted value matches VERBATIM — never inferred
+  from checkpoint ids alone, state hashes, losses or evaluation
+  results, never recalculated or rewritten, no comparison
+  re-executed. Because the listing holds each record exactly once, a
+  comparison matching on BOTH sides (A = B = checkpoint) appears
+  EXACTLY ONCE. Verbatim `ComparisonRecord` payloads (both sides,
+  losses, verdict verbatim) in the exact M5 authoritative order
+  ((created_at, comparison_id) ASCENDING)
+- **the 422-vs-404 contract (no state-kind registry)**: state kinds
+  are a SCHEMA ENUM, not a registry — exactly like M38, an
+  unsupported state-kind value is rejected with 422 by schema
+  validation at the API boundary (before the handler, matching
+  M36–M43: even unknown-model + invalid-state-kind is 422); unknown
+  model with a VALID state kind -> existing 404; a valid state kind
+  with zero matching comparisons is a deterministic `[]` — never a
+  404 (production currently holds checkpoint -> 8 / current -> 2 for
+  `4a0a871886ef` — both groups non-empty; every state kind of
+  `b5bc905326b6` is a natural valid-empty case)
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_comparisons_for_state_kind(model_id, state_kind)`
+  filters the authoritative M5 `list_comparisons()` by the persisted
+  side state kinds (the same either-side `involves()` shape as M26;
+  ZERO new composition lines); the facade and route are thin
+  pass-throughs registered after the M39 by-verdict route and
+  **before** the generic `/comparisons/{comparison_id}` detail getter
+  (M26/M29/M31/M37/M39/M44 are different groupings of the same
+  listing, all intact). No caches, no new storage — repeated GETs are
+  byte-identical and the endpoint never writes
+- **isolation & boundaries**: unknown model -> existing 404;
+  unsupported state-kind value -> 422; valid state kind without
+  matching comparisons -> `[]`. M5 (run, listing, getter), M26
+  by-checkpoint, M29 by-dataset, M31 by-tokenizer, M37 by-split, M39
+  by-verdict, M38 evaluations-by-state-kind and the M16–M43 surfaces
+  are byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 525 tests
+pytest                       # 530 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2243,7 +2292,8 @@ ai-model-forge/
                        #   by-state-kind grouping (M24/M28/M30/M36/M38)
     comparison.py      # comparison engine: A/B states over identical probes (M5)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
-                       #   by-verdict grouping (M26/M29/M31/M37/M39)
+                       #   by-verdict/by-state-kind grouping
+                       #   (M26/M29/M31/M37/M39/M44)
     gates.py           # stage gates: policy-driven run decisions (M6)
                        # + read-only by-policy/by-comparison/by-decision/
                        #   by-verdict grouping (M23/M34/M41/M43)
@@ -2261,7 +2311,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 525 tests across 20 suites
+  tests/               # 530 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

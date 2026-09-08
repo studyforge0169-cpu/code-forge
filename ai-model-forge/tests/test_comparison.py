@@ -1099,3 +1099,103 @@ def test_m39_engine_repeated_calls_identical(env):
                  f.list_comparisons_for_verdict(
                      env.model_id, ComparisonVerdict.UNCHANGED)]
         assert again == first
+
+
+# =========================================================================== #
+# M44: read-only per-state-kind grouping of the comparison history
+# (either-side semantics, exactly like M26)
+# =========================================================================== #
+
+def test_m44_engine_either_side_filtering_parity_once_order(env):
+    ckE, ckF, ckR, c_x, c_same, c_cur_ck, c_cur_cur, b, b_ck = _m26_env(env)
+    f = env.forge
+    listing = f.list_comparisons(env.model_id)
+    for kind in (EvalStateKind.CHECKPOINT, EvalStateKind.CURRENT):
+        got = f.list_comparisons_for_state_kind(env.model_id, kind)
+        # M26 either-side parity with the authoritative M5 listing:
+        # a comparison belongs when EITHER persisted side records the
+        # kind; deterministic (created_at, comparison_id) order
+        assert got == [r for r in listing
+                       if kind in (r.state_a.state_kind,
+                                   r.state_b.state_kind)]
+        keyed = [(r.created_at, r.comparison_id) for r in got]
+        assert keyed == sorted(keyed)
+        ids = [r.comparison_id for r in got]
+        # a both-sides match appears EXACTLY ONCE
+        assert len(ids) == len(set(ids))
+        assert all(kind in (r.state_a.state_kind, r.state_b.state_kind)
+                   and r.model_id == env.model_id for r in got)
+        # verbatim payload parity with the M5 single-record getter
+        for r in got:
+            assert r == f.get_comparison(env.model_id, r.comparison_id)
+    got_ck = f.list_comparisons_for_state_kind(
+        env.model_id, EvalStateKind.CHECKPOINT)
+    got_cu = f.list_comparisons_for_state_kind(
+        env.model_id, EvalStateKind.CURRENT)
+    ids_ck = {r.comparison_id for r in got_ck}
+    ids_cu = {r.comparison_id for r in got_cu}
+    # either-side pins: the current-vs-checkpoint record belongs to
+    # BOTH groups; checkpoint-only and current-only records to exactly
+    # one; the A=B checkpoint record appears exactly once
+    assert c_cur_ck.comparison_id in ids_ck and c_cur_ck.comparison_id in ids_cu
+    assert c_x.comparison_id in ids_ck and c_x.comparison_id not in ids_cu
+    assert c_same.comparison_id in ids_ck
+    assert c_cur_cur.comparison_id in ids_cu
+    assert c_cur_cur.comparison_id not in ids_ck
+    # the two groups COVER the listing (every record has at least one
+    # side of some enum kind; overlap is by either-side design)
+    assert ids_ck | ids_cu == {r.comparison_id for r in listing}
+
+
+def test_m44_engine_empty_404s_cross_model_read_only(env):
+    ckE, ckF, ckR, c_x, c_same, c_cur_ck, c_cur_cur, b, b_ck = _m26_env(env)
+    f = env.forge
+    # model b holds a trained checkpoint but ZERO comparisons -> the
+    # natural valid-empty for BOTH kinds (never 404)
+    assert f.list_comparisons(b) == []
+    for kind in (EvalStateKind.CHECKPOINT, EvalStateKind.CURRENT):
+        assert f.list_comparisons_for_state_kind(b, kind) == []
+    # unknown model -> FileNotFoundError (404 at the API); the enum
+    # itself needs NO registry lookup (unsupported values are 422 at
+    # the API boundary and never reach the engine)
+    with pytest.raises(FileNotFoundError):
+        f.list_comparisons_for_state_kind("ghost-model-44",
+                                          EvalStateKind.CHECKPOINT)
+    # cross-model isolation: each model's group is a subset of its own
+    # listing and the listings are disjoint
+    a_ids = {r.comparison_id for r in f.list_comparisons(env.model_id)}
+    b_ids = {r.comparison_id for r in f.list_comparisons(b)}
+    assert a_ids and not b_ids and a_ids.isdisjoint(b_ids)
+    for kind in (EvalStateKind.CHECKPOINT, EvalStateKind.CURRENT):
+        for mid, ids in ((env.model_id, a_ids), (b, b_ids)):
+            group = {r.comparison_id for r in
+                     f.list_comparisons_for_state_kind(mid, kind)}
+            assert group <= ids
+    # read-only: the filter never writes comparison manifests
+    roots = [f.storage.model_dir(m) / "comparisons"
+             for m in (env.model_id, b)]
+    before = {(m, p.relative_to(root).as_posix())
+              for m, root in zip((env.model_id, b), roots)
+              if root.exists()
+              for p in root.rglob("*") if p.is_file()}
+    for kind in (EvalStateKind.CHECKPOINT, EvalStateKind.CURRENT):
+        f.list_comparisons_for_state_kind(env.model_id, kind)
+        f.list_comparisons_for_state_kind(b, kind)
+    after = {(m, p.relative_to(root).as_posix())
+             for m, root in zip((env.model_id, b), roots)
+             if root.exists()
+             for p in root.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_m44_engine_repeated_calls_identical(env):
+    ckE, ckF, ckR, c_x, c_same, c_cur_ck, c_cur_cur, b, b_ck = _m26_env(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_comparisons_for_state_kind(
+                 env.model_id, EvalStateKind.CHECKPOINT)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_comparisons_for_state_kind(
+                     env.model_id, EvalStateKind.CHECKPOINT)]
+        assert again == first

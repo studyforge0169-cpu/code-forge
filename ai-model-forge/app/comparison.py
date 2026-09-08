@@ -170,6 +170,51 @@ class ComparisonEngine:
 
         return [r for r in self.list_comparisons(model_id) if involves(r)]
 
+    def list_comparisons_for_state_kind(
+            self, model_id: str, state_kind: EvalStateKind
+    ) -> list[ComparisonRecord]:
+        """Immutable M5 comparisons of ONE model involving ONE kind of
+        model state on EITHER side (M44; the enum-contract sibling of
+        M38, with M26's either-side semantics).
+
+        A comparison involves the requested state kind when EITHER
+        persisted side records ``state_kind == state_kind`` — every
+        ``ComparisonRecord`` persists BOTH sides (``state_a`` /
+        ``state_b``, each carrying the schema enum
+        ``state_kind: EvalStateKind``: current = the model's published
+        weights, checkpoint = an immutable stored checkpoint; matched
+        VERBATIM — never inferred from checkpoint ids alone, state
+        hashes, losses, evaluation results or filenames, and never
+        resolved or rewritten). Because the listing holds each record
+        exactly once, a comparison matching on BOTH sides
+        (A = B = checkpoint) appears EXACTLY ONCE. State kinds have NO
+        registry (the enum IS the contract, exactly like M38): an
+        unsupported state-kind value is rejected at the API boundary
+        with 422 and never reaches this method, while an unknown model
+        raises FileNotFoundError exactly like the sibling groupings
+        (the authoritative listing validates the model). The result is
+        the model's authoritative M5 listing above (the exact engine
+        parse + deterministic (created_at, comparison_id) ASCENDING
+        order) filtered by the persisted side state kinds; complete
+        verbatim ``ComparisonRecord`` payloads (both sides, losses,
+        verdict verbatim — nothing recalculated, no comparison
+        re-executed). A valid state kind with no matching comparisons
+        returns []. State kinds are model-scoped through the listing
+        itself — a model never sees another model's comparisons.
+        Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API); the state kind is
+        # matched VERBATIM on EITHER persisted side — never inferred
+        # from checkpoint ids alone
+        def involves(rec: ComparisonRecord) -> bool:
+            for side in (rec.state_a, rec.state_b):
+                if side.state_kind == state_kind:
+                    return True
+            return False
+
+        return [r for r in self.list_comparisons(model_id) if involves(r)]
+
     def list_comparisons_for_dataset(
             self, model_id: str, dataset_id: str) -> list[ComparisonRecord]:
         """Immutable M5 comparisons of ONE model over ONE dataset (M29).
