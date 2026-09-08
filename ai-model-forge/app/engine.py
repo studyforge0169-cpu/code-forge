@@ -43,6 +43,7 @@ from .schemas import (
     WorkflowRecord,
     WorkflowRecipe,
     WorkflowRecipeCreateRequest,
+    WorkflowRecipeResolution,
     WorkflowStatus,
     SampleGenerateRequest,
     SampleEvaluationRecord,
@@ -875,6 +876,19 @@ class ModelForge:
         recipes); the run record carries recipe provenance plus the additive
         expansion trace and stays a single workflow record."""
         return self.recipes.run(recipe_id, model_id)
+
+    def resolve_workflow_recipe(self, recipe_id: str,
+                                model_id: str) -> WorkflowRecipeResolution:
+        """Read-only resolution of ONE registered recipe against ONE
+        explicit model (M51 preflight): the SAME resolution path as
+        run_workflow_recipe (recipe lookup -> model validation -> M14
+        expansion -> WorkflowPlan construction + full M7 validation),
+        WITHOUT executing or persisting anything. Returns the expanded,
+        model-bound plan plus recipe provenance and the composition
+        trace; error semantics identical to a run request (unknown
+        recipe/model -> FileNotFoundError -> 404, binding mismatch ->
+        ValueError -> 422)."""
+        return self.recipes.resolve(recipe_id, model_id)
 
     def list_recipe_runs(self, recipe_id: str) -> list[WorkflowRecord]:
         """Cross-model lineage of one recipe's workflow runs (read-only;

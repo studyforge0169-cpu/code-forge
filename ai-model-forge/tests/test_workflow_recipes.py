@@ -1800,7 +1800,7 @@ def test_m35_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer) + 1 (M34 gate decisions
     # by-comparison) + 1 (M35 workflows by-recipe) = 67
-    assert len(spec["paths"]) == 82
+    assert len(spec["paths"]) == 83
     path = "/api/v1/models/{model_id}/workflows/by-recipe/{recipe_id}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -2180,7 +2180,7 @@ def test_m42_api_by_status_404_422s_isolation_regressions_openapi(
     # + 1 (M48 evaluations by-seed)
     # + 1 (M49 comparisons by-seed)
     # + 1 (M50 suite-runs by-reused) = 82
-    assert len(spec["paths"]) == 82
+    assert len(spec["paths"]) == 83
     path = "/api/v1/models/{model_id}/workflows/by-status/{status}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -2200,3 +2200,180 @@ def test_m42_api_by_status_404_422s_isolation_regressions_openapi(
                       "{recipe_id}") < keys.index(path)
     assert keys.index(path) < keys.index(
         "/api/v1/models/{model_id}/workflows/{workflow_id}")
+
+
+# ---------------------------------------------------------------- M51
+# Recipe resolution preflight: read-only model-bound resolution sharing
+# run()'s exact path (recipe lookup -> model validation -> M14 expansion
+# -> WorkflowPlan construction with full M7 validation), zero writes.
+
+def _m51_files(env) -> int:
+    return sum(1 for p in env.forge.storage.root.rglob("*") if p.is_file())
+
+
+def test_m51_resolve_predicts_run_and_writes_nothing(env):
+    st = _suite_stage("m51_suite", "m12-suite", ckpt=env.ck_main)
+    env.recipes.register(_recipe("m51-plain", [st]))
+    before = _m51_files(env)
+
+    r1 = env.recipes.resolve("m51-plain", env.model_id)
+    r2 = env.recipes.resolve("m51-plain", env.model_id)
+    assert r1.model_dump() == r2.model_dump()
+    assert r1.recipe_id == "m51-plain"
+    assert r1.recipe_hash == env.recipes.get("m51-plain").config_hash
+    assert r1.model_id == env.model_id
+    assert r1.composition is None
+    assert [s.stage_id for s in r1.plan.stages] == ["m51_suite"]
+    assert r1.plan.model_id == env.model_id
+    # read-only: repeated resolution wrote zero files
+    assert _m51_files(env) == before
+    env.no_tmp()
+
+    # execution goes through the unchanged sole executor and matches the
+    # preflight byte-for-byte on the plan and provenance
+    rec = env.recipes.run("m51-plain", env.model_id)
+    assert rec.recipe_id == r1.recipe_id
+    assert rec.recipe_hash == r1.recipe_hash
+    assert rec.composition == r1.composition
+    assert rec.model_dump()["plan"] == r1.model_dump()["plan"]
+    assert rec.plan_hash == r1.plan.plan_hash()
+
+
+def test_m51_resolve_composite_expansion_and_binding_errors(env):
+    # composite: own suite stage + reference to a plain recipe
+    base = _suite_stage("m51_base", "m12-suite", ckpt=env.ck_main)
+    env.recipes.register(_recipe("m51-base", [base]))
+    call = _call("m51_leg", "m51-base")
+    own = _suite_stage("m51_own", "m12-suite", ckpt=env.ck_main)
+    env.recipes.register(_recipe("m51-comp", [own, call]))
+
+    res = env.recipes.resolve("m51-comp", env.model_id)
+    assert [s.stage_id for s in res.plan.stages] == [
+        "m51_own", "m51_leg.m51_base"]
+    assert res.composition is not None and [
+        (c.recipe_id, c.config_hash) for c in res.composition] == [
+        ("m51-base", env.recipes.get("m51-base").config_hash)]
+    # the expanded plan equals what executing the composite produces
+    rec = env.recipes.run("m51-comp", env.model_id)
+    assert rec.model_dump()["plan"] == res.model_dump()["plan"]
+    assert rec.plan_hash == res.plan.plan_hash()
+
+    # error taxonomy identical to run(): unknown recipe / unknown model
+    with pytest.raises(FileNotFoundError):
+        env.recipes.resolve("m51-missing", env.model_id)
+    with pytest.raises(FileNotFoundError):
+        env.recipes.resolve("m51-plain", "no-such-model")
+    # binding conflict (recipe pinned to a different embedded model)
+    other = env.fresh_model("m51-pinned-target")
+    env.recipes.register(_recipe("m51-pinned", [
+        _train_stage("m51_train", other, env.ds_a, env.tok_id, epochs=1)]))
+    with pytest.raises(ValueError, match="training config targets model"):
+        env.recipes.resolve("m51-pinned", env.model_id)
+    # preflight is structural, not a dry-run: a recipe whose suite does
+    # not exist resolves (runtime concern) but still fails on execution
+    ghost = _suite_stage("m51_ghost", "m51-no-suite", current=True)
+    env.recipes.register(_recipe("m51-ghost-suite", [ghost]))
+    gres = env.recipes.resolve("m51-ghost-suite", env.model_id)
+    assert gres.plan.stages[0].suite_run.suite_id == "m51-no-suite"
+    with pytest.raises(FileNotFoundError):
+        env.recipes.run("m51-ghost-suite", env.model_id)
+
+
+def test_m51_api_plan_is_read_only_preflight_of_execution(api_client):
+    h = _http_env(api_client, "m51a")
+    mid, suite = h["mid"], h["suite"]
+    stage = _current_suite_stage("eval_suite", suite)
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api51-plain", "description": "m51 plain",
+        "stages": [stage]})
+    assert r.status_code == 201, r.text
+    plan_url = "/api/v1/models/{mid}/workflows/recipes/{rid}/plan"
+
+    got = api_client.get(plan_url.format(mid=mid, rid="api51-plain"))
+    assert got.status_code == 200, got.text
+    res = got.json()
+    assert res["recipe_id"] == "api51-plain" and res["model_id"] == mid
+    assert res["composition"] is None
+    assert [s["stage_id"] for s in res["plan"]["stages"]] == ["eval_suite"]
+    assert res["plan"]["model_id"] == mid
+    assert got.json() == api_client.get(
+        plan_url.format(mid=mid, rid="api51-plain")).json()
+
+    # unknown recipe / unknown model map to the same 404 as a run
+    assert api_client.get(
+        plan_url.format(mid=mid, rid="api51-missing")).status_code == 404
+    assert api_client.get(
+        plan_url.format(mid="no-such-model",
+                        rid="api51-plain")).status_code == 404
+
+    # the executed run matches the preflight exactly
+    run = api_client.post(RUNS.format(rid="api51-plain"),
+                          json={"model_id": mid}).json()
+    assert run["recipe_id"] == res["recipe_id"]
+    assert run["recipe_hash"] == res["recipe_hash"]
+    assert run["composition"] == res["composition"]
+    assert run["plan"] == res["plan"]
+
+
+def test_m51_api_plan_composite_errors_and_openapi(api_client):
+    h = _http_env(api_client, "m51b")
+    mid, suite = h["mid"], h["suite"]
+    stage = _current_suite_stage("eval_suite", suite)
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api51-leaf", "description": "m51 leaf",
+        "stages": [stage]})
+    assert r.status_code == 201, r.text
+    call = {"stage_id": "leg", "type": "recipe",
+            "recipe": {"recipe_id": "api51-leaf"}}
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api51-comp", "description": "m51 composite",
+        "stages": [dict(stage), call]})
+    assert r.status_code == 201, r.text
+    plan_url = "/api/v1/models/{mid}/workflows/recipes/{rid}/plan"
+
+    got = api_client.get(plan_url.format(mid=mid, rid="api51-comp"))
+    assert got.status_code == 200, got.text
+    res = got.json()
+    assert [s["stage_id"] for s in res["plan"]["stages"]] == [
+        "eval_suite", "leg.eval_suite"]
+    assert [(c["recipe_id"], len(c["config_hash"]))
+            for c in res["composition"]] == [("api51-leaf", 64)]
+
+    # binding conflict (embedded model disagreement) -> 422 like a run
+    other = api_client.post(MODELS, json={"config": {
+        "name": "api51-other", "vocab_size": 640, "context_length": 64,
+        "hidden_size": 64, "n_layers": 2, "n_heads": 4, "n_kv_heads": 2,
+        "intermediate_size": 128, "seed": 2}}).json()["model"]["id"]
+    pinned = {"stage_id": "tr", "type": "train", "training": {
+        "method": "continued_pretraining", "model_id": other,
+        "dataset_id": h["ds"], "tokenizer_id": h["tok"],
+        "learning_rate": 3e-3, "batch_size": 8, "max_seq_len": 32,
+        "epochs": 1, "eval_every_steps": 2, "keep_best": False, "seed": 1}}
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api51-pinned", "description": "pinned",
+        "stages": [pinned]})
+    assert r.status_code == 201, r.text
+    r = api_client.get(plan_url.format(mid=mid, rid="api51-pinned"))
+    assert r.status_code == 422, r.text
+
+    # OpenAPI: one new read-only path, GET-only, workflow-tagged, and
+    # the M35 by-recipe grouping still precedes the generic route
+    spec = api_client.get("/openapi.json").json()
+    path = "/api/v1/models/{model_id}/workflows/recipes/" \
+           "{recipe_id}/plan"
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    assert len(keys) == 83
+    item = spec["paths"][path]
+    assert list(item) == ["get"] and "post" not in item
+    assert item["get"]["tags"] == ["workflows"]
+    assert item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"] == {
+        "$ref": "#/components/schemas/WorkflowRecipeResolution"}
+    assert {p["name"] for p in item["get"]["parameters"]} == {
+        "model_id", "recipe_id"}
+    for p in item["get"]["parameters"]:
+        assert p["schema"]["type"] == "string"
+    assert keys.index("/api/v1/models/{model_id}/workflows/by-recipe/"
+                      "{recipe_id}") < keys.index(path)
+    assert "WorkflowRecipeResolution" in spec["components"]["schemas"]

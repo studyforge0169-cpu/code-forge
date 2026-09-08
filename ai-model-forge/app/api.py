@@ -55,6 +55,7 @@ from .schemas import (
     WorkflowRecipe,
     WorkflowRecipeCreateRequest,
     WorkflowRecipeRunRequest,
+    WorkflowRecipeResolution,
     WorkflowStatus,
 )
 
@@ -713,6 +714,26 @@ def index() -> HTMLResponse:
         record payloads, exact M10 ordering. Pure data access — no
         aggregation, no cache statistics, zero storage growth.</li>
 
+      <li><b>M51 recipe resolution preflight</b> — one read-only
+        access path, <code>GET /models/&#123;id&#125;/workflows/recipes/&#123;recipe&#125;/plan</code>,
+        answers "what EXACTLY would this registered recipe execute
+        against this model?": the EXACT resolution path of the recipe
+        RUN surface (recipe lookup -> model validation -> M14
+        deterministic expansion -> WorkflowPlan construction with the
+        FULL M7 validation incl. embedded-config model agreement)
+        through the SAME RecipeEngine code — one resolution system,
+        never a second executor. Returns the expanded, model-bound,
+        fully validated <code>WorkflowPlan</code> (its plan_hash
+        predicts the executed run's plan_hash) plus recipe provenance
+        and the M14 composition trace; composite recipes resolve to
+        their spliced, id-qualified expanded stage list. A computed
+        view: NEVER persisted — a resolve leaves zero new files.
+        Errors identical to a run: unknown recipe/model -> 404,
+        binding conflicts -> 422. Execution itself stays where it was:
+        the synchronous <code>POST /workflows/recipes/&#123;recipe&#125;/runs</code>
+        through the sole WorkflowEngine — no scheduling, no
+        background anything.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -792,6 +813,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-reused/&#123;reused_count&#125;</code> — suite runs of ONE model by persisted reuse count (read-only, deterministic, bookkeeping never a score; unmatched -> [], non-integer 422)</li>
       <li><code>POST  {prefix}/workflows/recipes</code> — register an immutable workflow recipe (idempotent; conflicts 409)</li>
       <li><code>GET   {prefix}/workflows/recipes</code> / <code>GET {prefix}/workflows/recipes/&#123;recipe_id&#125;</code> — immutable recipes</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/workflows/recipes/&#123;recipe&#125;/plan</code> — resolve ONE registered recipe against ONE model WITHOUT executing (read-only preflight: expanded model-bound plan + provenance, zero persistence; M51)</li>
       <li><code>POST  {prefix}/workflows/recipes/&#123;recipe_id&#125;/runs</code> — execute a recipe against one explicit model (existing M7 engine)</li>
       <li><code>GET   {prefix}/workflows/recipes/&#123;recipe_id&#125;/runs</code> — cross-model run lineage of one recipe (read-only; 404 unknown recipe)</li>
       <li><code>POST  {prefix}/samples/generate</code> — deterministic generation from one explicit verified checkpoint (greedy / seeded temperature; inference only)</li>
@@ -2139,7 +2161,8 @@ def get_suite_run(model_id: str, suite_run_id: str) -> SuiteRunRecord:
 
 # Workflow routes (Milestone 7 — ordered orchestration over M3–M6;
 # Milestone 35 adds the read-only model-scoped by-recipe grouping of the history;
-# Milestone 42 adds the read-only model-scoped by-status grouping of the history)
+# Milestone 42 adds the read-only model-scoped by-status grouping of the history;
+# Milestone 51 adds the read-only model-bound recipe RESOLUTION (preflight))
 # --------------------------------------------------------------------------- #
 
 @api.post("/workflows/run", response_model=WorkflowRecord, tags=["workflows"])
@@ -2312,6 +2335,37 @@ def list_workflow_recipe_runs(recipe_id: str) -> list[WorkflowRecord]:
         return _forge().list_recipe_runs(recipe_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/workflows/recipes/{recipe_id}/plan",
+         response_model=WorkflowRecipeResolution, tags=["workflows"])
+def resolve_workflow_recipe(model_id: str, recipe_id: str
+                            ) -> WorkflowRecipeResolution:
+    """Resolve ONE registered recipe against ONE explicit model WITHOUT
+    executing anything (M51 read-only preflight of the recipe-run
+    surface).
+
+    Runs the EXACT resolution path of POST /workflows/recipes/
+    {recipe_id}/runs — recipe lookup, model validation, M14
+    deterministic expansion, WorkflowPlan construction with the FULL
+    M7 validation incl. embedded-config model agreement — through the
+    SAME RecipeEngine code (one resolution system, never a second
+    executor). Returns the expanded, model-bound, fully validated
+    WorkflowPlan the WorkflowEngine WOULD execute (its plan_hash
+    predicts the executed run's plan_hash), plus recipe provenance
+    (recipe_id + recipe_hash) and the additive M14 composition trace
+    (null for plain recipes). A computed view: NEVER persisted, never
+    written — a resolve leaves zero new files. Error semantics
+    identical to a run request: unknown recipe/model -> 404 with
+    nothing persisted; binding/schema conflicts -> 422. No execution,
+    no scheduling, no background anything.
+    """
+    try:
+        return _forge().resolve_workflow_recipe(recipe_id, model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @api.post("/workflows/recipes/{recipe_id}/runs", response_model=WorkflowRecord,

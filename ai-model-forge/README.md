@@ -2030,11 +2030,42 @@ generation never trains, evaluates, scores, ranks or judges output.
   storage — repeated GETs are byte-identical and the endpoint never
   writes
 
+### Milestone 51 — recipe resolution preflight
+  (`workflows/recipes/.../plan`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/workflows/recipes/{recipe_id}/plan` — answers
+  "what EXACTLY would this registered recipe execute against this
+  model?" and nothing else. The architectural completion of the M12
+  synchronous execution surface: resolution WITHOUT execution, through
+  the SAME `RecipeEngine` resolution code `run()` uses (recipe lookup
+  → model validation → M14 deterministic expansion → `WorkflowPlan`
+  construction with the FULL M7 validation incl. embedded-config
+  model agreement) — one resolution system, never a second executor
+- **what it returns**: the expanded, model-bound, fully validated
+  `WorkflowPlan` the `WorkflowEngine` WOULD execute (its `plan_hash`
+  predicts the executed run's `plan_hash`), plus recipe provenance
+  (`recipe_id` + `recipe_hash`) and the additive M14 `composition`
+  trace (null for plain recipes). Composite recipes resolve to their
+  spliced, id-qualified expanded stage list — visible BEFORE any
+  execution, where previously it only materialized inside a run. A
+  computed view (`WorkflowRecipeResolution`): NEVER persisted, never
+  written — a resolve leaves zero new files
+- **boundaries**: error semantics identical to a run request —
+  unknown recipe/model -> 404 with nothing persisted; binding/schema
+  conflicts (a bound model contradicting a model pinned inside the
+  recipe) -> 422. Execution itself stays exactly where it was: the
+  synchronous `POST /workflows/recipes/{recipe_id}/runs` through the
+  sole `WorkflowEngine` — no scheduling, no background workers, no
+  queues, no second record type. M7 (run, records), M12/M14
+  (registration, expansion, lineage), M10/M11 (suite stages,
+  evidence reuse) and the M18–M50 history surfaces are byte-identical
+  before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 560 tests
+pytest                       # 564 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2533,6 +2564,7 @@ ai-model-forge/
                        # + read-only by-suite/by-checkpoint grouping (M21/M22/M25)
                        # + read-only by-reused-count grouping (M50)
     recipes.py         # workflow recipes: immutable plans + M14 composition (M12/M14)
+                       # + read-only model-bound recipe resolution preflight (M51)
     sampling.py         # checkpoint sampling: deterministic generation (M15)
                        # + read-only by-checkpoint/by-tokenizer/by-strategy
                        #   grouping of the history (M27/M32/M40)
@@ -2540,7 +2572,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 560 tests across 20 suites
+  tests/               # 564 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

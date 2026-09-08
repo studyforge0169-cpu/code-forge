@@ -2020,6 +2020,32 @@ class WorkflowRecipeRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
+class WorkflowRecipeResolution(BaseModel):
+    """Read-only RESOLUTION of ONE registered recipe against ONE explicit
+    model (M51) — the preflight view of the recipe-run surface.
+
+    Computed deterministically on request by the SAME resolution path
+    RecipeEngine.run() uses (recipe lookup -> model validation -> M14
+    deterministic expansion -> WorkflowPlan construction with the FULL
+    M7 validation incl. embedded-config model agreement). NEVER
+    persisted, never written: it is a view, not a record — exactly one
+    execution system remains. ``plan`` is the exact expanded,
+    model-bound WorkflowPlan the WorkflowEngine WOULD execute (identical
+    to the plan embedded in the resulting WorkflowRecord); ``composition``
+    is the additive M14 expansion trace (None for plain recipes). The
+    ``plan_hash`` of ``plan`` therefore predicts the executed run's
+    ``plan_hash``.
+    """
+
+    recipe_id: str
+    recipe_hash: str                      # the recipe's config_hash
+    model_id: str
+    plan: WorkflowPlan
+    composition: Optional[list["WorkflowRecipeRef"]] = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
 # --------------------------------------------------------------------------- #
 # M15 — checkpoint sampling (generation) schemas
 # --------------------------------------------------------------------------- #

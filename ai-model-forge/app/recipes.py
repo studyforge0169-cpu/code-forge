@@ -79,6 +79,7 @@ from .schemas import (
     WorkflowRecipe,
     WorkflowRecipeCreateRequest,
     WorkflowRecipeRef,
+    WorkflowRecipeResolution,
     WorkflowRecord,
     validate_plan_stages,
     utcnow,
@@ -358,19 +359,16 @@ class RecipeEngine:
     # Execution (thin binding layer over the existing WorkflowEngine)
     # ------------------------------------------------------------------ #
 
-    def run(self, recipe_id: str, model_id: str) -> WorkflowRecord:
-        """Execute one registered recipe against ONE explicitly named model.
-
-        Composite recipes (M14) are expanded FIRST — deterministically, into
-        ONE normal stage list — and plain recipes are their own identity, so
-        every recipe ends up as exactly one WorkflowPlan executed by exactly
-        one WorkflowEngine.run. Nothing is persisted on unknown recipe/model
-        (FileNotFoundError -> 404) or on a binding mismatch (ValueError ->
-        422 raised while the expanded plan is re-validated as a
-        WorkflowPlan). Runtime stage failures go through the existing M7
-        failure path exactly like inline plans: the run manifest persists
-        with status ``failed`` (plus recipe provenance) and the stage
-        exception is re-raised for API mapping.
+    def _resolve(self, recipe_id: str, model_id: str):
+        """Shared resolution path of run() and resolve() (M51): recipe
+        lookup -> model validation -> M14 deterministic expansion ->
+        WorkflowPlan construction with the FULL M7 validation (the
+        pydantic ``_plan_consistent`` validator re-runs
+        ``validate_plan_stages`` incl. embedded-config model agreement).
+        Returns (definition, plan, composition). Nothing is persisted
+        here; unknown recipe/model -> FileNotFoundError, a binding
+        mismatch -> ValueError (raised while the expanded plan is
+        re-validated as a WorkflowPlan).
         """
         definition = self.get(recipe_id)          # FileNotFoundError -> 404
         try:
@@ -394,9 +392,47 @@ class RecipeEngine:
         # a referenced recipe — nothing is ever silently rewritten).
         plan = WorkflowPlan(name=definition.recipe_id, model_id=model_id,
                             stages=stages)
+        return definition, plan, composition
+
+    def run(self, recipe_id: str, model_id: str) -> WorkflowRecord:
+        """Execute one registered recipe against ONE explicitly named model.
+
+        Composite recipes (M14) are expanded FIRST — deterministically, into
+        ONE normal stage list — and plain recipes are their own identity, so
+        every recipe ends up as exactly one WorkflowPlan executed by exactly
+        one WorkflowEngine.run. Nothing is persisted on unknown recipe/model
+        (FileNotFoundError -> 404) or on a binding mismatch (ValueError ->
+        422 raised while the expanded plan is re-validated as a
+        WorkflowPlan). Runtime stage failures go through the existing M7
+        failure path exactly like inline plans: the run manifest persists
+        with status ``failed`` (plus recipe provenance) and the stage
+        exception is re-raised for API mapping.
+        """
+        definition, plan, composition = self._resolve(recipe_id, model_id)
         return self.workflows.run(plan, recipe_id=definition.recipe_id,
                                   recipe_hash=definition.config_hash,
                                   composition=composition)
+
+    def resolve(self, recipe_id: str,
+                model_id: str) -> "WorkflowRecipeResolution":
+        """Resolve ONE registered recipe against ONE explicit model WITHOUT
+        executing anything (M51 read-only preflight).
+
+        Runs the EXACT resolution path of run() — one resolution system,
+        never a second one — and returns the expanded, model-bound,
+        fully validated WorkflowPlan (plus recipe provenance and the M14
+        composition trace) that the WorkflowEngine WOULD execute; the
+        plan's hash therefore predicts the executed run's plan_hash.
+        Never persists anything (a resolve leaves zero new files);
+        unknown recipe/model -> FileNotFoundError (404 at the API), a
+        binding mismatch -> ValueError (422 at the API) exactly like a
+        run request.
+        """
+        definition, plan, composition = self._resolve(recipe_id, model_id)
+        return WorkflowRecipeResolution(
+            recipe_id=definition.recipe_id,
+            recipe_hash=definition.config_hash,
+            model_id=model_id, plan=plan, composition=composition)
 
     # ------------------------------------------------------------------ #
     # Deterministic composition expansion (M14)

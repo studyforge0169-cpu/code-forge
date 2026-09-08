@@ -813,7 +813,7 @@ def test_m21_api_existing_surfaces_and_openapi(api_client):
     # + 1 (M48 evaluations by-seed)
     # + 1 (M49 comparisons by-seed)
     # + 1 (M50 suite-runs by-reused) = 82
-    assert len(spec["paths"]) == 82
+    assert len(spec["paths"]) == 83
 
 
 # =========================================================================== #
@@ -1030,7 +1030,7 @@ def test_m22_api_openapi_documented(api_client):
     # + 1 (M48 evaluations by-seed)
     # + 1 (M49 comparisons by-seed)
     # + 1 (M50 suite-runs by-reused) = 82
-    assert len(spec["paths"]) == 82
+    assert len(spec["paths"]) == 83
 
 
 # =========================================================================== #
@@ -1300,7 +1300,7 @@ def test_m25_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M48 evaluations by-seed)
     # + 1 (M49 comparisons by-seed)
     # + 1 (M50 suite-runs by-reused) = 82
-    assert len(spec["paths"]) == 82
+    assert len(spec["paths"]) == 83
 
 
 # =========================================================================== #
@@ -1533,7 +1533,7 @@ def test_m50_api_errors_isolation_regressions_openapi(api_client):
     # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
     # + 1 (M45) + 1 (M46) + 1 (M47) + 1 (M48) + 1 (M49)
     # + 1 (M50 suite-runs by-reused) = 82
-    assert len(spec["paths"]) == 82
+    assert len(spec["paths"]) == 83
     path = "/api/v1/models/{model_id}/suite-runs/by-reused/{reused_count}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
