@@ -823,6 +823,27 @@ class ModelForge:
         return self.suite_runs.list_suite_runs_for_checkpoint(
             model_id, checkpoint_id)
 
+    def list_suite_runs_for_reused_count(self, model_id: str,
+                                         reused_count: int
+                                         ) -> list[SuiteRunRecord]:
+        """Immutable M10 suite-run records of ONE model by persisted
+        reuse count (M50 read-only access).
+
+        ``reused_count`` is the REQUIRED integer persisted on every
+        record (probes satisfied by pre-existing evidence — execution
+        bookkeeping only, NEVER a score) — an OPEN value axis with NO
+        registry, so a non-integer spelling is rejected at the API
+        boundary with 422, while an unknown model raises
+        FileNotFoundError (404) exactly like the sibling groupings.
+        Returns the model's authoritative M10 listing filtered by the
+        persisted record value (matched VERBATIM — never recalculated,
+        never derived from probe outcomes or any other field) in the
+        M10 (created_at, suite_run_id) order, as complete verbatim
+        records. An unmatched count on a valid model returns [].
+        Read-only, never writes."""
+        return self.suite_runs.list_suite_runs_for_reused_count(
+            model_id, reused_count)
+
     # ------------------------------------------------------------------ #
     # Workflow recipes (immutable reusable M7 plans; definitions only; M12)
     # ------------------------------------------------------------------ #

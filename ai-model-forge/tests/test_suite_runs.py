@@ -811,8 +811,9 @@ def test_m21_api_existing_surfaces_and_openapi(api_client):
     # + 1 (M46 checkpoints by-run)
     # + 1 (M47 evaluations by-truncated)
     # + 1 (M48 evaluations by-seed)
-    # + 1 (M49 comparisons by-seed) = 81
-    assert len(spec["paths"]) == 81
+    # + 1 (M49 comparisons by-seed)
+    # + 1 (M50 suite-runs by-reused) = 82
+    assert len(spec["paths"]) == 82
 
 
 # =========================================================================== #
@@ -1027,8 +1028,9 @@ def test_m22_api_openapi_documented(api_client):
     # + 1 (M46 checkpoints by-run)
     # + 1 (M47 evaluations by-truncated)
     # + 1 (M48 evaluations by-seed)
-    # + 1 (M49 comparisons by-seed) = 81
-    assert len(spec["paths"]) == 81
+    # + 1 (M49 comparisons by-seed)
+    # + 1 (M50 suite-runs by-reused) = 82
+    assert len(spec["paths"]) == 82
 
 
 # =========================================================================== #
@@ -1296,5 +1298,262 @@ def test_m25_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M46 checkpoints by-run)
     # + 1 (M47 evaluations by-truncated)
     # + 1 (M48 evaluations by-seed)
-    # + 1 (M49 comparisons by-seed) = 81
-    assert len(spec["paths"]) == 81
+    # + 1 (M49 comparisons by-seed)
+    # + 1 (M50 suite-runs by-reused) = 82
+    assert len(spec["paths"]) == 82
+
+
+# =========================================================================== #
+# M50: suite-run history by reused count (read-only integer grouping)
+# =========================================================================== #
+
+def _m50_env(env):
+    """M50 state on top of the shared module env (cached): a TWO-probe
+    suite run TWICE on the same checkpoint state through the REAL
+    engine — the first run creates evidence (reused_count 0), the
+    identical second run reuses it (reused_count 2) — plus a fresh
+    model with NO suite runs. Returns (r_fresh, r_reuse, empty_model).
+    """
+    cached = getattr(env, "_m50_state", None)
+    if cached is not None:
+        return cached
+    env.register_suite("m50-suite", [env.probe(seed=10501),
+                                     env.probe(seed=10502)])
+    r_fresh = env.run("m50-suite", cstate(env.ck_b))
+    r_reuse = env.run("m50-suite", cstate(env.ck_b))
+    assert r_fresh.reused_count == 0
+    assert r_reuse.reused_count == 2
+    empty_model = env.fresh_model("m50-empty", seed=50)
+    env._m50_state = (r_fresh, r_reuse, empty_model)
+    return env._m50_state
+
+
+def test_m50_engine_filters_by_persisted_reused_count(env):
+    r_fresh, r_reuse, empty_model = _m50_env(env)
+    f = env.forge
+    listing = f.list_suite_runs(env.model_id)
+    values = sorted({r.reused_count for r in listing})
+    # multiple groups with different cardinalities exist in the
+    # listing (earlier module tests seeded 0- and 2-reuse runs)
+    assert len(values) >= 2
+    for value in values:
+        got = f.list_suite_runs_for_reused_count(env.model_id, value)
+        # parity with the authoritative M10 listing filtered by the
+        # persisted record value; deterministic (created_at,
+        # suite_run_id) order; membership from the persisted field
+        # only — never inferred from results or sibling counts
+        assert got == [r for r in listing if r.reused_count == value]
+        keyed = [(r.created_at, r.suite_run_id) for r in got]
+        assert keyed == sorted(keyed)
+        assert all(r.reused_count == value and r.model_id == env.model_id
+                   for r in got)
+        for r in got:
+            assert r == f.get_suite_run(env.model_id, r.suite_run_id)
+    # the fixture's records land in their own groups with the
+    # persisted count VERBATIM
+    assert r_fresh.suite_run_id in {
+        r.suite_run_id for r in
+        f.list_suite_runs_for_reused_count(env.model_id, 0)}
+    assert r_reuse.suite_run_id in {
+        r.suite_run_id for r in
+        f.list_suite_runs_for_reused_count(env.model_id, 2)}
+
+
+def test_m50_engine_reused_partition_unmatched_and_empty_model(env):
+    r_fresh, r_reuse, empty_model = _m50_env(env)
+    f = env.forge
+    listing = f.list_suite_runs(env.model_id)
+    values = sorted({r.reused_count for r in listing})
+    groups = {v: f.list_suite_runs_for_reused_count(env.model_id, v)
+              for v in values}
+    # TRUE disjoint partition: pairwise-disjoint groups whose union is
+    # the full listing; no None case — the int is REQUIRED
+    assert all(isinstance(r.reused_count, int) for r in listing)
+    all_ids: set = set()
+    for v in values:
+        ids = {r.suite_run_id for r in groups[v]}
+        assert all_ids.isdisjoint(ids)
+        all_ids |= ids
+    assert all_ids == {r.suite_run_id for r in listing}
+    # unmatched valid integer -> [] (natural valid-empty)
+    assert f.list_suite_runs_for_reused_count(env.model_id, 987654) == []
+    # model with NO suite runs -> [] for any count
+    assert f.list_suite_runs(empty_model) == []
+    assert f.list_suite_runs_for_reused_count(empty_model, 0) == []
+    assert f.list_suite_runs_for_reused_count(empty_model, 987654) == []
+
+
+def test_m50_engine_unknown_model_not_found(env):
+    # unknown model -> FileNotFoundError (404 at the API), exactly
+    # like the sibling groupings
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_suite_runs_for_reused_count("ghost-model-50", 0)
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_suite_runs_for_reused_count("ghost-model-50", 987654)
+
+
+# =========================================================================== #
+# M50 API: suite-run history by reused count
+# =========================================================================== #
+
+BY_REUSED = "/api/v1/models/{mid}/suite-runs/by-reused/{count}"
+
+
+def test_m50_api_by_reused_grouping_partition_determinism(api_client):
+    h = _http_env(api_client, "m50a", train=True)
+    mid, ds, tok, ck = h["mid"], h["ds"], h["tok"], h["ck"]
+    probes = [{"dataset_id": ds, "split": "validation", "tokenizer_id": tok,
+               "batch_size": 8, "max_seq_len": 32, "seed": 5501},
+              {"dataset_id": ds, "split": "validation", "tokenizer_id": tok,
+               "batch_size": 8, "max_seq_len": 32, "seed": 5502}]
+    api_client.post("/api/v1/probe-suites",
+                    json={"suite_id": "api10-m50-suite", "probes": probes})
+    body = {"model_id": mid, "suite_id": "api10-m50-suite",
+            "state": {"state_kind": "checkpoint", "checkpoint_id": ck}}
+    # the first run creates evidence (reused 0); the identical second
+    # run reuses it (reused 2) — BOTH through the REAL engine
+    fresh = api_client.post(SUITE_RUNS, json=body).json()
+    reuse = api_client.post(SUITE_RUNS, json=body).json()
+    assert fresh["reused_count"] == 0 and reuse["reused_count"] == 2
+
+    listing = api_client.get(f"{MODELS}/{mid}/suite-runs").json()
+    keyed = [(r["created_at"], r["suite_run_id"]) for r in listing]
+    assert keyed == sorted(keyed)
+    groups = {}
+    for value, expected_ids in ((0, {fresh["suite_run_id"]}),
+                                (2, {reuse["suite_run_id"]})):
+        got = api_client.get(BY_REUSED.format(mid=mid, count=value))
+        assert got.status_code == 200, got.text
+        groups[value] = got.json()
+        # authoritative-filter parity: exact subset of the M10
+        # listing whose persisted reused_count matches, in order
+        assert groups[value] == [x for x in listing
+                                 if x["reused_count"] == value]
+        assert {x["suite_run_id"] for x in groups[value]} == expected_ids
+        assert all(x["reused_count"] == value for x in groups[value])
+        gk = [(x["created_at"], x["suite_run_id"]) for x in groups[value]]
+        assert gk == sorted(gk)
+    # known groups remain disjoint; union is the full listing
+    ids0 = {x["suite_run_id"] for x in groups[0]}
+    ids2 = {x["suite_run_id"] for x in groups[2]}
+    assert ids0.isdisjoint(ids2)
+    assert ids0 | ids2 == {x["suite_run_id"] for x in listing}
+    # verbatim: each element equals its detail-getter payload
+    for x in groups[0] + groups[2]:
+        one = api_client.get(
+            f"{MODELS}/{mid}/suite-runs/{x['suite_run_id']}")
+        assert one.status_code == 200 and one.json() == x
+    # determinism: byte-identical repeats
+    again = api_client.get(BY_REUSED.format(mid=mid, count=2))
+    assert again.content == api_client.get(
+        BY_REUSED.format(mid=mid, count=2)).content
+
+
+def test_m50_api_errors_isolation_regressions_openapi(api_client):
+    h = _http_env(api_client, "m50b", train=True)
+    o = _http_env(api_client, "m50iso", train=True)
+    mid, ds, tok, ck = h["mid"], h["ds"], h["tok"], h["ck"]
+    o_mid, o_ds, o_tok, o_ck = o["mid"], o["ds"], o["tok"], o["ck"]
+    probes = [{"dataset_id": ds, "split": "validation", "tokenizer_id": tok,
+               "batch_size": 8, "max_seq_len": 32, "seed": 5511}]
+    o_probes = [{"dataset_id": o_ds, "split": "validation",
+                 "tokenizer_id": o_tok, "batch_size": 8,
+                 "max_seq_len": 32, "seed": 5512}]
+    api_client.post("/api/v1/probe-suites",
+                    json={"suite_id": "api10-m50b-suite", "probes": probes})
+    api_client.post("/api/v1/probe-suites",
+                    json={"suite_id": "api10-m50iso-suite",
+                          "probes": o_probes})
+    mine = api_client.post(SUITE_RUNS, json={
+        "model_id": mid, "suite_id": "api10-m50b-suite",
+        "state": {"state_kind": "checkpoint", "checkpoint_id": ck}}).json()
+    other = api_client.post(SUITE_RUNS, json={
+        "model_id": o_mid, "suite_id": "api10-m50iso-suite",
+        "state": {"state_kind": "checkpoint",
+                  "checkpoint_id": o_ck}}).json()
+
+    # unmatched valid integer -> 200 []
+    empty = api_client.get(BY_REUSED.format(mid=mid, count=987654))
+    assert empty.status_code == 200 and empty.json() == []
+    # unknown model + valid integer -> 404
+    assert api_client.get(BY_REUSED.format(
+        mid="ghost", count=0)).status_code == 404
+    # non-integer spellings -> 422 (schema-level validation at the
+    # API boundary, pre-handler — integers are never silently
+    # reinterpreted), on the known model AND on an unknown model
+    for bad in ("abc", "1.5", "12x"):
+        assert api_client.get(
+            f"{MODELS}/{mid}/suite-runs/by-reused/{bad}"
+        ).status_code == 422
+        assert api_client.get(
+            f"{MODELS}/ghost/suite-runs/by-reused/{bad}"
+        ).status_code == 422
+    # cross-model isolation: the other model's run never leaks
+    got_o = api_client.get(BY_REUSED.format(mid=o_mid, count=0))
+    assert got_o.status_code == 200 and len(got_o.json()) == 1
+    assert other["suite_run_id"] not in {
+        x["suite_run_id"] for x in api_client.get(
+            BY_REUSED.format(mid=mid, count=0)).json()}
+    assert mine["suite_run_id"] not in {
+        x["suite_run_id"] for x in got_o.json()}
+    # a model with NO suite runs -> 200 [] for any count
+    e = _http_env(api_client, "m50none", train=False)
+    assert api_client.get(f"{MODELS}/{e['mid']}/suite-runs").json() == []
+    assert api_client.get(
+        BY_REUSED.format(mid=e["mid"], count=0)).json() == []
+
+    # M10/M21/M22/M25 regressions: listing + detail + by-suite +
+    # summary + by-checkpoint keep listing parity
+    listing = api_client.get(f"{MODELS}/{mid}/suite-runs").json()
+    assert mine["suite_run_id"] in {x["suite_run_id"] for x in listing}
+    one = api_client.get(f"{MODELS}/{mid}/suite-runs/{mine['suite_run_id']}")
+    assert one.status_code == 200 and one.json() == mine
+    by_suite = api_client.get(
+        f"{MODELS}/{mid}/suite-runs/by-suite/api10-m50b-suite")
+    assert by_suite.status_code == 200
+    assert by_suite.json() == [x for x in listing
+                               if x["suite_id"] == "api10-m50b-suite"]
+    summary = api_client.get(
+        f"{MODELS}/{mid}/suite-runs/by-suite/api10-m50b-suite/summary")
+    assert summary.status_code == 200
+    assert summary.json()["total_count"] == len(by_suite.json())
+    by_ck = api_client.get(f"{MODELS}/{mid}/suite-runs/by-checkpoint/{ck}")
+    assert by_ck.status_code == 200
+    assert by_ck.json() == [x for x in listing
+                            if x["state"]["state_kind"] == "checkpoint"
+                            and x["state"]["checkpoint_id"] == ck]
+
+    # OpenAPI: 82 paths, the new path exactly once, GET-only, tag
+    # suite-runs, SuiteRunRecord items, integer parameter; route
+    # order by-checkpoint < by-reused < generic suite-run detail
+    spec = api_client.get("/openapi.json").json()
+    # 55 (pre-M18) + 1 (M18) + 1 (M24) + 1 (M25) + 1 (M26) + 1 (M27)
+    # + 1 (M28) + 1 (M29) + 1 (M30) + 1 (M31) + 1 (M32) + 1 (M33)
+    # + 1 (M34) + 1 (M35) + 1 (M36) + 1 (M37) + 1 (M38) + 1 (M39)
+    # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
+    # + 1 (M45) + 1 (M46) + 1 (M47) + 1 (M48) + 1 (M49)
+    # + 1 (M50 suite-runs by-reused) = 82
+    assert len(spec["paths"]) == 82
+    path = "/api/v1/models/{model_id}/suite-runs/by-reused/{reused_count}"
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["suite-runs"]
+    params = {p["name"]: p for p in item["get"]["parameters"]}
+    assert set(params) == {"model_id", "reused_count"}
+    assert params["reused_count"]["schema"]["type"] == "integer"
+    schema = item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"]
+    assert schema["type"] == "array" and schema["items"] == {
+        "$ref": "#/components/schemas/SuiteRunRecord"}
+    assert "post" not in item
+    assert keys.index("/api/v1/models/{model_id}/suite-runs/"
+                      "by-checkpoint/{checkpoint_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/suite-runs/{suite_run_id}")
+    # the generic detail route and the M49 route are still present
+    assert keys.count("/api/v1/models/{model_id}/suite-runs/"
+                      "{suite_run_id}") == 1
+    assert keys.count("/api/v1/models/{model_id}/comparisons/"
+                      "by-seed/{seed}") == 1

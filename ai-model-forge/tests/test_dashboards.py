@@ -1520,4 +1520,4 @@ def test_dashboard_sample_quality_openapi_and_http(api_client):
     # M17 added no endpoints; M18–M45 each added exactly one
     # documented route, so the surface count is 77 (assertion stays
     # exact)
-    assert len(spec["paths"]) == 81
+    assert len(spec["paths"]) == 82

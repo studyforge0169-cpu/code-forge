@@ -328,6 +328,41 @@ class SuiteRunEngine:
                 if r.state.state_kind == EvalStateKind.CHECKPOINT
                 and r.state.checkpoint_id == checkpoint_id]
 
+    def list_suite_runs_for_reused_count(
+            self, model_id: str, reused_count: int
+    ) -> list[SuiteRunRecord]:
+        """Immutable M10 suite runs of ONE model by persisted reuse
+        count (M50).
+
+        Membership comes from the persisted REQUIRED integer ONLY:
+        every ``SuiteRunRecord`` carries ``reused_count: int`` (the
+        number of probes satisfied by pre-existing evidence —
+        execution bookkeeping only, NEVER a score), persisted verbatim
+        at run time, and a run belongs to the request when that
+        persisted value equals the requested integer — matched
+        VERBATIM, never recalculated and never derived from probe
+        outcomes, completed_count, failed_count, probe_count, suite
+        size, status, timestamps, artifact ids, evaluation or
+        comparison records, configuration or any other field. The
+        count is an OPEN integer value axis (no registry, no enum):
+        any integer is type-valid, so an unmatched count on a valid
+        model returns [] (a natural valid-empty), a non-integer
+        spelling is rejected at the API boundary with 422
+        (schema-level validation), and an unknown model raises
+        FileNotFoundError exactly like the sibling groupings. Each run
+        appears EXACTLY ONCE; the per-count groups form a TRUE
+        disjoint partition of the listing with no None case (the
+        field is required). The result is the model's authoritative
+        M10 listing (the exact engine parse + deterministic
+        (created_at, suite_run_id) ASCENDING order) filtered by the
+        persisted reuse count; complete verbatim ``SuiteRunRecord``
+        payloads. Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API)
+        return [r for r in self.list_suite_runs(model_id)
+                if r.reused_count == reused_count]
+
     # ------------------------------------------------------------------ #
     # Deterministic hashing
     # ------------------------------------------------------------------ #

@@ -1994,11 +1994,47 @@ generation never trains, evaluates, scores, ranks or judges output.
   registry/index/cache, no aggregation, no new storage — repeated
   GETs are byte-identical and the endpoint never writes
 
+### Milestone 50 — suite-run history by reused count
+  (`suite-runs/by-reused`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/suite-runs/by-reused/{reused_count}` — answers
+  "which immutable suite runs of this model satisfied this many
+  probes with pre-existing evidence?" and nothing else. Membership
+  comes from the REQUIRED integer `reused_count` persisted on every
+  `SuiteRunRecord` at run time. This closes the simple grouping
+  ladder: every persisted listing field with a genuine multi-group
+  identity is now exposed
+- **exact filtering (persisted integer)**: the listing is the
+  authoritative M10 suite-run history filtered VERBATIM by the
+  record's own persisted value — NEVER recalculated, NEVER derived
+  from probe outcomes, completed_count, failed_count, probe_count,
+  suite size, status, timestamps, artifact ids, evaluation or
+  comparison records, configuration or any other field. The count is
+  EXECUTION BOOKKEEPING, never a score, a ranking or a quality
+  signal — reused evidence is not better or worse, it is how the
+  immutable evaluation cache satisfied the suite. Each run appears
+  EXACTLY ONCE; verbatim `SuiteRunRecord` payloads in the exact M10
+  authoritative order ((created_at, suite_run_id) ascending,
+  preserved)
+- **boundaries**: the count is an OPEN integer value axis — no
+  registry, no enum, no artificial range constraint: any integer is
+  type-valid, an unmatched count on a valid model -> `200 []`
+  (natural valid-empty), a non-integer spelling -> 422
+  (schema-level validation at the API boundary, pre-handler —
+  integers are never silently reinterpreted), unknown model + valid
+  integer -> 404; the per-count groups form a TRUE disjoint
+  partition of the listing with no None case. M10 (run, listing,
+  getter, summary), M21 by-suite, M22 summary, M25 by-checkpoint
+  and the other M4–M49 surfaces are byte-identical before and after.
+  No reused-count registry/index/cache, no aggregation, no new
+  storage — repeated GETs are byte-identical and the endpoint never
+  writes
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 555 tests
+pytest                       # 560 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2495,6 +2531,7 @@ ai-model-forge/
     policies.py        # policy registry + probe suites: immutable definitions (M9)
     suite_runs.py      # explicit multi-probe M4 batches over named suites (M10)
                        # + read-only by-suite/by-checkpoint grouping (M21/M22/M25)
+                       # + read-only by-reused-count grouping (M50)
     recipes.py         # workflow recipes: immutable plans + M14 composition (M12/M14)
     sampling.py         # checkpoint sampling: deterministic generation (M15)
                        # + read-only by-checkpoint/by-tokenizer/by-strategy
@@ -2503,7 +2540,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 555 tests across 20 suites
+  tests/               # 560 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

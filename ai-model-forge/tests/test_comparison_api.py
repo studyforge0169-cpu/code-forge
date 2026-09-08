@@ -393,8 +393,9 @@ def test_m26_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M46 checkpoints by-run)
     # + 1 (M47 evaluations by-truncated)
     # + 1 (M48 evaluations by-seed)
-    # + 1 (M49 comparisons by-seed) = 81
-    assert len(spec["paths"]) == 81
+    # + 1 (M49 comparisons by-seed)
+    # + 1 (M50 suite-runs by-reused) = 82
+    assert len(spec["paths"]) == 82
 
 
 # =========================================================================== #
@@ -525,7 +526,7 @@ def test_m29_api_404s_isolation_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/comparisons/{comparison_id}"
     m26 = ("/api/v1/models/{model_id}/comparisons/by-checkpoint/"
            "{checkpoint_id}")
-    assert len(spec["paths"]) == 81
+    assert len(spec["paths"]) == 82
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["comparison"]
@@ -686,8 +687,9 @@ def test_m31_by_tokenizer_404s_isolation_regressions_openapi(api_client):
     # + 1 (M46 checkpoints by-run)
     # + 1 (M47 evaluations by-truncated)
     # + 1 (M48 evaluations by-seed)
-    # + 1 (M49 comparisons by-seed) = 81
-    assert len(spec["paths"]) == 81
+    # + 1 (M49 comparisons by-seed)
+    # + 1 (M50 suite-runs by-reused) = 82
+    assert len(spec["paths"]) == 82
     path = ("/api/v1/models/{model_id}/comparisons/by-tokenizer"
             "/{tokenizer_id}")
     keys = list(spec["paths"])
@@ -842,8 +844,9 @@ def test_m37_by_split_404_422s_isolation_regressions_openapi(api_client):
     # + 1 (M46 checkpoints by-run)
     # + 1 (M47 evaluations by-truncated)
     # + 1 (M48 evaluations by-seed)
-    # + 1 (M49 comparisons by-seed) = 81
-    assert len(spec["paths"]) == 81
+    # + 1 (M49 comparisons by-seed)
+    # + 1 (M50 suite-runs by-reused) = 82
+    assert len(spec["paths"]) == 82
     path = ("/api/v1/models/{model_id}/comparisons/by-split/{split}")
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -1013,8 +1016,9 @@ def test_m39_by_verdict_404_422s_isolation_regressions_openapi(api_client):
     # + 1 (M46 checkpoints by-run)
     # + 1 (M47 evaluations by-truncated)
     # + 1 (M48 evaluations by-seed)
-    # + 1 (M49 comparisons by-seed) = 81
-    assert len(spec["paths"]) == 81
+    # + 1 (M49 comparisons by-seed)
+    # + 1 (M50 suite-runs by-reused) = 82
+    assert len(spec["paths"]) == 82
     path = ("/api/v1/models/{model_id}/comparisons/by-verdict/"
             "{verdict}")
     keys = list(spec["paths"])
@@ -1202,8 +1206,9 @@ def test_m44_by_state_kind_404_422s_isolation_regressions_openapi(
     # + 1 (M46 checkpoints by-run)
     # + 1 (M47 evaluations by-truncated)
     # + 1 (M48 evaluations by-seed)
-    # + 1 (M49 comparisons by-seed) = 81
-    assert len(spec["paths"]) == 81
+    # + 1 (M49 comparisons by-seed)
+    # + 1 (M50 suite-runs by-reused) = 82
+    assert len(spec["paths"]) == 82
     path = ("/api/v1/models/{model_id}/comparisons/by-state-kind/"
             "{state_kind}")
     keys = list(spec["paths"])
@@ -1348,8 +1353,9 @@ def test_m49_by_seed_404_422s_isolation_regressions_openapi(api_client):
     # + 1 (M34) + 1 (M35) + 1 (M36) + 1 (M37) + 1 (M38) + 1 (M39)
     # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
     # + 1 (M45) + 1 (M46) + 1 (M47) + 1 (M48)
-    # + 1 (M49 comparisons by-seed) = 81
-    assert len(spec["paths"]) == 81
+    # + 1 (M49 comparisons by-seed)
+    # + 1 (M50 suite-runs by-reused) = 82
+    assert len(spec["paths"]) == 82
     path = "/api/v1/models/{model_id}/comparisons/by-seed/{seed}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1

@@ -694,6 +694,25 @@ def index() -> HTMLResponse:
         ordering. Pure data access — no aggregates, no seed sweeps,
         zero storage growth.</li>
 
+      <li><b>M50 suite-run history by reused count</b> — one
+        read-only access path, <code>GET /models/&#123;id&#125;/suite-runs/by-reused/&#123;reused_count&#125;</code>,
+        answers "which immutable suite runs of this model satisfied
+        this many probes with pre-existing evidence?": the model's
+        authoritative M10 listing filtered by the REQUIRED integer
+        <code>reused_count</code> persisted on each record at run
+        time — matched VERBATIM, never recalculated, never derived
+        from probe outcomes, completed/failed/probe counts, suite
+        size, status, timestamps, artifact ids, evaluation or
+        comparison records or configuration. The count is EXECUTION
+        BOOKKEEPING, never a score — reused evidence is not better
+        or worse, it is how the immutable evaluation cache satisfied
+        the suite. The count is an OPEN integer value axis (no
+        registry, no enum): any integer is type-valid — an unmatched
+        count -> 200 [] — while a non-integer spelling -> 422
+        (schema-level, pre-handler); unknown model -> 404; full
+        record payloads, exact M10 ordering. Pure data access — no
+        aggregation, no cache statistics, zero storage growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -770,6 +789,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;</code> — suite-run records of ONE named suite (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;/summary</code> — bookkeeping summary of ONE suite's runs (count, ordered ids, earliest/latest; read-only)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-checkpoint/&#123;ckpt&#125;</code> — suite runs executed against ONE checkpoint state (read-only, deterministic, no aggregation)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-reused/&#123;reused_count&#125;</code> — suite runs of ONE model by persisted reuse count (read-only, deterministic, bookkeeping never a score; unmatched -> [], non-integer 422)</li>
       <li><code>POST  {prefix}/workflows/recipes</code> — register an immutable workflow recipe (idempotent; conflicts 409)</li>
       <li><code>GET   {prefix}/workflows/recipes</code> / <code>GET {prefix}/workflows/recipes/&#123;recipe_id&#125;</code> — immutable recipes</li>
       <li><code>POST  {prefix}/workflows/recipes/&#123;recipe_id&#125;/runs</code> — execute a recipe against one explicit model (existing M7 engine)</li>
@@ -1962,7 +1982,7 @@ def get_probe_suite(suite_id: str) -> ProbeSuite:
 # Suite runs (Milestone 10 — explicit multi-probe M4 batches over named suites;
 # Milestone 21 adds the read-only by-suite grouping of the immutable history,
 # Milestone 22 its bookkeeping summary and Milestone 25 the by-checkpoint
-# grouping)
+# grouping; Milestone 50 adds the read-only by-reused-count grouping)
 # --------------------------------------------------------------------------- #
 
 @api.post("/suite-runs", response_model=SuiteRunRecord, tags=["suite-runs"])
@@ -2066,6 +2086,43 @@ def list_suite_runs_by_checkpoint(model_id: str, checkpoint_id: str
     try:
         return _forge().list_suite_runs_for_checkpoint(model_id,
                                                        checkpoint_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/suite-runs/by-reused/{reused_count}",
+         response_model=list[SuiteRunRecord], tags=["suite-runs"])
+def list_suite_runs_by_reused_count(model_id: str,
+                                    reused_count: int
+                                    ) -> list[SuiteRunRecord]:
+    """Immutable M10 suite runs of ONE model by persisted reuse count
+    (M50).
+
+    Read-only per-count grouping: returns the model's authoritative
+    M10 listing filtered by the REQUIRED integer ``reused_count``
+    persisted on each SuiteRunRecord at run time (the number of
+    probes satisfied by pre-existing evidence) — matched VERBATIM,
+    never recalculated, never derived from probe outcomes,
+    completed_count, failed_count, probe_count, suite size, status,
+    timestamps, artifact ids, evaluation or comparison records,
+    configuration or any other field. The count is EXECUTION
+    BOOKKEEPING, never a score, a ranking or a quality signal —
+    reused evidence is not better or worse, it is how the immutable
+    M4 cache satisfied the suite. Complete verbatim payloads in the
+    exact M10 (created_at, suite_run_id) order. The count is an OPEN
+    integer value axis (no registry, no enum): any integer is
+    type-valid — an unmatched count on a valid model returns 200 []
+    — while a non-integer spelling is rejected with 422 at the API
+    boundary (schema-level validation — never a silent
+    reinterpretation, and the validation fires BEFORE this handler
+    even for an unknown model); an unknown model with a VALID
+    integer raises FileNotFoundError -> 404 exactly like the sibling
+    groupings. No aggregation, no writes. (Must stay registered
+    before /suite-runs/{suite_run_id}; the literal "by-reused"
+    segment is not a suite-run id.)"""
+    try:
+        return _forge().list_suite_runs_for_reused_count(
+            model_id, reused_count)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
