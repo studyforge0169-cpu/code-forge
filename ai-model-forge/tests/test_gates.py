@@ -25,6 +25,7 @@ from app.schemas import (
     ComparisonState,
     ComparisonVerdict,
     EvaluationConfig,
+    GateBaselineType,
     GateDecisionResult,
     GatePolicy,
     GateRequest,
@@ -1288,4 +1289,145 @@ def test_m43_engine_repeated_calls_identical(env):
         again = [r.model_dump(mode="json") for r in
                  f.list_gate_decisions_for_verdict(
                      env.model_id, ComparisonVerdict.IMPROVED)]
+        assert again == first
+
+
+# =========================================================================== #
+# M45: read-only per-baseline-type grouping (nested policy field)
+# =========================================================================== #
+
+def _m45_state(env):
+    """M45 state on top of the shared module env (cached): reuses the
+    M43 fixture (three checkpoint-baseline decisions + TWO
+    minimum_loss threshold-only decisions + the empty model) and adds
+    ONE current-baseline gate, so THREE enum groups are non-empty and
+    the fourth (evaluation_result_hash) is whatever earlier module
+    tests naturally produced (parity-derived, never forced). Returns
+    (d_imp, d_reg, d_unch, d_none1, d_none2, d_cur, empty_model).
+    """
+    cached = getattr(env, "_m45", None)
+    if cached is not None:
+        return cached
+    d_imp, d_reg, d_unch, d_none1, d_none2, empty_model = _m43_state(env)
+    ck_f = env.imp_final.checkpoint_id
+    d_cur = env.run_gate(baseline_type="current", cand_ckpt=ck_f,
+                         seed=4501, name="m45-g1")
+    assert d_cur.policy.baseline_type == GateBaselineType.CURRENT
+    assert d_imp.policy.baseline_type == GateBaselineType.CHECKPOINT
+    assert d_none1.policy.baseline_type == GateBaselineType.MINIMUM_LOSS
+    env._m45 = (d_imp, d_reg, d_unch, d_none1, d_none2, d_cur,
+                empty_model)
+    return env._m45
+
+
+def test_m45_engine_filters_by_persisted_nested_baseline_type(env):
+    d_imp, d_reg, d_unch, d_none1, d_none2, d_cur, empty_model = \
+        _m45_state(env)
+    f = env.forge
+    listing = f.list_gate_decisions(env.model_id)
+    groups = {}
+    for bt in (GateBaselineType.CHECKPOINT, GateBaselineType.CURRENT,
+               GateBaselineType.EVALUATION_RESULT_HASH,
+               GateBaselineType.MINIMUM_LOSS):
+        got = f.list_gate_decisions_for_baseline_type(env.model_id, bt)
+        groups[bt] = got
+        # parity with the authoritative M6 listing filtered by the
+        # persisted NESTED policy.baseline_type; deterministic
+        # (created_at, decision_id) order; membership from the
+        # persisted nested field only — never derived from checkpoint
+        # ids, references or results
+        assert got == [d for d in listing
+                       if d.policy.baseline_type == bt]
+        keyed = [(x.created_at, x.decision_id) for x in got]
+        assert keyed == sorted(keyed)
+        ids = [x.decision_id for x in got]
+        assert len(ids) == len(set(ids))
+        assert all(x.policy.baseline_type == bt
+                   and x.model_id == env.model_id for x in got)
+        # verbatim payload parity with the M6 single-record getter
+        for x in got:
+            assert x == f.get_gate_decision(env.model_id, x.decision_id)
+    # the fixture's records land in their own groups with the persisted
+    # nested baseline type VERBATIM (earlier module tests may have
+    # added other decisions — membership derives from the listing)
+    ids_ck = {x.decision_id for x in groups[GateBaselineType.CHECKPOINT]}
+    ids_cu = {x.decision_id for x in groups[GateBaselineType.CURRENT]}
+    ids_eh = {x.decision_id
+              for x in groups[GateBaselineType.EVALUATION_RESULT_HASH]}
+    ids_ml = {x.decision_id
+              for x in groups[GateBaselineType.MINIMUM_LOSS]}
+    assert {d_imp.decision_id, d_reg.decision_id,
+            d_unch.decision_id} <= ids_ck
+    assert d_cur.decision_id in ids_cu
+    assert {d_none1.decision_id, d_none2.decision_id} <= ids_ml
+    # TRUE disjoint partition: the REQUIRED field puts every decision
+    # in exactly ONE group (no None case); union == full listing
+    all_groups = [ids_ck, ids_cu, ids_eh, ids_ml]
+    for i, g1 in enumerate(all_groups):
+        for g2 in all_groups[i + 1:]:
+            assert g1.isdisjoint(g2)
+    assert set().union(*all_groups) == {d.decision_id for d in listing}
+
+
+def test_m45_engine_empty_404s_model_scoping_read_only(env):
+    d_imp, d_reg, d_unch, d_none1, d_none2, d_cur, empty_model = \
+        _m45_state(env)
+    f = env.forge
+    _, _, _, _, m_b, d_b = _m23_env(env)   # m_b: ONE current-baseline
+    # a model whose ENTIRE M6 listing is empty -> [] for ALL FOUR
+    # baseline types (never 404)
+    assert f.list_gate_decisions(empty_model) == []
+    for bt in (GateBaselineType.CHECKPOINT, GateBaselineType.CURRENT,
+               GateBaselineType.EVALUATION_RESULT_HASH,
+               GateBaselineType.MINIMUM_LOSS):
+        assert f.list_gate_decisions_for_baseline_type(empty_model,
+                                                       bt) == []
+    # unknown model -> FileNotFoundError (404 at the API); the enum
+    # itself needs NO registry lookup (unsupported values are 422 at
+    # the API boundary and never reach the engine)
+    with pytest.raises(FileNotFoundError):
+        f.list_gate_decisions_for_baseline_type(
+            "ghost-model-45", GateBaselineType.CHECKPOINT)
+    # cross-model isolation: both models hold decisions, the listings
+    # are disjoint, each group is a subset of its own model's listing,
+    # and m_b's ONLY decision is current-baseline (its checkpoint /
+    # eval-hash / minimum-loss groups are naturally empty)
+    a_ids = {d.decision_id for d in f.list_gate_decisions(env.model_id)}
+    b_ids = {d.decision_id for d in f.list_gate_decisions(m_b)}
+    assert a_ids and b_ids and a_ids.isdisjoint(b_ids)
+    assert d_b.policy.baseline_type == GateBaselineType.CURRENT
+    for bt in (GateBaselineType.CHECKPOINT, GateBaselineType.CURRENT,
+               GateBaselineType.EVALUATION_RESULT_HASH,
+               GateBaselineType.MINIMUM_LOSS):
+        for mid, ids in ((env.model_id, a_ids), (m_b, b_ids)):
+            group = {x.decision_id for x in
+                     f.list_gate_decisions_for_baseline_type(mid, bt)}
+            assert group <= ids
+    assert [x.decision_id for x in f.list_gate_decisions_for_baseline_type(
+        m_b, GateBaselineType.CURRENT)] == [d_b.decision_id]
+    assert f.list_gate_decisions_for_baseline_type(
+        m_b, GateBaselineType.CHECKPOINT) == []
+    # read-only: the filter never writes gate manifests
+    before = _m23_gate_files(env, [env.model_id, m_b, empty_model])
+    for bt in (GateBaselineType.CHECKPOINT, GateBaselineType.CURRENT,
+               GateBaselineType.EVALUATION_RESULT_HASH,
+               GateBaselineType.MINIMUM_LOSS):
+        f.list_gate_decisions_for_baseline_type(env.model_id, bt)
+        f.list_gate_decisions_for_baseline_type(m_b, bt)
+        f.list_gate_decisions_for_baseline_type(empty_model, bt)
+    after = _m23_gate_files(env, [env.model_id, m_b, empty_model])
+    assert after == before
+
+
+def test_m45_engine_repeated_calls_identical(env):
+    d_imp, d_reg, d_unch, d_none1, d_none2, d_cur, empty_model = \
+        _m45_state(env)
+    f = env.forge
+    first = [r.model_dump(mode="json") for r in
+             f.list_gate_decisions_for_baseline_type(
+                 env.model_id, GateBaselineType.CHECKPOINT)]
+    for _ in range(3):
+        again = [r.model_dump(mode="json") for r in
+                 f.list_gate_decisions_for_baseline_type(
+                     env.model_id, GateBaselineType.CHECKPOINT)]
         assert again == first

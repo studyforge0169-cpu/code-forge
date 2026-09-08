@@ -289,6 +289,55 @@ class GateEngine:
         return [d for d in self.list_decisions(model_id)
                 if d.verdict == verdict]
 
+    def list_decisions_for_baseline_type(
+            self, model_id: str, baseline_type: GateBaselineType
+    ) -> list[GateDecision]:
+        """Immutable gate decisions of ONE model whose embedded policy
+        compared the candidate against ONE kind of baseline (M45; the
+        first nested-field grouping).
+
+        Membership comes from the persisted nested policy identity
+        ONLY: every ``GateDecision`` embeds its ``GatePolicy`` VERBATIM
+        (the M6 run persists the policy exactly as evaluated), and
+        every policy carries a REQUIRED ``baseline_type:
+        GateBaselineType`` (the schema enum: checkpoint = a specific
+        immutable checkpoint; current = the model's published current
+        weights; evaluation_result_hash = a past immutable evaluation;
+        minimum_loss = an absolute loss threshold only, no state) — a
+        decision belongs to the request when its persisted
+        ``policy.baseline_type`` equals the requested value, matched
+        VERBATIM — NEVER derived from checkpoint id presence,
+        comparison or evaluation references, policy contents outside
+        baseline_type, the gate result, the verdict, loss deltas or
+        timestamps, and never resolved or rewritten (the persisted
+        nested field is the ONLY authority; this method never
+        re-evaluates a gate). Because the field is required, every
+        decision falls in exactly ONE group — a TRUE disjoint
+        partition with no None case. The enum exposes the COMPLETE
+        contract including ``evaluation_result_hash``: a valid value
+        with no matching decisions is a deterministic [] (never 404,
+        never a route omitted for empty categories). Baseline types
+        have NO registry (the enum IS the contract, exactly like
+        M41/M43): an unsupported value is rejected at the API boundary
+        with 422 and never reaches this method, while an unknown model
+        raises FileNotFoundError exactly like the sibling groupings.
+        Each decision appears EXACTLY ONCE (the authoritative listing
+        holds each record exactly once). The result is the model's
+        authoritative M6 listing above (the exact engine parse +
+        deterministic (created_at, decision_id) ASCENDING order)
+        filtered by the persisted nested baseline type; complete
+        verbatim ``GateDecision`` payloads (embedded policy, verdict,
+        evidence chain included), no rewritten fields. Baseline types
+        are model-scoped through the listing itself — a model never
+        sees another model's decisions. Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API); the NESTED
+        # persisted policy field is filtered VERBATIM — never derived
+        # from checkpoint ids, references or results
+        return [d for d in self.list_decisions(model_id)
+                if d.policy.baseline_type == baseline_type]
+
     # ------------------------------------------------------------------ #
     # The gate run
     # ------------------------------------------------------------------ #

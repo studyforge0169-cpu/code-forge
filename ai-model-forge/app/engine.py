@@ -29,6 +29,7 @@ from .schemas import (
     EvalStateKind,
     EvaluationRecord,
     EvaluationSplit,
+    GateBaselineType,
     GateDecisionResult,
     ModelCreateRequest,
     ModelRecord,
@@ -594,6 +595,31 @@ class ModelForge:
         None) belong to NO by-verdict group. A valid verdict with no
         matching decisions returns []. Read-only, never writes."""
         return self.gates.list_decisions_for_verdict(model_id, verdict)
+
+    def list_gate_decisions_for_baseline_type(self, model_id: str,
+                                              baseline_type:
+                                              GateBaselineType):
+        """Immutable gate decisions of ONE model whose embedded policy
+        compared the candidate against ONE kind of baseline (M45
+        read-only access; the first nested-field grouping).
+
+        The baseline type is the REQUIRED persisted schema enum
+        (checkpoint/current/evaluation_result_hash/minimum_loss)
+        embedded verbatim in each decision's policy — there is NO
+        baseline-type registry, so an unsupported value is rejected at
+        the API boundary with 422, while an unknown model raises
+        FileNotFoundError (404) exactly like the sibling groupings.
+        Returns the model's authoritative M6 listing filtered by the
+        persisted nested policy.baseline_type (matched VERBATIM —
+        NEVER derived from checkpoint ids, references, results or
+        loss deltas; no gate is re-evaluated) in the M6 (created_at,
+        decision_id) order, as complete verbatim records. Because the
+        field is required, the groups form a TRUE disjoint partition
+        of the listing with no None case; a valid baseline type with
+        no matching decisions (e.g. evaluation_result_hash where none
+        exist) returns []. Read-only, never writes."""
+        return self.gates.list_decisions_for_baseline_type(
+            model_id, baseline_type)
 
     # ------------------------------------------------------------------ #
     # Workflows (thin delegation; ordered orchestration over M3-M6; M7)

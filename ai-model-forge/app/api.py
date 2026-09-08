@@ -26,6 +26,7 @@ from .schemas import (
     EvaluationSplit,
     GateDecision,
     GateDecisionResult,
+    GateBaselineType,
     GateRequest,
     HealthResponse,
     ModelDashboard,
@@ -600,6 +601,27 @@ def index() -> HTMLResponse:
         with no matching comparisons -> []). Pure data access — no
         aggregates, no rankings, zero storage growth.</li>
 
+      <li><b>M45 gate-decision history by baseline type</b> — one
+        read-only access path, <code>GET /models/&#123;id&#125;/gates/decisions/by-baseline-type/&#123;baseline_type&#125;</code>,
+        answers "which immutable gate decisions of this model
+        compared their candidate against this kind of baseline?":
+        the model's authoritative M6 listing filtered by the
+        persisted NESTED policy field <code>policy.baseline_type</code>
+        (the schema enum checkpoint / current /
+        evaluation_result_hash / minimum_loss, embedded VERBATIM in
+        each decision — the M6 run persists the policy exactly as
+        evaluated), matched VERBATIM — NEVER derived from checkpoint
+        id presence, references, results, verdicts or loss deltas,
+        never re-evaluated; the REQUIRED field makes the groups a
+        TRUE disjoint partition with no None case; the enum exposes
+        the COMPLETE contract — evaluation_result_hash is a valid
+        value that naturally returns [] where no such gates exist;
+        full record payloads, exact M6 ordering; unknown model ->
+        404; an UNSUPPORTED baseline type -> 422, because baseline
+        types have no registry — the enum IS the contract. Pure data
+        access — no aggregates, no rankings, zero storage
+        growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -655,6 +677,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-comparison/&#123;comparison_id&#125;</code> — gate decisions that judged ONE M5 comparison (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-decision/&#123;decision&#125;</code> — gate decisions of ONE model with ONE decision result (read-only, deterministic, persisted decision verbatim — never recalculated; unsupported decision 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-verdict/&#123;verdict&#125;</code> — gate decisions of ONE model with ONE recorded comparison verdict (read-only, deterministic, persisted verdict verbatim — never recalculated; null-verdict threshold-only decisions in no group; unsupported verdict 422)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/by-baseline-type/&#123;baseline_type&#125;</code> — gate decisions of ONE model whose embedded policy used ONE baseline kind (read-only, deterministic, persisted nested policy.baseline_type verbatim — never derived; true disjoint partition; unsupported baseline type 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/gates/decisions/&#123;decision&#125;</code> — one gate decision</li>
       <li><code>POST  {prefix}/workflows/run</code> — execute one inline workflow plan synchronously</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows</code> — immutable workflow run history</li>
@@ -1435,7 +1458,8 @@ def get_comparison(model_id: str, comparison_id: str) -> ComparisonRecord:
 # Milestone 23 adds the read-only by-policy grouping of the immutable history;
 # Milestone 34 adds the read-only by-comparison grouping of the same history;
 # Milestone 41 adds the read-only by-decision grouping of the same history;
-# Milestone 43 adds the read-only by-verdict grouping of the same history)
+# Milestone 43 adds the read-only by-verdict grouping of the same history;
+# Milestone 45 adds the read-only by-baseline-type grouping (nested policy field))
 # --------------------------------------------------------------------------- #
 
 @api.post("/gates/evaluate", response_model=GateDecision, tags=["gates"])
@@ -1595,6 +1619,50 @@ def list_gate_decisions_by_verdict(model_id: str,
     "by-verdict" segment is not a decision id.)"""
     try:
         return _forge().list_gate_decisions_for_verdict(model_id, verdict)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/gates/decisions/by-baseline-type/{baseline_type}",
+         response_model=list[GateDecision], tags=["gates"])
+def list_gate_decisions_by_baseline_type(model_id: str,
+                                         baseline_type: GateBaselineType
+                                         ) -> list[GateDecision]:
+    """Immutable gate decisions of ONE model whose embedded policy
+    compared the candidate against ONE kind of baseline (M45; the
+    first nested-field grouping).
+
+    Read-only per-baseline-type grouping over the persisted NESTED
+    policy field: every GateDecision embeds its GatePolicy VERBATIM
+    (the M6 run persists the policy exactly as evaluated), and every
+    policy carries a REQUIRED baseline_type (the schema enum
+    checkpoint / current / evaluation_result_hash / minimum_loss);
+    the listing is filtered by that persisted nested value — matched
+    VERBATIM — membership NEVER comes from deriving the type from
+    checkpoint id presence, comparison or evaluation references,
+    policy contents outside baseline_type, the gate result, the
+    verdict, loss deltas or timestamps, no gate is re-evaluated, and
+    the persisted value is never resolved or rewritten. Complete
+    verbatim payloads (embedded policy, verdict, evidence chain
+    included) in the exact M6 (created_at, decision_id) order.
+    Because the field is required, the groups form a TRUE disjoint
+    partition of the listing with no None case; the enum exposes the
+    COMPLETE contract including evaluation_result_hash — a valid
+    value with no matching decisions is a deterministic [] (never
+    404, and no route is omitted for empty categories). Baseline
+    types have NO registry (exactly like M41/M43): the
+    GateBaselineType enum IS the contract, so an UNSUPPORTED baseline
+    type is rejected with 422 at the API boundary (schema-level
+    validation — never a registry-style 404, and the validation fires
+    BEFORE this handler even for an unknown model), while an unknown
+    model with a VALID baseline type raises FileNotFoundError -> 404
+    exactly like the sibling groupings. No aggregates, no rankings,
+    no writes. (Must stay registered before
+    /gates/decisions/{decision_id}; the literal "by-baseline-type"
+    segment is not a decision id.)"""
+    try:
+        return _forge().list_gate_decisions_for_baseline_type(
+            model_id, baseline_type)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

@@ -1805,11 +1805,69 @@ generation never trains, evaluates, scores, ranks or judges output.
   by-verdict, M38 evaluations-by-state-kind and the M16–M43 surfaces
   are byte-identical before and after
 
+### Milestone 45 — gate-decision history by baseline type
+  (`gates/decisions/by-baseline-type`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/gates/decisions/by-baseline-type/{baseline_type}`
+  — answers "which immutable gate decisions of this model compared
+  their candidate against this kind of baseline?" and nothing else.
+  The FIRST nested-field grouping: membership comes from the
+  persisted `policy.baseline_type` embedded verbatim in each decision
+- **exact filtering (persisted NESTED policy field)**: every
+  `GateDecision` embeds its `GatePolicy` VERBATIM (the M6 run
+  persists the policy exactly as evaluated), and every policy
+  carries a REQUIRED `baseline_type: GateBaselineType` (the schema
+  enum: checkpoint = a specific immutable checkpoint; current = the
+  model's published current weights; evaluation_result_hash = a past
+  immutable evaluation; minimum_loss = an absolute loss threshold
+  only, no state), and a decision belongs to the request only when
+  that persisted nested value matches VERBATIM — never derived from
+  checkpoint id presence, comparison or evaluation references, policy
+  contents outside baseline_type, the gate result, the verdict, loss
+  deltas or timestamps, never resolved or rewritten, no gate
+  re-evaluated. Each matching decision appears EXACTLY ONCE; verbatim
+  `GateDecision` payloads (embedded policy, verdict, evidence chain
+  included) in the exact M6 authoritative order ((created_at,
+  decision_id) ASCENDING)
+- **true disjoint partition, complete enum contract**: because the
+  field is REQUIRED, every decision falls in exactly ONE group — no
+  None case (unlike M43's optional verdict). The enum exposes the
+  COMPLETE contract including `evaluation_result_hash`: a valid value
+  with no matching decisions is a deterministic `[]` — never 404,
+  and no route is omitted for empty categories (production currently
+  holds checkpoint -> 7 / current -> 2 / minimum_loss -> 2 /
+  evaluation_result_hash -> 0 for `4a0a871886ef` — three non-empty
+  groups; every baseline type of `b5bc905326b6` is a natural
+  valid-empty case)
+- **the 422-vs-404 contract (no baseline-type registry)**: baseline
+  types are a SCHEMA ENUM, not a registry — exactly like M41/M43, an
+  unsupported baseline-type value is rejected with 422 by schema
+  validation at the API boundary (before the handler, matching
+  M36–M44: even unknown-model + invalid-baseline-type is 422);
+  unknown model with a VALID baseline type -> existing 404
+- **implementation is a reuse, not a second engine**: the engine
+  method `list_decisions_for_baseline_type(model_id, baseline_type)`
+  filters the authoritative M6 `list_decisions()` by the persisted
+  nested `policy.baseline_type` (ZERO new composition lines — no
+  registry handle is needed, and the gate run path is never
+  invoked); the facade and route are thin pass-throughs registered
+  after the M43 by-verdict route and **before** the generic
+  `/gates/decisions/{decision_id}` detail getter (M23/M34/M41/M43/M45
+  are different groupings of the same listing, all intact). No
+  caches, no new storage — repeated GETs are byte-identical and the
+  endpoint never writes
+- **isolation & boundaries**: unknown model -> existing 404;
+  unsupported baseline-type value -> 422; valid baseline type
+  without matching decisions -> `[]`. M6 (run, listing, getter), M23
+  by-policy, M34 by-comparison, M41 by-decision, M43 by-verdict, M44
+  comparisons-by-state-kind and the M16–M44 surfaces are
+  byte-identical before and after
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 530 tests
+pytest                       # 535 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2296,7 +2354,8 @@ ai-model-forge/
                        #   (M26/M29/M31/M37/M39/M44)
     gates.py           # stage gates: policy-driven run decisions (M6)
                        # + read-only by-policy/by-comparison/by-decision/
-                       #   by-verdict grouping (M23/M34/M41/M43)
+                       #   by-verdict/by-baseline-type grouping
+                       #   (M23/M34/M41/M43/M45)
     workflows.py       # workflow engine: ordered orchestration over M3-M6 (M7)
                        # + read-only by-recipe/by-status grouping (M35/M42)
     dashboards.py      # read-only dashboard engine: deterministic views (M8/M13)
@@ -2311,7 +2370,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 530 tests across 20 suites
+  tests/               # 535 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

@@ -388,8 +388,9 @@ def test_m26_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M41 gate decisions by-decision)
     # + 1 (M42 workflows by-status)
     # + 1 (M43 gate decisions by-verdict)
-    # + 1 (M44 comparisons by-state-kind) = 76
-    assert len(spec["paths"]) == 76
+    # + 1 (M44 comparisons by-state-kind)
+    # + 1 (M45 gate decisions by-baseline-type) = 77
+    assert len(spec["paths"]) == 77
 
 
 # =========================================================================== #
@@ -520,7 +521,7 @@ def test_m29_api_404s_isolation_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/comparisons/{comparison_id}"
     m26 = ("/api/v1/models/{model_id}/comparisons/by-checkpoint/"
            "{checkpoint_id}")
-    assert len(spec["paths"]) == 76
+    assert len(spec["paths"]) == 77
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["comparison"]
@@ -676,8 +677,9 @@ def test_m31_by_tokenizer_404s_isolation_regressions_openapi(api_client):
     # + 1 (M41 gate decisions by-decision)
     # + 1 (M42 workflows by-status)
     # + 1 (M43 gate decisions by-verdict)
-    # + 1 (M44 comparisons by-state-kind) = 76
-    assert len(spec["paths"]) == 76
+    # + 1 (M44 comparisons by-state-kind)
+    # + 1 (M45 gate decisions by-baseline-type) = 77
+    assert len(spec["paths"]) == 77
     path = ("/api/v1/models/{model_id}/comparisons/by-tokenizer"
             "/{tokenizer_id}")
     keys = list(spec["paths"])
@@ -808,7 +810,7 @@ def test_m37_by_split_404_422s_isolation_regressions_openapi(api_client):
     assert evs_by.status_code == 200
     assert evs_by.json() == [e for e in evs if e["split"] == "validation"]
 
-    # OpenAPI: 76 paths, the new path exactly once, GET-only, tag
+    # OpenAPI: 77 paths, the new path exactly once, GET-only, tag
     # comparison, ComparisonRecord items, split $ref EvaluationSplit;
     # route order M31 by-tokenizer < by-split < generic detail
     spec = api_client.get("/openapi.json").json()
@@ -827,8 +829,9 @@ def test_m37_by_split_404_422s_isolation_regressions_openapi(api_client):
     # + 1 (M41 gate decisions by-decision)
     # + 1 (M42 workflows by-status)
     # + 1 (M43 gate decisions by-verdict)
-    # + 1 (M44 comparisons by-state-kind) = 76
-    assert len(spec["paths"]) == 76
+    # + 1 (M44 comparisons by-state-kind)
+    # + 1 (M45 gate decisions by-baseline-type) = 77
+    assert len(spec["paths"]) == 77
     path = ("/api/v1/models/{model_id}/comparisons/by-split/{split}")
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -973,7 +976,7 @@ def test_m39_by_verdict_404_422s_isolation_regressions_openapi(api_client):
         assert g.json() == [e for e in evs
                             if e["state_kind"] == kind]
 
-    # OpenAPI: 76 paths, the new path exactly once, GET-only, tag
+    # OpenAPI: 77 paths, the new path exactly once, GET-only, tag
     # comparison, ComparisonRecord items, verdict $ref
     # ComparisonVerdict; route order M37 by-split < by-verdict <
     # generic detail
@@ -993,8 +996,9 @@ def test_m39_by_verdict_404_422s_isolation_regressions_openapi(api_client):
     # + 1 (M41 gate decisions by-decision)
     # + 1 (M42 workflows by-status)
     # + 1 (M43 gate decisions by-verdict)
-    # + 1 (M44 comparisons by-state-kind) = 76
-    assert len(spec["paths"]) == 76
+    # + 1 (M44 comparisons by-state-kind)
+    # + 1 (M45 gate decisions by-baseline-type) = 77
+    assert len(spec["paths"]) == 77
     path = ("/api/v1/models/{model_id}/comparisons/by-verdict/"
             "{verdict}")
     keys = list(spec["paths"])
@@ -1157,7 +1161,7 @@ def test_m44_by_state_kind_404_422s_isolation_regressions_openapi(
         assert g.json() == [e for e in evs
                             if e["state_kind"] == kind]
 
-    # OpenAPI: 76 paths, the new path exactly once, GET-only, tag
+    # OpenAPI: 77 paths, the new path exactly once, GET-only, tag
     # comparison, ComparisonRecord items, state_kind $ref
     # EvalStateKind; route order M39 by-verdict < by-state-kind <
     # generic detail
@@ -1177,8 +1181,9 @@ def test_m44_by_state_kind_404_422s_isolation_regressions_openapi(
     # + 1 (M41 gate decisions by-decision)
     # + 1 (M42 workflows by-status)
     # + 1 (M43 gate decisions by-verdict)
-    # + 1 (M44 comparisons by-state-kind) = 76
-    assert len(spec["paths"]) == 76
+    # + 1 (M44 comparisons by-state-kind)
+    # + 1 (M45 gate decisions by-baseline-type) = 77
+    assert len(spec["paths"]) == 77
     path = ("/api/v1/models/{model_id}/comparisons/by-state-kind/"
             "{state_kind}")
     keys = list(spec["paths"])
