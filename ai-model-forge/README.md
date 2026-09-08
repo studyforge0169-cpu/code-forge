@@ -1962,11 +1962,43 @@ generation never trains, evaluates, scores, ranks or judges output.
   new storage — repeated GETs are byte-identical and the endpoint
   never writes
 
+### Milestone 49 — comparison history by seed
+  (`comparisons/by-seed`)
+- **concept**: one narrow read-only access path —
+  `GET /models/{id}/comparisons/by-seed/{seed}` — answers "which
+  immutable A/B comparisons of this model ran with this effective
+  seed?" and nothing else. Membership comes from the REQUIRED
+  integer `seed` persisted on every `ComparisonRecord` at run time
+  (the seed of the identical-probe measurement)
+- **exact filtering (persisted integer)**: the listing is the
+  authoritative M5 comparison history filtered VERBATIM by the
+  record's own persisted value — NEVER recalculated, NEVER
+  normalized, NEVER derived from the comparison configuration,
+  either side's evaluation, state payloads, verdicts, loss deltas,
+  ids, timestamps or any other field. The seed is bookkeeping
+  identity, not a quality metric — no seed produces better
+  comparisons. Each comparison appears EXACTLY ONCE; verbatim
+  `ComparisonRecord` payloads (both sides, losses, verdict included)
+  in the exact M5 authoritative order ((created_at, comparison_id)
+  ascending, preserved)
+- **boundaries**: the seed is an OPEN integer value axis — no
+  registry, no enum, no artificial range constraint: any integer is
+  type-valid, an unmatched seed on a valid model -> `200 []`
+  (natural valid-empty), a non-integer spelling -> 422
+  (schema-level validation at the API boundary, pre-handler —
+  integers are never silently reinterpreted), unknown model + valid
+  integer -> 404; the per-seed groups form a TRUE disjoint
+  partition of the listing with no None case. M5 (run, listing,
+  getter), M26/M29/M31/M37/M39/M44 comparison groupings and the
+  other M4–M48 surfaces are byte-identical before and after. No seed
+  registry/index/cache, no aggregation, no new storage — repeated
+  GETs are byte-identical and the endpoint never writes
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 550 tests
+pytest                       # 555 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2452,7 +2484,7 @@ ai-model-forge/
     comparison.py      # comparison engine: A/B states over identical probes (M5)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
                        #   by-verdict/by-state-kind grouping
-                       #   (M26/M29/M31/M37/M39/M44)
+                       #   (M26/M29/M31/M37/M39/M44/M49)
     gates.py           # stage gates: policy-driven run decisions (M6)
                        # + read-only by-policy/by-comparison/by-decision/
                        #   by-verdict/by-baseline-type grouping
@@ -2471,7 +2503,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 550 tests across 20 suites
+  tests/               # 555 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

@@ -675,6 +675,25 @@ def index() -> HTMLResponse:
         record payloads, exact M4 ordering. Pure data access — no
         aggregates, no seed sweeps, zero storage growth.</li>
 
+      <li><b>M49 comparison history by seed</b> — one
+        read-only access path, <code>GET /models/&#123;id&#125;/comparisons/by-seed/&#123;seed&#125;</code>,
+        answers "which immutable A/B comparisons of this model ran
+        with this effective seed?": the model's authoritative M5
+        listing filtered by the REQUIRED integer <code>seed</code>
+        persisted on each record at run time (the seed of the
+        identical-probe measurement) — matched VERBATIM, never
+        recalculated, never normalized, never derived from the
+        comparison configuration, either side's evaluation, state
+        payloads, verdicts, loss deltas, ids or timestamps. The seed
+        is bookkeeping identity, not a quality metric — no seed
+        produces better comparisons. The seed is an OPEN integer
+        value axis (no registry, no enum): any integer is
+        type-valid — an unmatched seed -> 200 [] — while a
+        non-integer spelling -> 422 (schema-level, pre-handler);
+        unknown model -> 404; full record payloads, exact M5
+        ordering. Pure data access — no aggregates, no seed sweeps,
+        zero storage growth.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -723,6 +742,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-split/&#123;split&#125;</code> — comparisons of ONE model on ONE dataset split (read-only, deterministic, persisted shared-probe split verbatim; unsupported split 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-verdict/&#123;verdict&#125;</code> — comparisons of ONE model with ONE verdict (read-only, deterministic, persisted verdict verbatim — never recalculated; unsupported verdict 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-state-kind/&#123;state_kind&#125;</code> — comparisons of ONE model involving ONE kind of model state on EITHER side (read-only, deterministic, persisted side state kinds verbatim — never inferred; both-sides match appears once; unsupported state kind 422)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/comparisons/by-seed/&#123;seed&#125;</code> — comparisons of ONE model by persisted effective seed (read-only, deterministic, persisted integer verbatim, open value axis; unmatched -> [], non-integer 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-tokenizer/&#123;tok&#125;</code> — samples of ONE model generated with ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-strategy/&#123;strategy&#125;</code> — samples of ONE model generated with ONE decoding strategy (read-only, deterministic, persisted strategy verbatim — never recalculated; unsupported strategy 422)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tok&#125;</code> — M16 sample-quality measurements of ONE model under ONE tokenizer (read-only, deterministic, persisted identity verbatim)</li>
@@ -1368,7 +1388,8 @@ def get_evaluation(model_id: str, eval_id: str) -> EvaluationRecord:
 # Milestone 31 adds the read-only by-tokenizer grouping of the immutable history;
 # Milestone 37 adds the read-only by-split grouping of the same history;
 # Milestone 39 adds the read-only by-verdict grouping of the same history;
-# Milestone 44 adds the read-only by-state-kind grouping with either-side semantics)
+# Milestone 44 adds the read-only by-state-kind grouping with either-side semantics;
+# Milestone 49 adds the read-only by-seed grouping of the same history)
 # --------------------------------------------------------------------------- #
 
 @api.post("/comparisons/run", response_model=ComparisonRecord, tags=["comparison"])
@@ -1595,6 +1616,40 @@ def list_comparisons_by_state_kind(model_id: str,
     try:
         return _forge().list_comparisons_for_state_kind(model_id,
                                                         state_kind)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/comparisons/by-seed/{seed}",
+         response_model=list[ComparisonRecord], tags=["comparison"])
+def list_comparisons_by_seed(model_id: str,
+                             seed: int) -> list[ComparisonRecord]:
+    """Immutable M5 comparisons of ONE model by persisted effective
+    seed (M49).
+
+    Read-only per-seed grouping: returns the model's authoritative
+    M5 listing filtered by the REQUIRED integer ``seed`` persisted
+    on each ComparisonRecord at run time (the seed of the
+    identical-probe A/B measurement) — matched VERBATIM, never
+    recalculated, never normalized, never derived from the
+    comparison configuration, either side's evaluation, state
+    payloads, verdicts, loss deltas, ids, timestamps or any other
+    field. The seed is bookkeeping identity, not a quality metric —
+    no seed produces better comparisons. Complete verbatim payloads
+    (both sides, losses, verdict included) in the exact M5
+    (created_at, comparison_id) order. The seed is an OPEN integer
+    value axis (no registry, no enum): any integer is type-valid —
+    an unmatched seed on a valid model returns 200 [] — while a
+    non-integer spelling is rejected with 422 at the API boundary
+    (schema-level validation — never a silent reinterpretation, and
+    the validation fires BEFORE this handler even for an unknown
+    model); an unknown model with a VALID integer raises
+    FileNotFoundError -> 404 exactly like the sibling groupings. No
+    aggregates, no writes. (Must stay registered before
+    /comparisons/{comparison_id}; the literal "by-seed" segment is
+    not a comparison id.)"""
+    try:
+        return _forge().list_comparisons_for_seed(model_id, seed)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

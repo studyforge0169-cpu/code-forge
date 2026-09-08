@@ -558,6 +558,25 @@ class ModelForge:
         return self.comparison.list_comparisons_for_state_kind(
             model_id, state_kind)
 
+    def list_comparisons_for_seed(self, model_id: str,
+                                  seed: int) -> list[ComparisonRecord]:
+        """Immutable M5 comparison records of ONE model by persisted
+        effective seed (M49 read-only access).
+
+        ``seed`` is the REQUIRED integer persisted on every record
+        (the seed of the identical-probe A/B measurement) — an OPEN
+        value axis with NO registry, so a non-integer spelling is
+        rejected at the API boundary with 422, while an unknown model
+        raises FileNotFoundError (404) exactly like the sibling
+        groupings. Returns the model's authoritative M5 listing
+        filtered by the persisted record value (matched VERBATIM —
+        never recalculated, never normalized, never derived from the
+        configuration or either side's evaluation) in the M5
+        (created_at, comparison_id) order, as complete verbatim
+        records. An unmatched seed on a valid model returns [].
+        Read-only, never writes."""
+        return self.comparison.list_comparisons_for_seed(model_id, seed)
+
     # ------------------------------------------------------------------ #
     # Stage gates (thin delegation; M6)
     # ------------------------------------------------------------------ #

@@ -1199,3 +1199,91 @@ def test_m44_engine_repeated_calls_identical(env):
                  f.list_comparisons_for_state_kind(
                      env.model_id, EvalStateKind.CHECKPOINT)]
         assert again == first
+
+
+# =========================================================================== #
+# M49: comparison history by seed (read-only integer value grouping)
+# =========================================================================== #
+
+def _m49_env(env):
+    """M49 state on top of the shared module env (cached): on top of
+    the M39 verdict fixture, TWO comparisons sharing seed 4900 (an
+    A=B and a cross-checkpoint pair) plus ONE with seed 4901 —
+    groups of different cardinalities, all through the REAL engine.
+    Returns (c_s0a, c_s0b, c_s1, b).
+    """
+    cached = getattr(env, "_m49_state", None)
+    if cached is not None:
+        return cached
+    _, _, _ = _m39_env(env)          # seeds 3900/3901/3902 already live
+    _, _, _, _, _, _, _, b, b_ck = _m26_env(env)   # b: zero comparisons
+    f = env.forge
+    ckE, ckF = env.imp_early.checkpoint_id, env.imp_final.checkpoint_id
+    c_s0a = f.run_comparison(env.cmp(ckF, ckF, tolerance=1e-4, seed=4900))
+    c_s0b = f.run_comparison(env.cmp(ckE, ckF, tolerance=1e-9, seed=4900))
+    c_s1 = f.run_comparison(env.cmp(ckE, ckF, tolerance=1e-4, seed=4901))
+    env._m49_state = (c_s0a, c_s0b, c_s1, b)
+    return env._m49_state
+
+
+def test_m49_engine_filters_by_persisted_seed(env):
+    c_s0a, c_s0b, c_s1, b = _m49_env(env)
+    f = env.forge
+    listing = f.list_comparisons(env.model_id)
+    seeds = sorted({r.seed for r in listing})
+    # multiple groups with different cardinalities exist in the
+    # listing (the module fixtures seed 2601/3900-3902/4900/4901+)
+    assert len(seeds) >= 4
+    for seed in seeds:
+        got = f.list_comparisons_for_seed(env.model_id, seed)
+        # parity with the authoritative M5 listing filtered by the
+        # persisted record value; deterministic (created_at,
+        # comparison_id) order; membership from the persisted field
+        # only
+        assert got == [r for r in listing if r.seed == seed]
+        keyed = [(r.created_at, r.comparison_id) for r in got]
+        assert keyed == sorted(keyed)
+        assert all(r.seed == seed and r.model_id == env.model_id
+                   for r in got)
+        for r in got:
+            assert r == f.get_comparison(env.model_id, r.comparison_id)
+    # the fixture's shared seed yields the 2-record group VERBATIM
+    got4900 = f.list_comparisons_for_seed(env.model_id, 4900)
+    assert {c_s0a.comparison_id, c_s0b.comparison_id} == \
+        {r.comparison_id for r in got4900}
+    assert c_s1.comparison_id in \
+        {r.comparison_id for r in f.list_comparisons_for_seed(
+            env.model_id, 4901)}
+
+
+def test_m49_engine_seed_partition_unmatched_and_empty_model(env):
+    c_s0a, c_s0b, c_s1, b = _m49_env(env)
+    f = env.forge
+    listing = f.list_comparisons(env.model_id)
+    seeds = sorted({r.seed for r in listing})
+    groups = {s: f.list_comparisons_for_seed(env.model_id, s)
+              for s in seeds}
+    # TRUE disjoint partition: pairwise-disjoint groups whose union is
+    # the full listing; no None case — the int is REQUIRED
+    assert all(isinstance(r.seed, int) for r in listing)
+    all_ids: set = set()
+    for s in seeds:
+        ids = {r.comparison_id for r in groups[s]}
+        assert all_ids.isdisjoint(ids)
+        all_ids |= ids
+    assert all_ids == {r.comparison_id for r in listing}
+    # unmatched valid integer -> [] (natural valid-empty)
+    assert f.list_comparisons_for_seed(env.model_id, 987654) == []
+    # zero-comparison model -> [] for any seed
+    assert f.list_comparisons(b) == []
+    assert f.list_comparisons_for_seed(b, seeds[0]) == []
+    assert f.list_comparisons_for_seed(b, 987654) == []
+
+
+def test_m49_engine_unknown_model_not_found(env):
+    # unknown model -> FileNotFoundError (404 at the API), exactly
+    # like the sibling groupings
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_comparisons_for_seed("ghost-model-49", 1)
+    with pytest.raises(FileNotFoundError):
+        env.forge.list_comparisons_for_seed("ghost-model-49", 987654)

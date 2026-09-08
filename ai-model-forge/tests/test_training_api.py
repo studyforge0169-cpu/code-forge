@@ -330,7 +330,7 @@ def test_m46_by_run_errors_empty_isolation_regressions_openapi(api_client):
     # + 1 (M34) + 1 (M35) + 1 (M36) + 1 (M37) + 1 (M38) + 1 (M39)
     # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
     # + 1 (M45) + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 80
+    assert len(spec["paths"]) == 81
     path = "/api/v1/models/{model_id}/checkpoints/by-run/{run_id}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1

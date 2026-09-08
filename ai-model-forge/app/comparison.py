@@ -215,6 +215,38 @@ class ComparisonEngine:
 
         return [r for r in self.list_comparisons(model_id) if involves(r)]
 
+    def list_comparisons_for_seed(
+            self, model_id: str, seed: int) -> list[ComparisonRecord]:
+        """Immutable M5 comparisons of ONE model by persisted effective
+        seed (M49).
+
+        Membership comes from the persisted REQUIRED integer ONLY:
+        every ``ComparisonRecord`` carries ``seed: int`` (the seed of
+        the identical-probe A/B measurement, persisted verbatim at
+        run time), and a comparison belongs to the request when that
+        persisted value equals the requested integer — matched
+        VERBATIM, never recalculated, never normalized and never
+        derived from the comparison configuration, either side's
+        evaluation, state payloads, verdicts, loss deltas, ids,
+        timestamps or any other field. The seed is an OPEN integer
+        value axis (no registry, no enum): any integer is type-valid,
+        so an unmatched seed on a valid model returns [] (a natural
+        valid-empty), a non-integer spelling is rejected at the API
+        boundary with 422 (schema-level validation), and an unknown
+        model raises FileNotFoundError exactly like the sibling
+        groupings. Each comparison appears EXACTLY ONCE; the per-seed
+        groups form a TRUE disjoint partition of the listing with no
+        None case (the field is required). The result is the model's
+        authoritative M5 listing (the exact engine parse +
+        deterministic (created_at, comparison_id) ASCENDING order)
+        filtered by the persisted seed; complete verbatim
+        ``ComparisonRecord`` payloads. Read-only, never writes.
+        """
+        # the authoritative listing validates the model:
+        # raises FileNotFoundError (404 at the API)
+        return [r for r in self.list_comparisons(model_id)
+                if r.seed == seed]
+
     def list_comparisons_for_dataset(
             self, model_id: str, dataset_id: str) -> list[ComparisonRecord]:
         """Immutable M5 comparisons of ONE model over ONE dataset (M29).
