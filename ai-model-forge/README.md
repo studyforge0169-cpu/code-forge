@@ -2061,11 +2061,49 @@ generation never trains, evaluates, scores, ranks or judges output.
   evidence reuse) and the M18–M50 history surfaces are byte-identical
   before and after
 
+### Milestone 52 — best-checkpoint selection
+  (`checkpoints/best`)
+- **concept**: one read-only MODEL-SCOPED selection primitive —
+  `GET /models/{id}/checkpoints/best` — answers "which of this
+  model's checkpoints has the MINIMUM PERSISTED `validation_loss`?"
+  and nothing else. "Best" means exactly this one criterion — the
+  endpoint never claims overall model quality (semantic quality,
+  factuality, safety or generalization are NOT established by a lower
+  validation loss)
+- **grounding**: candidates are the model's own checkpoints from the
+  AUTHORITATIVE M3 listing (the persisted `checkpoints/<id>/
+  manifest.json` is the source; unreadable manifests are already
+  skipped there — established M46 semantics); the selected
+  `validation_loss` is read VERBATIM from the persisted manifest,
+  never recomputed and never derived from perplexity, checkpoint
+  `decision`s, evaluations, comparisons, ids or timestamps; persisted
+  non-finite values are never candidates
+- **determinism + ties**: `min()` over the listing's canonical
+  `(step, created_at)` ASCENDING order — an exact tie on the minimum
+  resolves to the FIRST checkpoint among equals in that established
+  canonical order, and the tie is DISCLOSED via a `tied` flag in the
+  response (never silently judged). The response is a minimal
+  computed view `CheckpointSelection` (`model_id`, the explicit
+  `criterion: "minimum_persisted_validation_loss"`,
+  `candidate_count`, `tied`, and the complete verbatim
+  `CheckpointRecord`) — never persisted, no selection pointer, no
+  rankings/trends/recommendations
+- **boundaries**: unknown model -> the family's 404; a VALID model
+  with no selectable checkpoints (never trained, or every manifest
+  unreadable) -> the established not-found semantic (404, nothing
+  manufactured). Declared BEFORE the generic `{checkpoint_id}` detail
+  route so "best" can never be captured as an id. Read-only: zero
+  storage growth, no evaluation, no training, no weights touched, no
+  `decision` changed. M3 listing/detail, M46 by-run, rollback and the
+  M4–M51 surfaces are byte-identical before and after; the dashboard
+  is untouched (it aggregates persisted facts; a computed selection
+  view does not belong there)
+
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 564 tests
+pytest                       # 566 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2544,6 +2582,7 @@ ai-model-forge/
     tokenizer.py       # byte-level BPE engine
     training.py        # training engine: schedules, streams, run, checkpoints, rollback
                        # + read-only by-run grouping of the checkpoint history (M46)
+                       # + read-only best-checkpoint selection (M52)
     evaluation.py      # evaluation engine: read-only state measurement (M4)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
                        #   by-state-kind/by-truncated/by-seed grouping
@@ -2572,7 +2611,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 564 tests across 20 suites
+  tests/               # 566 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

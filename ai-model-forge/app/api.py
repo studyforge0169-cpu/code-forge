@@ -44,6 +44,7 @@ from .schemas import (
     SampleEvaluationRecord,
     SampleRecord,
     SampleStrategy,
+    CheckpointSelection,
     RollbackRequest,
     TokenizerConfig,
     TrainingConfig,
@@ -734,6 +735,24 @@ def index() -> HTMLResponse:
         through the sole WorkflowEngine — no scheduling, no
         background anything.</li>
 
+      <li><b>M52 best-checkpoint selection</b> — one read-only access
+        path, <code>GET /models/&#123;id&#125;/checkpoints/best</code>,
+        answers "which of this model's checkpoints has the MINIMUM
+        persisted <code>validation_loss</code>?": a deterministic
+        computed view over the authoritative M3 checkpoint listing —
+        the persisted manifest is the source, validation loss is never
+        recomputed and never derived from perplexity, decisions,
+        evaluations, ids or timestamps, and non-finite persisted values
+        are never candidates. Ties on the exact minimum resolve by the
+        listing's canonical (step, created_at) ASCENDING order — the
+        first checkpoint among equals — and are disclosed via a
+        <code>tied</code> flag. Returns the complete verbatim
+        <code>CheckpointRecord</code> plus the explicit criterion and
+        candidate count. "Best" means exactly this criterion — NOT a
+        claim of overall model quality. Read-only, never writes, no
+        persisted selection pointer; unknown model or no selectable
+        checkpoints -> 404.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -762,6 +781,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/training/run</code> — train (CPT/SFT), synchronous</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints</code> — immutable checkpoint store</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/by-run/&#123;run&#125;</code> — checkpoints of one training run (provenance-validated, M46)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best</code> — deterministic selection by MINIMUM persisted validation loss (read-only, criterion explicit, M52)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/&#123;ckpt&#125;</code> — one checkpoint</li>
       <li><code>POST  {prefix}/models/&#123;id&#125;/rollback</code> — verified restore of a checkpoint</li>
       <li><code>POST  {prefix}/evaluations/run</code> — read-only evaluation (current state or checkpoint)</li>
@@ -1069,6 +1089,9 @@ def delete_tokenizer(tokenizer_id: str) -> dict[str, Any]:
 # Training
 # Milestone 46 adds the read-only by-run grouping of the checkpoint history
 #   (validated against the model's own training_provenance)
+# Milestone 52 adds the read-only best-checkpoint selection
+#   (minimum persisted validation loss; declared before the generic detail
+#    route so "best" can never be captured as a checkpoint id)
 # --------------------------------------------------------------------------- #
 
 
@@ -1128,6 +1151,37 @@ def list_checkpoints_by_run(model_id: str, run_id: str) -> list[dict[str, Any]]:
         return [c.model_dump(mode="json")
                 for c in _forge().list_checkpoints_for_run(model_id,
                                                            run_id)]
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/checkpoints/best",
+         response_model=CheckpointSelection, tags=["training"])
+def select_best_checkpoint(model_id: str) -> CheckpointSelection:
+    """Deterministic best-checkpoint SELECTION under the persisted
+    validation-loss criterion (M52, read-only).
+
+    Answers: which of this model's checkpoints has the MINIMUM
+    persisted validation_loss? Candidates come from the authoritative
+    M3 checkpoint listing (the persisted manifest is the source);
+    validation loss is read VERBATIM from it — never recomputed, never
+    derived from perplexity, gate/checkpoint decisions, evaluations,
+    comparisons, ids or timestamps — and non-finite persisted values
+    are never candidates. Ties on the exact minimum resolve by the
+    listing's canonical (step, created_at) ASCENDING order — the first
+    checkpoint among equals — and are disclosed via the ``tied`` flag.
+    Returns the complete verbatim CheckpointRecord plus the explicit
+    criterion and candidate count. "Best" means exactly this criterion
+    — NOT a claim of overall model quality (semantic quality,
+    factuality, safety or generalization are NOT established). Pure
+    computed view: never writes, never persists a selection pointer.
+    Unknown model -> 404; a valid model with no selectable checkpoints
+    -> 404 (nothing is manufactured). Declared BEFORE the generic
+    {checkpoint_id} detail route so "best" can never be captured as a
+    checkpoint id.
+    """
+    try:
+        return _forge().select_best_checkpoint(model_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

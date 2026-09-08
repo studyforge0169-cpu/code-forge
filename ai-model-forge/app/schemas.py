@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -582,6 +582,34 @@ class CheckpointRecord(BaseModel):
     weights_sha256: str                          # content hash (dedup key)
     created_at: datetime
     schema_version: int = 1
+
+
+class CheckpointSelection(BaseModel):
+    """Read-only SELECTION of ONE model's best checkpoint under the
+    persisted validation-loss criterion (M52) — a computed view, never
+    a record.
+
+    "Best" means exactly one thing here: the checkpoint with the
+    MINIMUM persisted ``CheckpointRecord.validation_loss`` among the
+    model's checkpoints in the authoritative M3 listing (the persisted
+    manifest is the source — validation loss is never recomputed and
+    never derived from perplexity, decisions, evaluations, ids or
+    timestamps). This is NOT a claim of overall model quality: a lower
+    validation loss is selection evidence under this one criterion
+    only. Ties on the exact minimum resolve by the listing's canonical
+    (step, created_at) ASCENDING order — the first checkpoint among
+    equals — and are disclosed via ``tied``. Checkpoints whose
+    persisted ``validation_loss`` is not finite are never candidates.
+    Never persisted, never written; no selection pointer exists.
+    """
+
+    model_id: str
+    criterion: Literal["minimum_persisted_validation_loss"]
+    candidate_count: int = Field(ge=1)
+    tied: bool
+    checkpoint: CheckpointRecord
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class RollbackRequest(BaseModel):

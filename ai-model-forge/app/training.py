@@ -49,6 +49,7 @@ from .model_builder import build_transformer, content_hash, restore_state
 from .schemas import (
     CheckpointDecision,
     CheckpointRecord,
+    CheckpointSelection,
     ModelRecord,
     RunProvenance,
     TrainingConfig,
@@ -209,6 +210,44 @@ class TrainingEngine:
                 f"'{model_id}'")
         return [c for c in self.list_checkpoints(model_id)
                 if c.run_id == run_id]
+
+    def select_best_checkpoint(self, model_id: str) -> CheckpointSelection:
+        """Deterministic best-checkpoint selection under the persisted
+        validation-loss criterion (M52 read-only selection primitive).
+
+        Candidates are the model's own checkpoints as returned by the
+        authoritative M3 listing (unknown model -> FileNotFoundError;
+        unreadable manifests are already skipped there), minus any whose
+        persisted ``validation_loss`` is not finite (never candidates).
+        The selection is the MINIMUM persisted ``validation_loss`` —
+        read verbatim from the persisted manifest, never recomputed,
+        never derived from perplexity, ``decision``, evaluations,
+        comparisons, ids or timestamps. Ties on the exact minimum
+        resolve by the listing's canonical (step, created_at) ASCENDING
+        order — the first checkpoint among equals — and are disclosed
+        via ``tied``. Read-only: never writes, never creates an
+        evaluation or checkpoint, never touches weights or decisions,
+        and persists no selection pointer. "Best" is this criterion
+        only, never a claim of overall model quality. A valid model
+        with no selectable checkpoints raises FileNotFoundError (404 at
+        the API) — nothing is manufactured.
+        """
+        checkpoints = self.list_checkpoints(model_id)
+        candidates = [c for c in checkpoints
+                      if math.isfinite(c.validation_loss)]
+        if not candidates:
+            raise FileNotFoundError(
+                f"model '{model_id}' has no selectable checkpoints "
+                "(minimum persisted validation-loss criterion)")
+        best = min(candidates, key=lambda c: c.validation_loss)
+        min_loss = best.validation_loss
+        tied = sum(1 for c in candidates
+                   if c.validation_loss == min_loss) > 1
+        return CheckpointSelection(
+            model_id=model_id,
+            criterion="minimum_persisted_validation_loss",
+            candidate_count=len(candidates),
+            tied=tied, checkpoint=best)
 
     # ------------------------------------------------------------------ #
     # Preflight

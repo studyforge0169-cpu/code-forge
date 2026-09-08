@@ -330,7 +330,7 @@ def test_m46_by_run_errors_empty_isolation_regressions_openapi(api_client):
     # + 1 (M34) + 1 (M35) + 1 (M36) + 1 (M37) + 1 (M38) + 1 (M39)
     # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
     # + 1 (M45) + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 83
+    assert len(spec["paths"]) == 84
     path = "/api/v1/models/{model_id}/checkpoints/by-run/{run_id}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -351,3 +351,156 @@ def test_m46_by_run_errors_empty_isolation_regressions_openapi(api_client):
     # the M45 route is still present exactly once
     assert keys.count("/api/v1/models/{model_id}/gates/decisions/"
                       "by-baseline-type/{baseline_type}") == 1
+
+
+# --------------------------------------------------------------------- M52
+# Best-checkpoint selection: read-only, deterministic, minimum PERSISTED
+# validation_loss over the authoritative M3 listing; criterion explicit;
+# ties by the canonical (step, created_at) ASC order; never writes.
+
+def _m52_expected_best(listing: list[dict]) -> dict:
+    """Independent local argmin: lowest persisted validation_loss, ties
+    resolved by the listing's canonical (step, created_at) ASC order."""
+    ordered = sorted(listing, key=lambda c: (c["step"], c["created_at"]))
+    return min(ordered, key=lambda c: c["validation_loss"])
+
+
+def test_m52_best_checkpoint_selection_parity_determinism_errors(api_client):
+    from pathlib import Path
+
+    from app import engine as engine_module
+
+    ds_id, tok_id, model_id = _prepare(api_client, "m52best")
+    rep = api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=8, eval_every_steps=4)).json()
+    assert len(rep["checkpoints"]) == 2
+    listing = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    assert len(listing) == 2
+    best_url = f"{MODELS}/{model_id}/checkpoints/best"
+
+    # storage is untouched by selection GETs (count under THIS model)
+    mdir = Path(engine_module._forge.storage.model_dir(model_id))
+    n_files = sum(1 for p in mdir.rglob("*") if p.is_file())
+
+    got = api_client.get(best_url)
+    assert got.status_code == 200, got.text
+    sel = got.json()
+    expected = _m52_expected_best(listing)
+    # the criterion is EXPLICIT in the payload; candidates counted;
+    # the selected record is the complete verbatim listing entry
+    assert sel["model_id"] == model_id
+    assert sel["criterion"] == "minimum_persisted_validation_loss"
+    assert sel["candidate_count"] == 2
+    assert sel["tied"] is (sum(1 for c in listing
+                               if c["validation_loss"]
+                               == expected["validation_loss"]) > 1)
+    assert sel["checkpoint"] == expected
+    assert sel["checkpoint"]["validation_loss"] == min(
+        c["validation_loss"] for c in listing)
+    # verbatim parity with the M3 detail getter
+    one = api_client.get(
+        f"{MODELS}/{model_id}/checkpoints/{expected['checkpoint_id']}")
+    assert one.status_code == 200 and one.json() == sel["checkpoint"]
+
+    # determinism: repeated GETs are byte-identical
+    assert api_client.get(best_url).content == got.content
+    assert api_client.get(best_url).content == got.content
+
+    # route collision: "best" resolves to the SELECTION route (200 with
+    # the criterion), never to the generic {checkpoint_id} detail (which
+    # would 404 on an unknown checkpoint id "best")
+    assert got.json().get("criterion") is not None
+
+    # read-only: zero writes under the model dir
+    assert sum(1 for p in mdir.rglob("*") if p.is_file()) == n_files
+
+    # unknown model -> 404 (same taxonomy as the checkpoint family)
+    assert api_client.get(
+        f"{MODELS}/ghost-m52/checkpoints/best").status_code == 404
+
+    # valid model with ZERO checkpoints (created, never trained) -> the
+    # established not-found semantic: 404, nothing manufactured
+    _, _, fresh_id = _prepare(api_client, "m52fresh")
+    empty = api_client.get(f"{MODELS}/{fresh_id}/checkpoints/best")
+    assert empty.status_code == 404
+    assert "no selectable checkpoints" in empty.json()["detail"]
+    assert api_client.get(f"{MODELS}/{fresh_id}/checkpoints").json() == []
+
+
+def test_m52_best_checkpoint_tie_corruption_openapi(api_client):
+    import json as _json
+    from pathlib import Path
+
+    from app import engine as engine_module
+
+    ds_id, tok_id, model_id = _prepare(api_client, "m52tie")
+    assert api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=8, eval_every_steps=4)).status_code == 200
+    listing = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    assert len(listing) == 2
+    best_url = f"{MODELS}/{model_id}/checkpoints/best"
+
+    # craft an EXACT tie: set the later checkpoint's persisted
+    # validation_loss equal to the earlier one's (a test-fixture edit,
+    # not production); the tie-break must then select the FIRST among
+    # equals in the canonical (step, created_at) ASC order
+    earlier, later = sorted(listing, key=lambda c: (c["step"],
+                                                    c["created_at"]))
+    assert earlier["validation_loss"] != later["validation_loss"]
+    ck_dir = (Path(engine_module._forge.storage.model_dir(model_id))
+              / "checkpoints" / later["checkpoint_id"])
+    man = _json.loads((ck_dir / "manifest.json").read_text())
+    man["validation_loss"] = earlier["validation_loss"]
+    (ck_dir / "manifest.json").write_text(_json.dumps(man))
+
+    listing2 = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    got = api_client.get(best_url)
+    assert got.status_code == 200, got.text
+    sel = got.json()
+    assert sel["candidate_count"] == 2
+    assert sel["tied"] is True
+    assert sel["checkpoint"]["checkpoint_id"] == earlier["checkpoint_id"]
+    assert sel["checkpoint"]["validation_loss"] == \
+        earlier["validation_loss"]
+    assert sel["checkpoint"] == _m52_expected_best(listing2)
+
+    # corruption resilience (M46 semantics): unreadable manifests are
+    # skipped by the listing; with NO usable checkpoints the selection
+    # is the established 404 — nothing is manufactured
+    for c in listing2:
+        d = (Path(engine_module._forge.storage.model_dir(model_id))
+             / "checkpoints" / c["checkpoint_id"])
+        (d / "manifest.json").write_text("{ not json")
+    assert api_client.get(f"{MODELS}/{model_id}/checkpoints").json() == []
+    gone = api_client.get(best_url)
+    assert gone.status_code == 404
+    assert "no selectable checkpoints" in gone.json()["detail"]
+
+    # OpenAPI: 84 paths, the new path exactly once, GET-only, training
+    # tag, model_id param, typed $ref response, and the display order
+    # listing < by-run < best < generic detail (best can never be
+    # captured as {checkpoint_id})
+    spec = api_client.get("/openapi.json").json()
+    # 78 (M46 cumulative) + 1 (M47) + 1 (M48) + 1 (M49) + 1 (M50)
+    # + 1 (M51 recipe plan) + 1 (M52 checkpoints best) = 84
+    assert len(spec["paths"]) == 84
+    path = "/api/v1/models/{model_id}/checkpoints/best"
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["training"]
+    assert [p["name"] for p in item["get"]["parameters"]] == ["model_id"]
+    assert item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"] == {
+        "$ref": "#/components/schemas/CheckpointSelection"}
+    assert "CheckpointSelection" in spec["components"]["schemas"]
+    assert spec["components"]["schemas"]["CheckpointSelection"][
+        "properties"]["checkpoint"] == {
+        "$ref": "#/components/schemas/CheckpointRecord"}
+    assert keys.index("/api/v1/models/{model_id}/checkpoints") < \
+        keys.index(path)
+    assert keys.index("/api/v1/models/{model_id}/checkpoints/by-run/"
+                      "{run_id}") < keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}")

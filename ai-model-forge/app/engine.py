@@ -276,6 +276,17 @@ class ModelForge:
     def list_checkpoints_for_run(self, model_id: str, run_id: str):
         return self.training.list_checkpoints_for_run(model_id, run_id)
 
+    def select_best_checkpoint(self, model_id: str):
+        """Read-only selection of ONE model's best checkpoint under the
+        persisted validation-loss criterion (M52): the MINIMUM persisted
+        validation_loss over the authoritative M3 listing, ties resolved
+        by the canonical (step, created_at) ASCENDING order (first among
+        equals, disclosed via ``tied``), non-finite values never
+        candidates. Never writes, never persists a selection pointer;
+        unknown model or no selectable checkpoints -> FileNotFoundError
+        (404 at the API)."""
+        return self.training.select_best_checkpoint(model_id)
+
     def rollback_model(self, model_id: str, checkpoint_id: str):
         return self.training.rollback(model_id, checkpoint_id)
 
