@@ -753,6 +753,27 @@ def index() -> HTMLResponse:
         persisted selection pointer; unknown model or no selectable
         checkpoints -> 404.</li>
 
+      <li><b>M53 best state references</b> — a workflow stage state
+        (<code>StageStateRef</code>: suite-run states, comparison sides,
+        gate candidates) may now declare
+        <code>state_kind: "best"</code>: at execution or M51-preflight
+        time the workflow engine's ONE resolver invokes the SAME M52
+        selection (minimum persisted
+        <code>validation_loss</code>) and pins the CONCRETE checkpoint
+        id (<code>resolved_checkpoint_id</code>) into the resolved plan
+        — which is what executes, persists and hashes, so every
+        immutable run record shows exactly
+        <code>best → concrete id</code> and history never silently
+        changes meaning when a later checkpoint becomes best. The
+        recipe definition stays declarative (never rewritten, no
+        mutable pointer); downstream engines receive a NORMAL literal
+        checkpoint state; direct comparison/gate/suite-run requests
+        still require current/checkpoint (best is a workflow-stage
+        reference). No new endpoint — the existing inline
+        <code>POST /workflows/run</code>, recipe runs and the M51
+        <code>GET .../recipes/&#123;recipe&#125;/plan</code> preflight all
+        resolve through the same path.</li>
+
       <li><b>M33 sample-quality history by tokenizer</b> — one read-only
         access path, <code>GET /models/&#123;id&#125;/sample-quality/by-tokenizer/&#123;tokenizer&#125;</code>,
         answers "which immutable M16 sample-quality measurements of
@@ -2216,7 +2237,9 @@ def get_suite_run(model_id: str, suite_run_id: str) -> SuiteRunRecord:
 # Workflow routes (Milestone 7 — ordered orchestration over M3–M6;
 # Milestone 35 adds the read-only model-scoped by-recipe grouping of the history;
 # Milestone 42 adds the read-only model-scoped by-status grouping of the history;
-# Milestone 51 adds the read-only model-bound recipe RESOLUTION (preflight))
+# Milestone 51 adds the read-only model-bound recipe RESOLUTION (preflight);
+# Milestone 53 adds the 'best' state reference resolved through the M52
+#   selection at execution/preflight time (no new route — shared resolver))
 # --------------------------------------------------------------------------- #
 
 @api.post("/workflows/run", response_model=WorkflowRecord, tags=["workflows"])

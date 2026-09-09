@@ -628,6 +628,12 @@ class EvalStateKind(str, Enum):
 
     CURRENT = "current"          # the model's published weights.pt
     CHECKPOINT = "checkpoint"    # an immutable stored checkpoint of that model
+    BEST = "best"                # M53 WORKFLOW state REFERENCE only: resolved
+                                 # to a concrete checkpoint at execution or
+                                 # M51-preflight time through the M52 selection
+                                 # (minimum persisted validation_loss); never
+                                 # persisted on measurement records — the
+                                 # concrete resolved id is pinned instead
 
 
 class EvaluationSplit(str, Enum):
@@ -732,6 +738,13 @@ class ComparisonState(BaseModel):
 
     @model_validator(mode="after")
     def _kind_matches_id(self) -> "ComparisonState":
+        if self.state_kind == EvalStateKind.BEST:
+            raise ValueError(
+                "state_kind='best' is a WORKFLOW state reference (M53): it is "
+                "resolved to a concrete checkpoint by the workflow engine's "
+                "single resolver at execution/preflight time; direct "
+                "comparison/gate/suite-run requests must use 'current' or "
+                "'checkpoint'")
         if self.state_kind == EvalStateKind.CURRENT and self.checkpoint_id is not None:
             raise ValueError(
                 "state_kind='current' must have checkpoint_id=None")
@@ -1157,11 +1170,27 @@ class StageStateRef(BaseModel):
     ``checkpoint`` -> either a literal immutable M3 checkpoint id or the FINAL
     checkpoint produced by an earlier ``train`` stage (``from_stage``). The
     workflow never guesses which checkpoint to use.
+    ``best`` (M53) -> a DECLARATIVE request for the M52 best-checkpoint
+    selection (minimum persisted validation_loss over the authoritative M3
+    listing, canonical (step, created_at) tie-break): resolved to a concrete
+    checkpoint id at execution/preflight time by the workflow engine's
+    single resolver and pinned on ``resolved_checkpoint_id``. The recipe
+    definition itself stays declarative and is never rewritten; each
+    immutable run record carries the pinned concrete id, so a later
+    execution that resolves a different checkpoint has a different
+    execution identity while history never changes meaning.
     """
 
     state_kind: EvalStateKind
     checkpoint_id: Optional[str] = Field(None, min_length=1, max_length=64)
     from_stage: Optional[str] = Field(None, min_length=1, max_length=64)
+    # M53: the CONCRETE checkpoint id the 'best' selection resolved to at
+    # execution/preflight time. Set ONLY by the workflow engine's single
+    # resolver and ONLY when state_kind == 'best' (None on declarative
+    # definitions); persisted run records carry the pinned id so history
+    # never silently changes meaning.
+    resolved_checkpoint_id: Optional[str] = Field(
+        None, min_length=1, max_length=64)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1171,11 +1200,25 @@ class StageStateRef(BaseModel):
             if self.checkpoint_id is not None or self.from_stage is not None:
                 raise ValueError(
                     "state_kind='current' must not set checkpoint_id or from_stage")
+            if self.resolved_checkpoint_id is not None:
+                raise ValueError(
+                    "resolved_checkpoint_id is the pinned M53 'best' "
+                    "resolution and is only valid with state_kind='best'")
+        elif self.state_kind == EvalStateKind.BEST:
+            if self.checkpoint_id is not None or self.from_stage is not None:
+                raise ValueError(
+                    "state_kind='best' must not set checkpoint_id or "
+                    "from_stage (the M52 selection decides the checkpoint; "
+                    "an explicit id is a contradiction, not a hint)")
         else:
             if bool(self.checkpoint_id) == bool(self.from_stage):
                 raise ValueError(
                     "state_kind='checkpoint' needs exactly one of checkpoint_id "
                     "or from_stage (earlier train stage)")
+            if self.resolved_checkpoint_id is not None:
+                raise ValueError(
+                    "resolved_checkpoint_id is the pinned M53 'best' "
+                    "resolution and is only valid with state_kind='best'")
         return self
 
 
@@ -1256,10 +1299,12 @@ class WorkflowSuiteRunStage(BaseModel):
     ``suite_id`` names an immutable M9 ProbeSuite (resolved at run start
     through the registry — the workflow never guesses or auto-selects a
     suite). ``state`` uses the exact M7 ``StageStateRef`` representation
-    (current weights, a literal immutable checkpoint id, or the FINAL
-    checkpoint of an earlier train stage via ``from_stage``) so the run
-    record always shows which state was evaluated. The stage executes the
-    existing M10 ``SuiteRunEngine`` — it is an orchestration adapter only,
+    (current weights, a literal immutable checkpoint id, the FINAL
+    checkpoint of an earlier train stage via ``from_stage``, or the M53
+    declarative ``best`` reference resolved to a concrete checkpoint by
+    the workflow engine's single resolver at execution/preflight time)
+    so the run record always shows which state was evaluated. The stage
+    executes the existing M10 ``SuiteRunEngine`` — it is an orchestration adapter only,
     never a second suite-run implementation and never an aggregate gate.
     """
 

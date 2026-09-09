@@ -2377,3 +2377,256 @@ def test_m51_api_plan_composite_errors_and_openapi(api_client):
     assert keys.index("/api/v1/models/{model_id}/workflows/by-recipe/"
                       "{recipe_id}") < keys.index(path)
     assert "WorkflowRecipeResolution" in spec["components"]["schemas"]
+
+
+# --------------------------------------------------------------------- M53
+# Best-checkpoint state references: state_kind 'best' resolves through the
+# SAME M52 selection at execution/preflight time; the concrete id is pinned
+# into the immutable run record; the declarative definition never changes.
+
+def _best_suite_stage(sid: str, suite_id: str) -> WorkflowStage:
+    return WorkflowStage(
+        stage_id=sid, type=StageType.SUITE_RUN,
+        suite_run=WorkflowSuiteRunStage(
+            suite_id=suite_id,
+            state=StageStateRef(state_kind=EvalStateKind.BEST)))
+
+
+def test_m53_best_state_reference_schema_and_resolution(env):
+    from app.schemas import ComparisonState
+
+    # schema: best is declarative; contradictions rejected; the pinned
+    # resolution field is best-only
+    ok = StageStateRef(state_kind=EvalStateKind.BEST)
+    assert ok.resolved_checkpoint_id is None
+    StageStateRef(state_kind=EvalStateKind.BEST,
+                  resolved_checkpoint_id=env.ck_main)   # pinned form
+    StageStateRef(state_kind=EvalStateKind.CURRENT)     # unchanged
+    StageStateRef(state_kind=EvalStateKind.CHECKPOINT, checkpoint_id=env.ck_main)
+    with pytest.raises(ValidationError):
+        StageStateRef(state_kind=EvalStateKind.BEST,
+                      checkpoint_id=env.ck_main)
+    with pytest.raises(ValidationError):
+        StageStateRef(state_kind=EvalStateKind.BEST, from_stage="tr")
+    with pytest.raises(ValidationError):
+        StageStateRef(state_kind=EvalStateKind.CHECKPOINT,
+                      checkpoint_id=env.ck_main,
+                      resolved_checkpoint_id=env.ck_main)
+    with pytest.raises(ValidationError):
+        StageStateRef(state_kind=EvalStateKind.CURRENT,
+                      resolved_checkpoint_id=env.ck_main)
+    # direct (non-workflow) state requests reject best explicitly
+    with pytest.raises(ValidationError, match="WORKFLOW state reference"):
+        ComparisonState(state_kind=EvalStateKind.BEST)
+
+    # resolution: the M52 selection over the SAME registry, pinned
+    sel = env.forge.select_best_checkpoint(env.model_id)
+    env.recipes.register(_recipe("m53-best", [
+        _best_suite_stage("m53_suite", "m12-suite")]))
+    rec = env.recipes.run("m53-best", env.model_id)
+    ref = rec.plan.stages[0].suite_run.state
+    assert ref.state_kind == EvalStateKind.BEST
+    assert ref.resolved_checkpoint_id == sel.checkpoint.checkpoint_id
+    assert rec.status == WorkflowStatus.COMPLETED
+    # the stage artifact + suite-run record carry the CONCRETE id
+    art = rec.stages[0].artifact
+    assert art.checkpoint_id == sel.checkpoint.checkpoint_id
+    sr = env.forge.get_suite_run(env.model_id, art.artifact_id)
+    assert sr.state.state_kind == EvalStateKind.CHECKPOINT
+    assert sr.state.checkpoint_id == sel.checkpoint.checkpoint_id
+    # the recipe definition stays declarative (never rewritten)
+    man = env.recipes.get("m53-best")
+    assert man.stages[0].suite_run.state.state_kind == EvalStateKind.BEST
+    assert man.stages[0].suite_run.state.resolved_checkpoint_id is None
+    # recipe identity is the DECLARATIVE stage content — the engine's
+    # own canonical hash over the stored (unresolved) stages
+    assert man.config_hash == recipe_config_hash(man.stages)
+    # a literal-id twin is a DIFFERENT plan (declarative vs pinned best)
+    env.recipes.register(_recipe("m53-lit", [
+        _suite_stage("m53_suite", "m12-suite",
+                     ckpt=sel.checkpoint.checkpoint_id)]))
+    lit = env.recipes.run("m53-lit", env.model_id)
+    assert lit.plan_hash != rec.plan_hash
+
+
+def test_m53_best_resolution_immutability_and_hashing(env):
+    import json as _m53json
+    from pathlib import Path as _M53Path
+
+    env.recipes.register(_recipe("m53-hist", [
+        _best_suite_stage("m53_suite", "m12-suite")]))
+    sel1 = env.forge.select_best_checkpoint(env.model_id)
+    rec1 = env.recipes.run("m53-hist", env.model_id)
+    pinned1 = rec1.plan.stages[0].suite_run.state.resolved_checkpoint_id
+    assert pinned1 == sel1.checkpoint.checkpoint_id
+    p1 = (_M53Path(env.forge.storage.model_dir(env.model_id)) / "workflows"
+          / f"workflow-{rec1.workflow_id}" / "manifest.json")
+    bytes1 = p1.read_bytes()
+    recipe_bytes = (env.forge.storage.root / "workflow-recipes" / "m53-hist"
+                    / "manifest.json").read_bytes()
+
+    # a DIFFERENT checkpoint becomes best: a test-fixture edit in the
+    # throwaway test storage (production manifests are never touched) —
+    # deterministic, exactly the "Day 2" scenario
+    listing = env.forge.list_checkpoints(env.model_id)
+    other = next(c for c in listing
+                 if c.checkpoint_id != pinned1)
+    ck_path = (_M53Path(env.forge.storage.model_dir(env.model_id))
+               / "checkpoints" / other.checkpoint_id / "manifest.json")
+    man = _m53json.loads(ck_path.read_text())
+    man["validation_loss"] = sel1.checkpoint.validation_loss - 0.5
+    ck_path.write_text(_m53json.dumps(man))
+    sel2 = env.forge.select_best_checkpoint(env.model_id)
+    assert sel2.checkpoint.checkpoint_id == other.checkpoint_id
+
+    # the SAME declarative recipe now resolves the NEW best
+    rec2 = env.recipes.run("m53-hist", env.model_id)
+    pinned2 = rec2.plan.stages[0].suite_run.state.resolved_checkpoint_id
+    assert pinned2 == other.checkpoint_id != pinned1
+    # different effective execution identity (§7 hashing)
+    assert rec2.plan_hash != rec1.plan_hash
+    # the OLD record is byte-stable on disk and still pins the OLD id
+    assert p1.read_bytes() == bytes1
+    old = _m53json.loads(bytes1)
+    assert old["plan"]["stages"][0]["suite_run"]["state"][
+        "state_kind"] == "best"
+    assert old["plan"]["stages"][0]["suite_run"]["state"][
+        "resolved_checkpoint_id"] == pinned1
+    # and the recipe definition was never rewritten
+    assert (env.forge.storage.root / "workflow-recipes" / "m53-hist"
+            / "manifest.json").read_bytes() == recipe_bytes
+
+    # determinism: same registry -> same resolution + same plan identity
+    rec3 = env.recipes.run("m53-hist", env.model_id)
+    assert (rec3.plan.stages[0].suite_run.state.resolved_checkpoint_id
+            == pinned2)
+    assert rec3.plan_hash == rec2.plan_hash
+
+
+def test_m53_preflight_composite_and_error_semantics(env):
+    # composite: parent = own best stage + call of a child best recipe
+    env.recipes.register(_recipe("m53-child", [
+        _best_suite_stage("child_suite", "m12-suite")]))
+    env.recipes.register(_recipe("m53-parent", [
+        _best_suite_stage("own_suite", "m12-suite"),
+        _call("leg", "m53-child")]))
+    sel = env.forge.select_best_checkpoint(env.model_id)
+
+    # M51 preflight resolves best AFTER deterministic expansion: both
+    # stages pin the SAME selection, with qualified ids intact
+    res = env.recipes.resolve("m53-parent", env.model_id)
+    assert [s.stage_id for s in res.plan.stages] == [
+        "own_suite", "leg.child_suite"]
+    for st in res.plan.stages:
+        assert st.suite_run.state.state_kind == EvalStateKind.BEST
+        assert (st.suite_run.state.resolved_checkpoint_id
+                == sel.checkpoint.checkpoint_id)
+    assert [(c.recipe_id, c.config_hash) for c in res.composition] == [
+        ("m53-child", env.recipes.get("m53-child").config_hash)]
+
+    # execution uses the SAME resolver: identical plan + plan identity
+    rec = env.recipes.run("m53-parent", env.model_id)
+    assert rec.model_dump()["plan"] == res.model_dump()["plan"]
+    assert rec.plan_hash == res.plan.plan_hash()
+    assert rec.status == WorkflowStatus.COMPLETED
+    for art in (rec.stages[0].artifact, rec.stages[1].artifact):
+        assert art.checkpoint_id == sel.checkpoint.checkpoint_id
+
+    # error semantics: zero-checkpoint model -> the established 404
+    # (FileNotFoundError) at BOTH preflight and run, nothing persisted
+    fresh = env.fresh_model("m53-zero-ck")
+    with pytest.raises(FileNotFoundError):
+        env.recipes.resolve("m53-parent", fresh)
+    with pytest.raises(FileNotFoundError):
+        env.recipes.run("m53-parent", fresh)
+    assert env.forge.list_workflows(fresh) == []
+    # unknown model -> the established 404 (no invented state)
+    with pytest.raises(FileNotFoundError):
+        env.recipes.resolve("m53-parent", "no-such-model")
+
+    # inline plans resolve through the same executor path
+    plan = WorkflowPlan(name="m53-inline", model_id=env.model_id, stages=[
+        _best_suite_stage("inline_suite", "m12-suite")])
+    inline = env.forge.run_workflow(plan)
+    assert (inline.plan.stages[0].suite_run.state.resolved_checkpoint_id
+            == sel.checkpoint.checkpoint_id)
+    assert inline.recipe_id is None
+    # resolution is idempotent for an already-pinned plan
+    again = env.forge.workflows.resolve_best_state_refs(inline.plan)
+    assert again.plan_hash() == inline.plan_hash
+
+
+def test_m53_api_best_reference_registration_to_execution(api_client):
+    h = _http_env(api_client, "m53a")
+    mid, suite, ds, tok = h["mid"], h["suite"], h["ds"], h["tok"]
+    plan_url = "/api/v1/models/{m}/workflows/recipes/{r}/plan"
+    best_stage = {"stage_id": "s1", "type": "suite_run",
+                  "suite_run": {"suite_id": suite,
+                                "state": {"state_kind": "best"}}}
+
+    # contradictory registration is rejected by the shared validator
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api53-bad", "stages": [dict(best_stage)]})
+    assert r.status_code == 201, r.text
+    bad = {"stage_id": "s1", "type": "suite_run",
+           "suite_run": {"suite_id": suite,
+                         "state": {"state_kind": "best",
+                                   "checkpoint_id": "whatever"}}}
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api53-bad2", "stages": [bad]})
+    assert r.status_code == 422, r.text
+
+    # preflight on the model with NO checkpoints yet: the established 404
+    r = api_client.get(plan_url.format(m=mid, r="api53-bad"))
+    assert r.status_code == 404
+    assert "no selectable checkpoints" in r.json()["detail"]
+
+    # train -> two checkpoints; compute the expected argmin independently
+    r = api_client.post("/api/v1/training/run", json={
+        "name": "api53-run", "method": "continued_pretraining",
+        "model_id": mid, "dataset_id": ds, "tokenizer_id": tok,
+        "learning_rate": 3e-3, "batch_size": 8, "steps": 4,
+        "max_seq_len": 32, "eval_every_steps": 2, "keep_best": False,
+        "seed": 3})
+    assert r.status_code == 200, r.text
+    listing = api_client.get(f"/api/v1/models/{mid}/checkpoints").json()
+    assert len(listing) == 2
+    ordered = sorted(listing, key=lambda c: (c["step"], c["created_at"]))
+    expected = min(ordered, key=lambda c: c["validation_loss"])
+
+    # M51 preflight resolves best through the SAME selection
+    got = api_client.get(plan_url.format(m=mid, r="api53-bad"))
+    assert got.status_code == 200, got.text
+    res = got.json()
+    state = res["plan"]["stages"][0]["suite_run"]["state"]
+    assert state["state_kind"] == "best"
+    assert state["resolved_checkpoint_id"] == expected["checkpoint_id"]
+    raw1 = got.content
+    assert api_client.get(
+        plan_url.format(m=mid, r="api53-bad")).content == raw1
+    assert api_client.get(
+        plan_url.format(m=mid, r="api53-bad")).content == raw1
+
+    # execution pins the same concrete checkpoint; plan identical to the
+    # preflight (same repository state, same resolver)
+    run = api_client.post(RUNS.format(rid="api53-bad"),
+                          json={"model_id": mid}).json()
+    assert run["status"] == "completed"
+    assert run["plan"] == res["plan"]
+    assert (run["stages"][0]["artifact"]["checkpoint_id"]
+            == expected["checkpoint_id"])
+
+    # inline workflows resolve best through the same executor path
+    inline = api_client.post("/api/v1/workflows/run", json={
+        "name": "api53-inline", "model_id": mid,
+        "stages": [best_stage]}).json()
+    assert (inline["plan"]["stages"][0]["suite_run"]["state"]
+            ["resolved_checkpoint_id"] == expected["checkpoint_id"])
+
+    # OpenAPI: path count UNCHANGED (no new route); the schema carries
+    # the new enum member + the pinned-id field
+    spec = api_client.get("/openapi.json").json()
+    assert len(spec["paths"]) == 84
+    assert "best" in spec["components"]["schemas"]["EvalStateKind"]["enum"]
+    ssr = spec["components"]["schemas"]["StageStateRef"]
+    assert "resolved_checkpoint_id" in ssr["properties"]

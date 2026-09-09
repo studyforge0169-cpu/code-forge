@@ -234,6 +234,81 @@ class WorkflowEngine:
     # The run
     # ------------------------------------------------------------------ #
 
+    def resolve_best_state_refs(self, plan: WorkflowPlan) -> WorkflowPlan:
+        """Resolve declarative 'best' state references (M53) into CONCRETE
+        checkpoint ids pinned on the plan — the ONE resolution path shared
+        by inline runs, recipe runs and the M51 recipe-plan preflight.
+
+        'best' means exactly the M52 selection: the checkpoint with the
+        MINIMUM persisted validation_loss over the model's authoritative
+        M3 listing (canonical (step, created_at) ASCENDING tie-break, first
+        among equals, non-finite values never candidates), invoked through
+        the SAME TrainingEngine.select_best_checkpoint the
+        GET /checkpoints/best route uses — never a second selection
+        implementation. Resolution is computed at request time against the
+        checkpoints that exist at that moment (no stored pointer, no
+        cross-time lock): the selection runs ONCE per plan and the concrete
+        id is pinned into every unresolved 'best' StageStateRef
+        (resolved_checkpoint_id), which then flows into the immutable run
+        record and its plan_hash — executions that resolved different
+        checkpoints have different execution identities. Idempotent: refs
+        already carrying a pinned id keep it. A model with no selectable
+        checkpoints raises FileNotFoundError BEFORE anything executes or
+        persists (404 at the API; no invented state). Plans without
+        'best' references are returned unchanged.
+        """
+        def _unresolved(ref: StageStateRef) -> bool:
+            return (ref.state_kind == EvalStateKind.BEST
+                    and ref.resolved_checkpoint_id is None)
+
+        def _stage_refs(stage: WorkflowStage) -> list[StageStateRef]:
+            if stage.type == StageType.SUITE_RUN and stage.suite_run is not None:
+                return [stage.suite_run.state]
+            if stage.type == StageType.COMPARE and stage.comparison is not None:
+                return [stage.comparison.state_a, stage.comparison.state_b]
+            if stage.type == StageType.GATE and stage.gate is not None:
+                return [stage.gate.candidate]
+            return []
+
+        if not any(_unresolved(ref) for stage in plan.stages
+                   for ref in _stage_refs(stage)):
+            return plan
+        # ONE selection per plan through the M52 selector (unknown model or
+        # no selectable checkpoints -> FileNotFoundError, nothing persisted)
+        best = self.training.select_best_checkpoint(plan.model_id)
+        ckpt_id = best.checkpoint.checkpoint_id
+
+        def _pin(ref: StageStateRef) -> StageStateRef:
+            if _unresolved(ref):
+                return ref.model_copy(
+                    update={"resolved_checkpoint_id": ckpt_id})
+            return ref
+
+        pinned = []
+        for stage in plan.stages:
+            if stage.type == StageType.SUITE_RUN and stage.suite_run is not None:
+                st = stage.suite_run
+                if _unresolved(st.state):
+                    stage = stage.model_copy(update={
+                        "suite_run": st.model_copy(update={
+                            "state": _pin(st.state)})})
+            elif stage.type == StageType.COMPARE and stage.comparison is not None:
+                cmpst = stage.comparison
+                if _unresolved(cmpst.state_a) or _unresolved(cmpst.state_b):
+                    stage = stage.model_copy(update={"comparison": cmpst.model_copy(
+                        update={"state_a": _pin(cmpst.state_a),
+                                "state_b": _pin(cmpst.state_b)})})
+            elif stage.type == StageType.GATE and stage.gate is not None:
+                gt = stage.gate
+                if _unresolved(gt.candidate):
+                    stage = stage.model_copy(update={
+                        "gate": gt.model_copy(update={
+                            "candidate": _pin(gt.candidate)})})
+            pinned.append(stage)
+        # a REAL WorkflowPlan (full validation incl. _plan_consistent)
+        return WorkflowPlan(name=plan.name, model_id=plan.model_id,
+                            description=plan.description, stages=pinned)
+
     def run(self, plan: WorkflowPlan, *,
            recipe_id: Optional[str] = None,
            recipe_hash: Optional[str] = None,
@@ -254,8 +329,13 @@ class WorkflowEngine:
         workflow executor). ``composition`` (M14) is the deterministic
         expansion trace of the referenced recipes for composite recipe runs.
         Inline plan runs leave all three null; they never influence
-        ``result_hash`` (semantic execution only).
+        ``result_hash`` (semantic execution only). M53: any declarative
+        'best' state reference is resolved to a CONCRETE checkpoint id
+        (the M52 selection, one call per plan) BEFORE execution — the
+        resolved plan is what executes, persists and hashes, so the run
+        record always pins the concrete checkpoint it used.
         """
+        plan = self.resolve_best_state_refs(plan)
         start = time.monotonic()
         model = self._require_model(plan.model_id)
         model_id = plan.model_id
@@ -510,10 +590,27 @@ class WorkflowEngine:
 
         A checkpoint ``from_stage`` pointer resolves to that train stage's
         FINAL checkpoint; a stage that produced none raises FileNotFoundError
-        (the workflow fails cleanly; no id is fabricated).
+        (the workflow fails cleanly; no id is fabricated). A ``best``
+        reference (M53) uses the concrete checkpoint id pinned by the
+        resolver — downstream engines always receive a literal state.
         """
         if ref.state_kind == EvalStateKind.CURRENT:
             return ComparisonState(state_kind=EvalStateKind.CURRENT)
+        if ref.state_kind == EvalStateKind.BEST:
+            # M53: the resolver already pinned the M52 selection's concrete
+            # checkpoint id; downstream engines see a NORMAL explicit
+            # checkpoint state (never the moving 'best' label), so their
+            # immutable records stay byte-identical in shape to literal-id
+            # runs. An unresolved 'best' can only mean a plan that bypassed
+            # WorkflowEngine.run/resolution — nothing is invented.
+            if not ref.resolved_checkpoint_id:
+                raise FileNotFoundError(
+                    "state_kind='best' is not resolved — the plan must go "
+                    "through the workflow engine's resolver (M52 selection "
+                    "pins the concrete checkpoint) before execution")
+            return ComparisonState(
+                state_kind=EvalStateKind.CHECKPOINT,
+                checkpoint_id=ref.resolved_checkpoint_id)
         if ref.checkpoint_id:
             return ComparisonState(state_kind=EvalStateKind.CHECKPOINT,
                                    checkpoint_id=ref.checkpoint_id)

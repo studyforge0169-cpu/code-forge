@@ -2061,6 +2061,40 @@ generation never trains, evaluates, scores, ranks or judges output.
   evidence reuse) and the M18–M50 history surfaces are byte-identical
   before and after
 
+### Milestone 53 — best-checkpoint STATE REFERENCES
+  (`state_kind: "best"` on workflow stage states)
+- **concept**: a workflow stage state (`StageStateRef` — suite-run
+  states, comparison sides, gate candidates) may declare
+  `state_kind: "best"`: "use the best checkpoint" WITHOUT hand-pinning
+  an id. At execution or M51-preflight time the workflow engine's ONE
+  resolver invokes the SAME M52 selection (minimum persisted
+  `validation_loss` over the authoritative M3 listing, canonical
+  `(step, created_at)` tie-break, non-finite values never candidates)
+  and pins the CONCRETE checkpoint id on the resolved plan
+  (`resolved_checkpoint_id`)
+- **immutability**: the RESOLVED plan is what executes, persists in the
+  immutable run record and hashes — so the record shows exactly
+  `best → concrete id`, its `plan_hash` differs across executions that
+  resolved different checkpoints, and history never silently changes
+  meaning when a later checkpoint becomes best. The recipe definition
+  stays declarative (registered manifests are never rewritten; best is
+  re-resolved on every execution/preflight against the checkpoints
+  that exist at that moment — no stored pointer, no cross-time lock;
+  the run record is authoritative for what actually ran). Downstream
+  engines (M4/M5/M6/M10) receive a NORMAL literal checkpoint state —
+  their records are byte-identical in shape to explicit-id runs
+- **boundaries**: `best` must not set `checkpoint_id`/`from_stage`
+  (an explicit id alongside the selection request is a contradiction
+  — 422); direct comparison/gate/suite-run API requests still require
+  `current`/`checkpoint` (best is a WORKFLOW-stage reference);
+  a model with no selectable checkpoints fails resolution with the
+  established 404 BEFORE anything executes or persists. No new
+  endpoint — inline `POST /workflows/run`, recipe runs and the M51
+  `GET .../recipes/{r}/plan` preflight all resolve through the same
+  path; M14 composite recipes resolve `best` after deterministic
+  expansion into the ONE final record. OpenAPI path count UNCHANGED
+  (84) — only the schema gained the enum member + pinned-id field
+
 ### Milestone 52 — best-checkpoint selection
   (`checkpoints/best`)
 - **concept**: one read-only MODEL-SCOPED selection primitive —
@@ -2103,7 +2137,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 566 tests
+pytest                       # 570 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2583,6 +2617,7 @@ ai-model-forge/
     training.py        # training engine: schedules, streams, run, checkpoints, rollback
                        # + read-only by-run grouping of the checkpoint history (M46)
                        # + read-only best-checkpoint selection (M52)
+                       # + 'best' state references resolved via that selection (M53)
     evaluation.py      # evaluation engine: read-only state measurement (M4)
                        # + read-only by-checkpoint/by-dataset/by-tokenizer/by-split/
                        #   by-state-kind/by-truncated/by-seed grouping
@@ -2611,7 +2646,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 566 tests across 20 suites
+  tests/               # 570 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

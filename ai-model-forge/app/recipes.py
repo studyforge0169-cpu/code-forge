@@ -364,7 +364,10 @@ class RecipeEngine:
         lookup -> model validation -> M14 deterministic expansion ->
         WorkflowPlan construction with the FULL M7 validation (the
         pydantic ``_plan_consistent`` validator re-runs
-        ``validate_plan_stages`` incl. embedded-config model agreement).
+        ``validate_plan_stages`` incl. embedded-config model agreement)
+        -> M53 'best' state-reference resolution through the sole
+        executor's resolver (the M52 selection pins concrete checkpoint
+        ids on the plan).
         Returns (definition, plan, composition). Nothing is persisted
         here; unknown recipe/model -> FileNotFoundError, a binding
         mismatch -> ValueError (raised while the expanded plan is
@@ -392,6 +395,12 @@ class RecipeEngine:
         # a referenced recipe — nothing is ever silently rewritten).
         plan = WorkflowPlan(name=definition.recipe_id, model_id=model_id,
                             stages=stages)
+        # M53: resolve declarative 'best' state references through the SAME
+        # resolver executions use (the sole executor's, backed by the M52
+        # selection) so the M51 preflight and the actual run can never
+        # disagree. Pure computation over persisted manifests — nothing is
+        # persisted here, and the recipe definition itself stays declarative.
+        plan = self.workflows.resolve_best_state_refs(plan)
         return definition, plan, composition
 
     def run(self, recipe_id: str, model_id: str) -> WorkflowRecord:
