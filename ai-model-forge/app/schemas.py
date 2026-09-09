@@ -490,6 +490,18 @@ class TrainingConfig(BaseModel):
     dataset_version: Optional[int] = Field(None, ge=1)   # None -> latest version
     tokenizer_id: str = Field(..., min_length=1, max_length=64)
 
+    # M54: explicit training resume point — initialize THIS run from an
+    # immutable checkpoint of the SAME model, WITHOUT publishing it first
+    # (no rollback, no latest_checkpoint mutation to prepare the run; the
+    # model's published state only changes through the normal training
+    # completion semantics). None (default) = today's behavior: start from
+    # the model's current published weights. Model-scoped and verified like
+    # every checkpoint reference (manifest + weights content hash); the
+    # checkpoint is REFERENCED, never copied. Model-WEIGHT resume only —
+    # optimizer/scheduler state is NOT persisted by M3 and is NOT restored.
+    resume_from_checkpoint_id: Optional[str] = Field(
+        None, min_length=1, max_length=64)
+
     # Optimizer / schedule
     learning_rate: float = Field(3e-4, ge=1e-6, le=1.0)
     lr_schedule: LRSchedule = LRSchedule.COSINE

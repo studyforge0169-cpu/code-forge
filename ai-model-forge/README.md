@@ -2061,6 +2061,40 @@ generation never trains, evaluates, scores, ranks or judges output.
   evidence reuse) and the M18–M50 history surfaces are byte-identical
   before and after
 
+### Milestone 54 — explicit training RESUME point
+  (`TrainingConfig.resume_from_checkpoint_id`)
+- **concept**: a training run may name the immutable checkpoint it
+  initializes from — `resume_from_checkpoint_id: <checkpoint id>`
+  (default `None` = exactly today's behavior: start from the model's
+  current published weights). This closes the non-destructive
+  improvement loop: train → evaluate → select best (`/checkpoints/best`)
+  → continue FROM that checkpoint — WITHOUT `rollback` (which publishes
+  the checkpoint as the model's current state just to prepare a run)
+- **non-destructive (the M54 invariant)**: the resume checkpoint is
+  verified through the EXISTING checkpoint verifier (model-scoped
+  lookup, weights content-hash) and its weights initialize THIS run
+  only — the model's published `weights.pt` and `latest_checkpoint`
+  are NOT touched to prepare the run; publication happens only through
+  the normal training completion semantics (keep-best / final adoption)
+- **provenance**: the run records its concrete starting checkpoint in
+  the EXISTING lineage fields — `RunProvenance.initial_checkpoint_id`
+  (and `parent_checkpoint_id`, plus the full config JSON) — and the
+  run's first checkpoint descends from it (`parent_checkpoint_id`
+  chain). The baseline evaluation (the keep-best acceptance anchor) is
+  measured on the RESUMED state, so acceptance decisions stay
+  mathematically consistent. Model-WEIGHT resume only: M3 persists no
+  optimizer/scheduler state, and none is restored (fresh optimizer,
+  documented honestly)
+- **boundaries**: unknown checkpoint or a checkpoint of ANOTHER model
+  -> the established 404; silently-corrupted weights (content-hash
+  mismatch) -> 409; unreadable weights -> 422; empty id -> 422
+  (schema). Available everywhere `TrainingConfig` flows — the
+  `POST /training/run` route and workflow/recipe `train` stages — with
+  NO new endpoint (OpenAPI path count UNCHANGED). `rollback` keeps its
+  own meaning: PUBLISH a checkpoint as current state; resume means:
+  initialize ONE run from it without publishing. The checkpoint is
+  referenced, never copied
+
 ### Milestone 53 — best-checkpoint STATE REFERENCES
   (`state_kind: "best"` on workflow stage states)
 - **concept**: a workflow stage state (`StageStateRef` — suite-run
@@ -2137,7 +2171,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 570 tests
+pytest                       # 574 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2646,7 +2680,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 570 tests across 20 suites
+  tests/               # 574 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

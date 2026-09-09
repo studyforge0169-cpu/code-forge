@@ -799,7 +799,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/datasets/&#123;id&#125;/verify</code> — integrity check (tamper detection)</li>
       <li><code>POST  {prefix}/datasets/&#123;id&#125;/tokenize</code> — tokenize with a stored tokenizer</li>
       <li><code>POST  {prefix}/tokenizers/train</code> — deterministic byte-level BPE</li>
-      <li><code>POST  {prefix}/training/run</code> — train (CPT/SFT), synchronous</li>
+      <li><code>POST  {prefix}/training/run</code> — train (CPT/SFT), synchronous; optional <code>resume_from_checkpoint_id</code> initializes the run from an immutable checkpoint without publishing it (M54)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints</code> — immutable checkpoint store</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/by-run/&#123;run&#125;</code> — checkpoints of one training run (provenance-validated, M46)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best</code> — deterministic selection by MINIMUM persisted validation loss (read-only, criterion explicit, M52)</li>
@@ -1113,6 +1113,9 @@ def delete_tokenizer(tokenizer_id: str) -> dict[str, Any]:
 # Milestone 52 adds the read-only best-checkpoint selection
 #   (minimum persisted validation loss; declared before the generic detail
 #    route so "best" can never be captured as a checkpoint id)
+# Milestone 54 adds the explicit training resume point
+#   (TrainingConfig.resume_from_checkpoint_id: non-destructive per-run
+#    initialization from a verified immutable checkpoint; no new route)
 # --------------------------------------------------------------------------- #
 
 
@@ -1134,6 +1137,14 @@ def training_run(config: TrainingConfig) -> TrainingReport:
 
     Executes inline — no background queue in this milestone. Returns the full
     training report (checkpoints, losses, decisions, rollback info).
+
+    M54: ``resume_from_checkpoint_id`` (optional, default None = today's
+    behavior) initializes THIS run from an immutable checkpoint of the same
+    model WITHOUT publishing it first — no rollback, no ``latest_checkpoint``
+    mutation to prepare the run; the run's provenance records the concrete
+    resume checkpoint (``initial_checkpoint_id``) and its first checkpoint
+    descends from it. Model-weight resume only (no optimizer/scheduler
+    state). Unknown/foreign checkpoint -> 404; corrupted weights -> 409.
     """
     try:
         return _forge().run_training(config)

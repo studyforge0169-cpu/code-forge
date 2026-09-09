@@ -591,3 +591,116 @@ def test_m46_unknown_run_model_and_cross_model_isolation(env):
         env.forge.list_checkpoints_for_run(model_a, run_b)
     with pytest.raises(FileNotFoundError):
         env.forge.list_checkpoints_for_run(model_b, run_a)
+
+
+# --------------------------------------------------------------------- M54
+# Explicit training resume point: initialize ONE run from an immutable
+# checkpoint WITHOUT publishing it first (no rollback, no latest_checkpoint
+# mutation to prepare the run). Model-weight resume only.
+
+def test_m54_resume_nondestructive_provenance_and_immutability(env):
+    from pathlib import Path
+
+    mid = env.new_model("m54-resume")
+    assert env.cfg(mid).resume_from_checkpoint_id is None   # default = old behavior
+    env.forge.run_training(env.cfg(mid, steps=10, eval_every_steps=5, seed=1))
+    ck = env.forge.list_checkpoints(mid)
+    assert len(ck) == 2
+    B = ck[0]                                   # a HISTORICAL checkpoint
+    latest_before = env.forge.get_model(mid).latest_checkpoint
+    assert latest_before != B.checkpoint_id      # latest != resume point
+    bdir = (Path(env.forge.storage.model_dir(mid)) / "checkpoints"
+            / B.checkpoint_id)
+    b_man = (bdir / "manifest.json").read_bytes()
+    b_weights = (bdir / "weights.pt").read_bytes()
+
+    rep = env.forge.run_training(env.cfg(
+        mid, steps=10, eval_every_steps=5, seed=7,
+        resume_from_checkpoint_id=B.checkpoint_id))
+
+    # provenance: the run records its CONCRETE starting checkpoint
+    prov = [p for p in env.forge.get_model(mid).training_provenance
+            if p.run_id == rep.run_id][0]
+    assert prov.initial_checkpoint_id == B.checkpoint_id
+    assert prov.parent_checkpoint_id == B.checkpoint_id
+    assert prov.config["resume_from_checkpoint_id"] == B.checkpoint_id
+    assert rep.initial_model_version == B.checkpoint_id
+    # the run's first checkpoint descends from B (existing lineage fields)
+    new_ck = sorted((c for c in env.forge.list_checkpoints(mid)
+                     if c.run_id == rep.run_id), key=lambda c: c.step)
+    assert new_ck[0].parent_checkpoint_id == B.checkpoint_id
+    assert new_ck[1].parent_checkpoint_id == new_ck[0].checkpoint_id
+
+    # §7 baseline: the run started from B's state — its baseline evaluation
+    # reproduces B's persisted validation_loss (same data/probe config)
+    assert round(rep.baseline_validation_loss, 6) == B.validation_loss
+
+    # NON-destructive: latest follows the EXISTING publication semantics
+    # (the run's last created checkpoint), never B-unless-created
+    m = env.forge.get_model(mid)
+    assert m.latest_checkpoint == new_ck[-1].checkpoint_id
+    assert m.latest_checkpoint != B.checkpoint_id
+
+    # §14 immutability: B is referenced, never copied or modified
+    assert (bdir / "manifest.json").read_bytes() == b_man
+    assert (bdir / "weights.pt").read_bytes() == b_weights
+    assert len(env.forge.list_checkpoints(mid)) == 4   # 2 + 2, no duplicates
+
+
+def test_m54_resume_determinism_and_error_taxonomy(env):
+    from pathlib import Path
+
+    mid = env.new_model("m54-det")
+    env.forge.run_training(env.cfg(mid, steps=10, eval_every_steps=5, seed=1))
+    B = env.forge.list_checkpoints(mid)[0]
+    kw = dict(steps=10, eval_every_steps=5, seed=7,
+              resume_from_checkpoint_id=B.checkpoint_id)
+    r2 = env.forge.run_training(env.cfg(mid, **kw))
+    r3 = env.forge.run_training(env.cfg(mid, **kw))
+    sig = lambda rid: sorted(          # noqa: E731  (step, loss) per checkpoint
+        (c.step, c.validation_loss)
+        for c in env.forge.list_checkpoints(mid) if c.run_id == rid)
+    assert sig(r2.run_id) == sig(r3.run_id)
+    assert r2.baseline_validation_loss == r3.baseline_validation_loss
+
+    # unknown checkpoint -> the established 404 taxonomy (engine level)
+    with pytest.raises(FileNotFoundError):
+        env.forge.run_training(env.cfg(
+            mid, steps=4, resume_from_checkpoint_id="no-such-ck-m54"))
+    # a checkpoint of ANOTHER model is unknown HERE (model-scoped lookup)
+    other = env.new_model("m54-foreign")
+    env.forge.run_training(env.cfg(other, steps=10, eval_every_steps=5, seed=1))
+    foreign_ck = env.forge.list_checkpoints(other)[0].checkpoint_id
+    with pytest.raises(FileNotFoundError):
+        env.forge.run_training(env.cfg(
+            mid, steps=4, resume_from_checkpoint_id=foreign_ck))
+    # corrupted weights -> integrity RuntimeError, nothing written
+    wpath = (Path(env.forge.storage.model_dir(mid)) / "checkpoints"
+             / B.checkpoint_id / "weights.pt")
+    orig = wpath.read_bytes()
+    wpath.write_bytes(b"corrupted")
+    with pytest.raises(RuntimeError, match="unreadable|integrity"):
+        env.forge.run_training(env.cfg(mid, **kw))
+    wpath.write_bytes(orig)                    # restore exactly
+    # B is intact and resumable again
+    r4 = env.forge.run_training(env.cfg(mid, **kw))
+    assert r4.baseline_validation_loss == r2.baseline_validation_loss
+
+
+def test_m54_resume_through_workflow_train_stage(env):
+    from app.schemas import (StageType, WorkflowPlan, WorkflowStage)
+
+    mid = env.new_model("m54-wf")
+    env.forge.run_training(env.cfg(mid, steps=10, eval_every_steps=5, seed=1))
+    B = env.forge.list_checkpoints(mid)[0]
+    train_cfg = env.cfg(mid, steps=10, eval_every_steps=5, seed=3,
+                        resume_from_checkpoint_id=B.checkpoint_id)
+    plan = WorkflowPlan(name="m54-resume-wf", model_id=mid, stages=[
+        WorkflowStage(stage_id="tr", type=StageType.TRAIN,
+                      training=train_cfg)])
+    rec = env.forge.run_workflow(plan)
+    assert rec.status.value == "completed"
+    prov = [p for p in env.forge.get_model(mid).training_provenance
+            if p.run_id == rec.stages[0].artifact.artifact_id][0]
+    assert prov.initial_checkpoint_id == B.checkpoint_id
+    assert prov.config["resume_from_checkpoint_id"] == B.checkpoint_id

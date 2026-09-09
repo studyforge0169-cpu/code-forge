@@ -264,6 +264,13 @@ class TrainingEngine:
         except FileNotFoundError:
             raise FileNotFoundError(f"model '{cfg.model_id}' not found") from None
 
+        # M54: validate an explicit resume point BEFORE anything is written —
+        # through the EXISTING checkpoint verifier (model-scoped lookup:
+        # unknown/foreign checkpoint -> FileNotFoundError; unreadable or
+        # content-hash-mismatched weights -> RuntimeError). No second loader.
+        if cfg.resume_from_checkpoint_id is not None:
+            self.verify_checkpoint(cfg.model_id, cfg.resume_from_checkpoint_id)
+
         try:
             if cfg.dataset_version is None:
                 meta = self.datasets.load_meta(cfg.dataset_id)
@@ -360,10 +367,20 @@ class TrainingEngine:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-        # ---- rebuild the model from its config and load the current weights ----
+        # ---- rebuild the model from its config and load the initial weights ----
+        # M54: an explicit resume point initializes THIS run from that
+        # immutable checkpoint's VERIFIED weights (non-destructive: the
+        # model's published weights.pt and latest_checkpoint are NOT touched
+        # to prepare the run — publication happens only through the normal
+        # training completion semantics below). None = published current
+        # weights, exactly as before.
         device = "cuda" if spec.has_gpu else "cpu"
         model = build_transformer(model_cfg).module
-        state = self.storage.load_weights(model_id, device=device)
+        if cfg.resume_from_checkpoint_id is not None:
+            state = self.verify_checkpoint(model_id,
+                                           cfg.resume_from_checkpoint_id)
+        else:
+            state = self.storage.load_weights(model_id, device=device)
         missing, unexpected = restore_state(model, state)
         if missing or unexpected:
             raise RuntimeError(
@@ -398,8 +415,14 @@ class TrainingEngine:
             | {total_steps})
         assert eval_points and eval_points[-1] == total_steps
 
-        initial_checkpoint_id = model_record.latest_checkpoint
-        parent_checkpoint_id = model_record.latest_checkpoint  # lineage across runs
+        # M54: with an explicit resume point the run's TRUE starting state is
+        # that checkpoint — recorded as the run's initial checkpoint and as
+        # the parent of the run's first checkpoint (existing lineage fields,
+        # no new schema); without one, today's semantics (latest lineage).
+        initial_checkpoint_id = (cfg.resume_from_checkpoint_id
+                                 if cfg.resume_from_checkpoint_id is not None
+                                 else model_record.latest_checkpoint)
+        parent_checkpoint_id = initial_checkpoint_id  # lineage across runs
         best_val: Optional[float] = None   # best among checkpoints (starts at baseline)
         best_ckpt_id: Optional[str] = None
         checkpoints: list[str] = []

@@ -504,3 +504,70 @@ def test_m52_best_checkpoint_tie_corruption_openapi(api_client):
                       "{run_id}") < keys.index(path)
     assert keys.index(path) < keys.index(
         "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}")
+
+
+def test_m54_api_resume_point_errors_and_openapi(api_client):
+    ds_id, tok_id, model_id = _prepare(api_client, "m54api")
+    assert api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=8,
+        eval_every_steps=4)).status_code == 200
+    listing = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    assert len(listing) == 2
+    B = listing[0]["checkpoint_id"]                 # historical (not latest)
+    assert B != listing[-1]["checkpoint_id"]
+
+    # explicit resume through the EXISTING route: 200, provenance pins B
+    run = api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=4, eval_every_steps=4,
+        resume_from_checkpoint_id=B)).json()
+    assert run["initial_model_version"] == B
+    manifest = api_client.get(f"{MODELS}/{model_id}").json()
+    prov = [p for p in manifest["training_provenance"]
+            if p["run_id"] == run["run_id"]][0]
+    assert prov["initial_checkpoint_id"] == B
+    assert prov["config"]["resume_from_checkpoint_id"] == B
+
+    # error taxonomy through the API: unknown -> 404, foreign -> 404,
+    # corrupted -> 409, malformed id -> 422 (schema, pre-handler)
+    assert api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=4,
+        resume_from_checkpoint_id="ghost-ck-m54")).status_code == 404
+    other = _prepare(api_client, "m54other")
+    o_ck = api_client.post(TRAIN_RUN, json=_run_cfg(
+        other[2], other[0], other[1], steps=4,
+        eval_every_steps=4)).json()["checkpoints"][0]["checkpoint_id"]
+    assert api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=4,
+        resume_from_checkpoint_id=o_ck)).status_code == 404
+    from pathlib import Path
+    from app import engine as engine_module
+    wpath = (Path(engine_module._forge.storage.model_dir(model_id))
+             / "checkpoints" / B / "weights.pt")
+    orig = wpath.read_bytes()
+    # silently-perturbed weights: loads fine but FAILS the content-hash
+    # integrity verification -> 409 (the established integrity mapping)
+    import torch as _torch
+    state = _torch.load(wpath, map_location="cpu", weights_only=True)
+    key = sorted(state)[0]
+    state[key] = state[key] + 1.0
+    _torch.save(state, wpath)
+    r = api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=4, resume_from_checkpoint_id=B))
+    assert r.status_code == 409 and "integrity" in r.json()["detail"]
+    # unreadable weights (torch.load fails) map through the established
+    # /training/run RuntimeError -> 422 branch
+    wpath.write_bytes(b"not a torch file")
+    r = api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=4, resume_from_checkpoint_id=B))
+    assert r.status_code == 422 and "unreadable" in r.json()["detail"]
+    wpath.write_bytes(orig)
+    bad = _run_cfg(model_id, ds_id, tok_id, steps=4,
+                   resume_from_checkpoint_id="")
+    assert api_client.post(TRAIN_RUN, json=bad).status_code == 422
+
+    # OpenAPI: path count UNCHANGED (84); the field is part of the
+    # existing TrainingConfig schema
+    spec = api_client.get("/openapi.json").json()
+    assert len(spec["paths"]) == 84
+    assert "resume_from_checkpoint_id" in spec["components"]["schemas"][
+        "TrainingConfig"]["properties"]
