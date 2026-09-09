@@ -264,6 +264,19 @@ class TrainingEngine:
         except FileNotFoundError:
             raise FileNotFoundError(f"model '{cfg.model_id}' not found") from None
 
+        # M55: resume_from_best is a WORKFLOW training-stage declaration —
+        # only the workflow engine's single resolver may satisfy it (it
+        # pins the M52 selection and hands training a pure M54 explicit
+        # id). A DIRECT run declaring best is rejected: name the concrete
+        # checkpoint explicitly (GET /checkpoints/best answers it).
+        if cfg.resume_from_best:
+            raise ValueError(
+                "resume_from_best is a workflow training-stage "
+                "declaration: the workflow engine's single resolver pins "
+                "the M52 best checkpoint before execution — a direct "
+                "training run must pass resume_from_checkpoint_id "
+                "explicitly (e.g. the answer of GET /checkpoints/best)")
+
         # M54: validate an explicit resume point BEFORE anything is written —
         # through the EXISTING checkpoint verifier (model-scoped lookup:
         # unknown/foreign checkpoint -> FileNotFoundError; unreadable or

@@ -502,6 +502,22 @@ class TrainingConfig(BaseModel):
     resume_from_checkpoint_id: Optional[str] = Field(
         None, min_length=1, max_length=64)
 
+    # M55: DECLARATIVE best-resume — a WORKFLOW training-stage option.
+    # True means "resolve the M52 best checkpoint (minimum persisted
+    # validation_loss) at workflow resolution time and initialize this
+    # run from it". The workflow engine's single resolver pins the
+    # concrete id on ``resolved_resume_checkpoint_id`` (the M53 pinned
+    # form); the training engine then receives it as a PURE M54
+    # ``resume_from_checkpoint_id``. XOR with the explicit id (both set
+    # is a contradiction, never a silent preference); a DIRECT training
+    # request with resume_from_best=True is rejected — direct runs name
+    # the checkpoint explicitly (e.g. GET /checkpoints/best answers it).
+    resume_from_best: bool = False
+    resolved_resume_checkpoint_id: Optional[str] = Field(
+        None, min_length=1, max_length=64)   # pinned by the workflow
+    # resolver ONLY (the M52 selection's concrete id); valid only with
+    # resume_from_best=True
+
     # Optimizer / schedule
     learning_rate: float = Field(3e-4, ge=1e-6, le=1.0)
     lr_schedule: LRSchedule = LRSchedule.COSINE
@@ -530,6 +546,17 @@ class TrainingConfig(BaseModel):
     def _epochs_xor_steps(self) -> "TrainingConfig":
         if (self.epochs is None) == (self.steps is None):
             raise ValueError("set exactly one of 'epochs' or 'steps' (not both, not neither)")
+        if self.resume_from_best and self.resume_from_checkpoint_id is not None:
+            raise ValueError(
+                "resume_from_best and resume_from_checkpoint_id are "
+                "mutually exclusive — the M52 selection decides the "
+                "checkpoint OR it is named explicitly, never both")
+        if self.resolved_resume_checkpoint_id is not None \
+                and not self.resume_from_best:
+            raise ValueError(
+                "resolved_resume_checkpoint_id is the workflow "
+                "resolver's pinned M52 selection and is only valid with "
+                "resume_from_best=True")
         return self
 
     def default_seed(self) -> int:

@@ -2061,6 +2061,39 @@ generation never trains, evaluates, scores, ranks or judges output.
   evidence reuse) and the M18–M50 history surfaces are byte-identical
   before and after
 
+### Milestone 55 — declarative BEST-RESUME for train stages
+  (`TrainingConfig.resume_from_best`)
+- **concept**: a workflow/recipe TRAIN stage may declare
+  `resume_from_best: true` — "initialize this run from the model's best
+  checkpoint" — connecting M53 (best state references) and M54
+  (explicit training resume). The SAME workflow resolver that pins M53
+  state refs resolves the SAME M52 selection (minimum persisted
+  `validation_loss`) ONCE per plan at execution/M51-preflight time and
+  pins the concrete id (`resolved_resume_checkpoint_id`); the training
+  engine then receives a PURE M54 `resume_from_checkpoint_id` — one
+  selection system, one executor, the training layer never queries
+  "best"
+- **semantics**: XOR with the explicit id (both set is a contradiction
+  -> 422; `resolved_resume_checkpoint_id` without best -> 422); a
+  DIRECT `POST /training/run` with `resume_from_best` is rejected —
+  direct runs name the checkpoint explicitly (e.g. the answer of
+  `GET /checkpoints/best`); default `false` preserves every existing
+  request exactly
+- **immutability**: the declarative recipe stays `resume_from_best:
+  true` (manifest never rewritten); the immutable run record's plan
+  pins the concrete id and its `plan_hash` differs across resolutions
+  of different checkpoints; the training provenance records the
+  concrete start (`initial_checkpoint_id` + config) with the new
+  checkpoints descending from it. Resolution happens at PLAN START: a
+  best-resume stage sees the checkpoints existing when the workflow
+  starts — in-run stage outputs are referenced explicitly via
+  `from_stage` (no hidden state discovery)
+- **the loop, declaratively**: `train -> evaluate -> train from best
+  -> evaluate -> gate` is now ONE registered, immutable, re-runnable
+  recipe (finite and explicit — NO automatic repetition, no
+  while-improving, no auto-improvement). OpenAPI path count UNCHANGED
+  (84) — schema fields only
+
 ### Milestone 54 — explicit training RESUME point
   (`TrainingConfig.resume_from_checkpoint_id`)
 - **concept**: a training run may name the immutable checkpoint it
@@ -2171,7 +2204,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 574 tests
+pytest                       # 579 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2680,7 +2713,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 574 tests across 20 suites
+  tests/               # 579 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

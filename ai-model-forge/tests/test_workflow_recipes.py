@@ -2630,3 +2630,279 @@ def test_m53_api_best_reference_registration_to_execution(api_client):
     assert "best" in spec["components"]["schemas"]["EvalStateKind"]["enum"]
     ssr = spec["components"]["schemas"]["StageStateRef"]
     assert "resolved_checkpoint_id" in ssr["properties"]
+
+
+# --------------------------------------------------------------------- M55
+# Declarative best-resume for workflow TRAIN stages: resume_from_best
+# resolves through the SAME M53 resolver (one M52 selection per plan),
+# pins the concrete id, and hands training a PURE M54 explicit resume.
+
+def _m55_argmin(env, model_id):
+    sel = env.forge.select_best_checkpoint(model_id)
+    return sel.checkpoint.checkpoint_id
+
+
+def _m55_best_train_stage(sid, env, model_id, **overrides):
+    kw = dict(method="continued_pretraining", model_id=model_id,
+              dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+              learning_rate=3e-3, batch_size=8, max_seq_len=32,
+              eval_every_steps=2, seed=5, steps=4,
+              resume_from_best=True)
+    kw.update(overrides)
+    return WorkflowStage(stage_id=sid, type=StageType.TRAIN,
+                         training=TrainingConfig(**kw))
+
+
+def test_m55_schema_matrix_and_direct_run_rejection(env):
+    base = dict(method="continued_pretraining", model_id=env.model_id,
+                dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+                learning_rate=3e-3, batch_size=8, max_seq_len=32,
+                eval_every_steps=2, seed=1, steps=4)
+
+    # default False; declarative True; pinned form; contradictions
+    assert TrainingConfig(**base).resume_from_best is False
+    assert TrainingConfig(**{**base, "resume_from_best": True}) \
+        .resolved_resume_checkpoint_id is None
+    TrainingConfig(**{**base, "resume_from_best": True,
+                      "resolved_resume_checkpoint_id": env.ck_main}
+                   )                                   # pinned form OK
+    with pytest.raises(ValidationError):
+        TrainingConfig(**{**base, "resume_from_best": True,
+                          "resume_from_checkpoint_id": env.ck_main})
+    with pytest.raises(ValidationError):
+        TrainingConfig(**{**base,
+                          "resolved_resume_checkpoint_id": env.ck_main})
+
+    # a DIRECT engine run declaring best is rejected (nothing persisted)
+    n_wf = len(env.forge.list_workflows(env.model_id))
+    with pytest.raises(ValueError, match="workflow training-stage"):
+        env.forge.run_training(TrainingConfig(
+            **{**base, "resume_from_best": True}))
+    assert len(env.forge.list_workflows(env.model_id)) == n_wf
+
+
+def test_m55_best_resume_resolution_provenance_immutability(env):
+    import json as _m55json
+    from pathlib import Path as _M55Path
+
+    env.recipes.register(_recipe("m55-best", [
+        _m55_best_train_stage("tr_best", env, env.model_id)]))
+    argmin = _m55_argmin(env, env.model_id)
+    rman_bytes = (env.forge.storage.root / "workflow-recipes" / "m55-best"
+                  / "manifest.json").read_bytes()
+
+    # M51 preflight pins the M52 selection (same resolver as execution)
+    res = env.recipes.resolve("m55-best", env.model_id)
+    tc = res.plan.stages[0].training
+    assert tc.resume_from_best is True
+    assert tc.resolved_resume_checkpoint_id == argmin
+    assert res.plan.stages[0].training.resume_from_checkpoint_id is None
+
+    # execution: the record pins the concrete id; training received a
+    # PURE M54 explicit resume (provenance); lineage descends from it
+    rec = env.recipes.run("m55-best", env.model_id)
+    rtc = rec.plan.stages[0].training
+    assert rtc.resume_from_best is True
+    assert rtc.resolved_resume_checkpoint_id == argmin
+    assert rec.model_dump()["plan"] == res.model_dump()["plan"]
+    run_id = rec.stages[0].artifact.artifact_id
+    prov = [p for p in env.forge.get_model(env.model_id).training_provenance
+            if p.run_id == run_id][0]
+    assert prov.initial_checkpoint_id == argmin
+    assert prov.parent_checkpoint_id == argmin
+    assert prov.config["resume_from_checkpoint_id"] == argmin
+    assert prov.config["resume_from_best"] is False   # stripped: pure M54
+    new_ck = sorted((c for c in env.forge.list_checkpoints(env.model_id)
+                     if c.run_id == run_id), key=lambda c: c.step)
+    assert new_ck[0].parent_checkpoint_id == argmin
+    p1 = (_M55Path(env.forge.storage.model_dir(env.model_id)) / "workflows"
+          / f"workflow-{rec.workflow_id}" / "manifest.json")
+    bytes1 = p1.read_bytes()
+
+    # a DIFFERENT checkpoint becomes best (test-fixture edit in throwaway
+    # storage): the old record keeps its pin; a NEW execution resolves the
+    # new best with a DIFFERENT plan identity; determinism re-running
+    other = next(c for c in env.forge.list_checkpoints(env.model_id)
+                 if c.checkpoint_id != argmin)
+    ck_path = (_M55Path(env.forge.storage.model_dir(env.model_id))
+               / "checkpoints" / other.checkpoint_id / "manifest.json")
+    man = _m55json.loads(ck_path.read_text())
+    man["validation_loss"] = 0.5
+    ck_path.write_text(_m55json.dumps(man))
+    assert _m55_argmin(env, env.model_id) == other.checkpoint_id
+
+    rec2 = env.recipes.run("m55-best", env.model_id)
+    assert (rec2.plan.stages[0].training.resolved_resume_checkpoint_id
+            == other.checkpoint_id)
+    assert rec2.plan_hash != rec.plan_hash
+    assert p1.read_bytes() == bytes1            # old record byte-stable
+    old = _m55json.loads(bytes1)
+    assert old["plan"]["stages"][0]["training"][
+        "resolved_resume_checkpoint_id"] == argmin
+    # the recipe definition was never rewritten (declarative)
+    assert (env.forge.storage.root / "workflow-recipes" / "m55-best"
+            / "manifest.json").read_bytes() == rman_bytes
+    rec3 = env.recipes.run("m55-best", env.model_id)
+    assert rec3.plan_hash == rec2.plan_hash     # same registry -> same id
+
+
+def test_m55_composite_and_zero_checkpoint_semantics(env):
+    env.recipes.register(_recipe("m55-child", [
+        _m55_best_train_stage("child_tr", env, env.model_id)]))
+    env.recipes.register(_recipe("m55-parent", [
+        _m55_best_train_stage("own_tr", env, env.model_id),
+        _call("leg", "m55-child")]))
+    argmin = _m55_argmin(env, env.model_id)
+
+    res = env.recipes.resolve("m55-parent", env.model_id)
+    assert [s.stage_id for s in res.plan.stages] == [
+        "own_tr", "leg.child_tr"]
+    for st in res.plan.stages:                  # ONE selection, both pinned
+        assert st.training.resume_from_best is True
+        assert st.training.resolved_resume_checkpoint_id == argmin
+    assert [(c.recipe_id, c.config_hash) for c in res.composition] == [
+        ("m55-child", env.recipes.get("m55-child").config_hash)]
+
+    rec = env.recipes.run("m55-parent", env.model_id)
+    assert rec.model_dump()["plan"] == res.model_dump()["plan"]
+    assert rec.plan_hash == res.plan.plan_hash()
+    for st in rec.plan.stages:
+        assert st.training.resolved_resume_checkpoint_id == argmin
+
+    # zero-checkpoint model: a best-resume recipe bound to THAT model
+    # (train stages are model-pinned, M12 semantics) hits the established
+    # 404 at BOTH preflight and run, nothing persisted; unknown model 404
+    fresh = env.fresh_model("m55-zero-ck")
+    env.recipes.register(_recipe("m55-zerock", [
+        _m55_best_train_stage("tr_best", env, fresh)]))
+    with pytest.raises(FileNotFoundError,
+                       match="no selectable checkpoints"):
+        env.recipes.resolve("m55-zerock", fresh)
+    with pytest.raises(FileNotFoundError,
+                       match="no selectable checkpoints"):
+        env.recipes.run("m55-zerock", fresh)
+    assert env.forge.list_workflows(fresh) == []
+    with pytest.raises(FileNotFoundError):
+        env.recipes.resolve("m55-child", "no-such-model")
+
+
+def test_m55_multistage_recipe_resolution_timing(env):
+    # §13: train -> evaluate(stage-1 output) -> train(resume_from_best).
+    # The M53 architecture resolves 'best' ONCE at PLAN START: stage 3
+    # pins the best among checkpoints existing when the workflow STARTS
+    # — it does NOT see stage 1's in-run output (intra-run stage outputs
+    # are referenced explicitly via from_stage, as stage 2 does). The
+    # record proves exactly which checkpoint each stage used.
+    from app.schemas import (EvaluationConfig, EvaluationSplit,
+                             WorkflowEvaluationStage)
+
+    argmin_before = _m55_argmin(env, env.model_id)
+    train1 = WorkflowStage(
+        stage_id="tr1", type=StageType.TRAIN,
+        training=TrainingConfig(
+            method="continued_pretraining", model_id=env.model_id,
+            dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+            learning_rate=3e-3, batch_size=8, max_seq_len=32,
+            eval_every_steps=2, seed=9, steps=2))
+    evaluate = WorkflowStage(
+        stage_id="ev1", type=StageType.EVALUATE,
+        evaluation=WorkflowEvaluationStage(
+            config=EvaluationConfig(
+                model_id=env.model_id, dataset_id=env.ds_a,
+                tokenizer_id=env.tok_id, split=EvaluationSplit.VALIDATION,
+                batch_size=8, max_seq_len=32),
+            checkpoint_from_stage="tr1"))
+    train3 = _m55_best_train_stage("tr_best", env, env.model_id, seed=6)
+    plan = WorkflowPlan(name="m55-multistage", model_id=env.model_id,
+                        stages=[train1, evaluate, train3])
+
+    resolved = env.forge.workflows.resolve_best_state_refs(plan)
+    assert (resolved.stages[2].training.resolved_resume_checkpoint_id
+            == argmin_before)          # pre-run selection, pinned once
+    rec = env.forge.run_workflow(plan)
+    assert rec.status == WorkflowStatus.COMPLETED
+    assert (rec.plan.stages[2].training.resolved_resume_checkpoint_id
+            == argmin_before)
+    # stage 2 evaluated stage 1's output through the EXPLICIT from_stage
+    assert rec.stages[1].artifact.checkpoint_id is not None
+    ev_ck = rec.stages[1].artifact.checkpoint_id
+    tr1_run = rec.stages[0].artifact.artifact_id
+    # the from_stage resolution produced stage 1's FINAL checkpoint
+    tr1_ckpts = sorted((c for c in env.forge.list_checkpoints(env.model_id)
+                        if c.run_id == tr1_run), key=lambda c: c.step)
+    assert ev_ck == tr1_ckpts[-1].checkpoint_id
+    # stage 3 trained from the PRE-RUN best, not from stage 1's output
+    prov3 = [p for p in env.forge.get_model(env.model_id).training_provenance
+             if p.run_id == rec.stages[2].artifact.artifact_id][0]
+    assert prov3.initial_checkpoint_id == argmin_before
+
+
+def test_m55_api_registration_to_execution(api_client):
+    h = _http_env(api_client, "m55a")
+    mid, ds, tok = h["mid"], h["ds"], h["tok"]
+    plan_url = "/api/v1/models/{m}/workflows/recipes/{r}/plan"
+    train_body = {"name": "best-run", "method": "continued_pretraining",
+                  "model_id": mid, "dataset_id": ds, "tokenizer_id": tok,
+                  "learning_rate": 3e-3, "batch_size": 8, "max_seq_len": 32,
+                  "eval_every_steps": 2, "seed": 3, "steps": 4}
+    best_stage = {"stage_id": "tr_best", "type": "train",
+                  "training": {**train_body, "resume_from_best": True}}
+
+    # XOR contradiction rejected at registration
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api55-bad", "stages": [
+            {"stage_id": "tr", "type": "train",
+             "training": {**train_body, "resume_from_best": True,
+                          "resume_from_checkpoint_id": "whatever"}}]})
+    assert r.status_code == 422, r.text
+
+    # declarative registration OK; preflight on a zero-checkpoint model
+    # -> the established 404
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api55-best", "stages": [best_stage]})
+    assert r.status_code == 201, r.text
+    r = api_client.get(plan_url.format(m=mid, r="api55-best"))
+    assert r.status_code == 404
+    assert "no selectable checkpoints" in r.json()["detail"]
+
+    # create checkpoints; compute the expected argmin locally
+    assert api_client.post("/api/v1/training/run", json=train_body) \
+        .status_code == 200
+    listing = api_client.get(f"/api/v1/models/{mid}/checkpoints").json()
+    ordered = sorted(listing, key=lambda c: (c["step"], c["created_at"]))
+    expected = min(ordered, key=lambda c: c["validation_loss"])
+
+    got = api_client.get(plan_url.format(m=mid, r="api55-best"))
+    assert got.status_code == 200, got.text
+    res = got.json()
+    tc = res["plan"]["stages"][0]["training"]
+    assert tc["resume_from_best"] is True
+    assert tc["resolved_resume_checkpoint_id"] == expected["checkpoint_id"]
+    assert api_client.get(
+        plan_url.format(m=mid, r="api55-best")).content == got.content
+
+    # execution pins the same concrete checkpoint (same registry state)
+    run = api_client.post(RUNS.format(rid="api55-best"),
+                          json={"model_id": mid}).json()
+    assert run["status"] == "completed"
+    assert run["plan"] == res["plan"]
+    prov = [p for p in api_client.get(f"/api/v1/models/{mid}").json()[
+        "training_provenance"] if p["run_id"]
+        == run["stages"][0]["artifact"]["artifact_id"]][0]
+    assert prov["initial_checkpoint_id"] == expected["checkpoint_id"]
+    assert prov["config"]["resume_from_checkpoint_id"] == \
+        expected["checkpoint_id"]
+    assert prov["config"]["resume_from_best"] is False
+
+    # a DIRECT training run declaring best -> 422 (name the checkpoint)
+    r = api_client.post("/api/v1/training/run",
+                        json={**train_body, "resume_from_best": True})
+    assert r.status_code == 422
+    assert "workflow training-stage" in r.json()["detail"]
+
+    # OpenAPI: path count UNCHANGED; both fields in TrainingConfig
+    spec = api_client.get("/openapi.json").json()
+    assert len(spec["paths"]) == 84
+    props = spec["components"]["schemas"]["TrainingConfig"]["properties"]
+    assert "resume_from_best" in props
+    assert "resolved_resume_checkpoint_id" in props

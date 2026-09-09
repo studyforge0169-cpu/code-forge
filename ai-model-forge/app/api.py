@@ -753,6 +753,20 @@ def index() -> HTMLResponse:
         persisted selection pointer; unknown model or no selectable
         checkpoints -> 404.</li>
 
+      <li><b>M55 declarative best-resume for train stages</b> — a
+        workflow/recipe TRAIN stage may declare
+        <code>resume_from_best</code>: the SAME resolver that pins M53
+        state refs resolves the SAME M52 selection ONCE per plan and
+        pins the concrete checkpoint id; the training engine receives a
+        PURE M54 explicit resume (the training layer never queries
+        "best"). XOR with the explicit id (both -> 422); a direct
+        training run declaring best -> 422; the declarative recipe
+        manifest is never rewritten while the immutable run record
+        pins the concrete id (a different resolution = a different
+        plan_hash). The improvement loop — train, evaluate, train from
+        best, evaluate, gate — is ONE finite, explicit, re-runnable
+        recipe; no automatic repetition.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -1116,6 +1130,9 @@ def delete_tokenizer(tokenizer_id: str) -> dict[str, Any]:
 # Milestone 54 adds the explicit training resume point
 #   (TrainingConfig.resume_from_checkpoint_id: non-destructive per-run
 #    initialization from a verified immutable checkpoint; no new route)
+# Milestone 55 adds the declarative best-resume for TRAIN stages
+#   (resume_from_best: resolved by the SAME M53 resolver through the
+#    SAME M52 selection into a concrete M54 resume id; no new route)
 # --------------------------------------------------------------------------- #
 
 
@@ -1145,6 +1162,11 @@ def training_run(config: TrainingConfig) -> TrainingReport:
     resume checkpoint (``initial_checkpoint_id``) and its first checkpoint
     descends from it. Model-weight resume only (no optimizer/scheduler
     state). Unknown/foreign checkpoint -> 404; corrupted weights -> 409.
+    M55: ``resume_from_best`` is a WORKFLOW training-stage declaration —
+    this DIRECT route rejects it (422): the workflow engine's single
+    resolver pins the M52 best selection into a concrete
+    ``resume_from_checkpoint_id`` before the training engine runs; name
+    the checkpoint explicitly here (GET /checkpoints/best answers it).
     """
     try:
         return _forge().run_training(config)

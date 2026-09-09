@@ -270,8 +270,20 @@ class WorkflowEngine:
                 return [stage.gate.candidate]
             return []
 
+        def _train_unresolved(stage: WorkflowStage) -> bool:
+            # M55: a declarative best-resume TRAIN stage whose M52
+            # selection has not been pinned yet (the resolver's pinned
+            # form keeps resume_from_best=True + the concrete id).
+            return (stage.type == StageType.TRAIN
+                    and stage.training is not None
+                    and stage.training.resume_from_best
+                    and stage.training.resolved_resume_checkpoint_id
+                    is None)
+
         if not any(_unresolved(ref) for stage in plan.stages
-                   for ref in _stage_refs(stage)):
+                   for ref in _stage_refs(stage)) \
+                and not any(_train_unresolved(stage)
+                            for stage in plan.stages):
             return plan
         # ONE selection per plan through the M52 selector (unknown model or
         # no selectable checkpoints -> FileNotFoundError, nothing persisted)
@@ -304,6 +316,17 @@ class WorkflowEngine:
                     stage = stage.model_copy(update={
                         "gate": gt.model_copy(update={
                             "candidate": _pin(gt.candidate)})})
+            elif stage.type == StageType.TRAIN and stage.training is not None:
+                tc = stage.training
+                if _train_unresolved(stage):
+                    # M55: pin the SAME single per-plan selection onto the
+                    # declarative best-resume TRAIN stage (pinned form:
+                    # resume_from_best=True + resolved_resume_checkpoint_
+                    # id=<concrete id>) — the record and plan_hash carry
+                    # the concrete resolution exactly like M53 state refs.
+                    stage = stage.model_copy(update={
+                        "training": tc.model_copy(update={
+                            "resolved_resume_checkpoint_id": ckpt_id})})
             pinned.append(stage)
         # a REAL WorkflowPlan (full validation incl. _plan_consistent)
         return WorkflowPlan(name=plan.name, model_id=plan.model_id,
@@ -453,6 +476,18 @@ class WorkflowEngine:
         model_id = model.id
         if stage.type == StageType.TRAIN:
             cfg: TrainingConfig = stage.training  # type: ignore[assignment]
+            if cfg.resume_from_best:
+                # M55: the resolver already pinned the M52 selection's
+                # concrete checkpoint id. Hand the training engine a PURE
+                # M54 explicit-resume config — the workflow layer selects,
+                # the training layer receives the explicit id (separation
+                # of concerns; no dynamic "best" query inside training).
+                # The declarative trace stays in the run record's plan.
+                cfg = cfg.model_copy(update={
+                    "resume_from_checkpoint_id":
+                        cfg.resolved_resume_checkpoint_id,
+                    "resume_from_best": False,
+                    "resolved_resume_checkpoint_id": None})
             report = self.training.run(cfg)
             summary = self._training_artifact(model_id, report)
             return summary, None
