@@ -57,7 +57,7 @@ from .schemas import (
     TrainingConfig,
     TrainingReport,
 )
-from .storage import Storage, atomic_write_json, read_json
+from .storage import Storage, atomic_delete_dir, atomic_write_json, read_json
 
 log = forge_cfg.get_logger("training")
 
@@ -810,6 +810,32 @@ class TrainingEngine:
         """Internal best-weights restore (assumes the checkpoint is intact)."""
         state = self.verify_checkpoint(model_id, ckpt_id)
         self.storage.write_weights(model_id, state)
+
+    def remove_checkpoint(self, model_id: str, ckpt_id: str) -> tuple[int, int]:
+        """Remove ONE checkpoint's artifact set ATOMICALLY (M61).
+
+        The low-level M3 removal: the checkpoint directory (manifest +
+        weights) disappears in ONE atomic ``os.rename`` to a hidden
+        ``.tmp-delete-*`` sibling the authoritative listing already
+        skips, so no observer ever sees a half-deleted checkpoint and a
+        crash can never leave a valid-looking partial one. Returns
+        ``(files_removed, bytes_reclaimed)`` measured from the files as
+        they existed immediately before removal. The CALLER owns the
+        two safety decisions — this method deliberately does NOT decide
+        deletability: integrity verification (``verify_checkpoint``)
+        and reference safety (the facade's live blocker analysis over
+        best/published/referenced state) must both have passed, because
+        deletion must never become a way to bypass either. Never
+        touches the model manifest, other checkpoints, weights.pt or
+        any record family; the checkpoint registry IS the directory
+        listing, so the removal itself needs no pointer updates."""
+        ckpt_dir = self._ckpt_dir(model_id, ckpt_id)
+        files = sorted(p for p in ckpt_dir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(ckpt_dir)
+        log.info("deleted checkpoint %s of model %s (%d files, %d bytes)",
+                 ckpt_id, model_id, len(files), nbytes)
+        return len(files), nbytes
 
     # ------------------------------------------------------------------ #
 

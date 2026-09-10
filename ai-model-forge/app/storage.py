@@ -88,6 +88,26 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def atomic_delete_dir(path: Path) -> None:
+    """Remove ONE directory atomically (M61's smallest reusable delete
+    primitive — the mirror of ``atomic_write_json``).
+
+    The directory is first RENAMED to a sibling ``.tmp-delete-<uuid>``
+    name (``os.rename`` is atomic: the authoritative directory scans —
+    checkpoint listings, model listings — never observe a half-deleted
+    state, and they skip dot-prefixed entries by convention), then the
+    renamed copy is removed. A crash between the rename and the rmtree
+    can only leave a hidden ``.tmp-delete-*`` residue the listings
+    skip — exactly the established crash-window semantics of the
+    sibling ``.tmp-*`` temps the atomic writers leave — never a
+    valid-looking partial checkpoint. Raises ``FileNotFoundError``/
+    ``OSError`` from the rename if ``path`` is already gone.
+    """
+    tmp = path.parent / f".tmp-delete-{uuid.uuid4().hex}"
+    os.rename(path, tmp)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def read_json(path: Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)

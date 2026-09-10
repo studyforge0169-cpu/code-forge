@@ -813,3 +813,82 @@ def test_m59_history_openapi(api_client):
         keys.index(path)
     assert keys.index(path) < keys.index(
         "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}")
+
+
+# --------------------------------------------------------------------------- #
+# M61 — explicit verified checkpoint retention (HTTP surface)
+# --------------------------------------------------------------------------- #
+
+def test_m61_api_explicit_checkpoint_retention(api_client):
+    ds_id, tok_id, model_id = _prepare(api_client, "m61del")
+    r = api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=12, eval_every_steps=4,
+        keep_best=False, seed=1))
+    assert r.status_code == 200, r.text
+    CK = f"{MODELS}/{model_id}/checkpoints"
+    listing = api_client.get(CK).json()
+    assert len(listing) == 3
+    best = api_client.get(f"{CK}/best").json()["checkpoint"]["checkpoint_id"]
+    latest = api_client.get(f"{MODELS}/{model_id}").json()["latest_checkpoint"]
+    victim = next(c["checkpoint_id"] for c in listing
+                  if c["checkpoint_id"] not in (best, latest))
+    others = {c["checkpoint_id"]: c for c in listing
+              if c["checkpoint_id"] != victim}
+    hist_before = api_client.get(f"{CK}/best/history").json()
+    weights_before = _weights_sha(api_client, model_id)
+
+    # unknown model / unknown checkpoint -> the family's 404
+    assert api_client.delete(
+        f"{MODELS}/no-such-m61/checkpoints/{victim}").status_code == 404
+    assert api_client.delete(f"{CK}/no-such-ckpt").status_code == 404
+
+    # protected: the M52 best -> 409 with the ordered structured blockers
+    r = api_client.delete(f"{CK}/{best}")
+    assert r.status_code == 409, r.text
+    d = r.json()["detail"]
+    assert d["protected"] is True and d["checkpoint_id"] == best
+    assert d["blockers"][0]["reason"] == "best"
+
+    # protected: the published/latest -> 409
+    r = api_client.delete(f"{CK}/{latest}")
+    assert r.status_code == 409, r.text
+    assert "published" in [b["reason"] for b in r.json()["detail"]["blockers"]]
+
+    # rejections deleted nothing
+    assert len(api_client.get(CK).json()) == 3
+
+    # the safe explicit deletion -> 200 with the deterministic result
+    r = api_client.delete(f"{CK}/{victim}")
+    assert r.status_code == 200, r.text
+    res = r.json()
+    assert res == {"model_id": model_id, "checkpoint_id": victim,
+                   "files_removed": 2, "bytes_reclaimed": res["bytes_reclaimed"]}
+    assert res["bytes_reclaimed"] > 0
+
+    # gone: detail 404, listing shrinks, repeated deletion 404
+    assert api_client.get(f"{CK}/{victim}").status_code == 404
+    after = api_client.get(CK).json()
+    assert len(after) == 2
+    assert {c["checkpoint_id"]: c for c in after} == others  # verbatim
+    assert api_client.delete(f"{CK}/{victim}").status_code == 404
+
+    # published state, M52 and M59 stay coherent over the survivors
+    assert api_client.get(f"{MODELS}/{model_id}").json()[
+        "latest_checkpoint"] == latest
+    assert api_client.get(f"{CK}/best").json()["checkpoint"][
+        "checkpoint_id"] == best
+    hist_after = api_client.get(f"{CK}/best/history").json()
+    assert hist_after["candidate_count"] == 2
+    assert [e["checkpoint_id"] for e in hist_after["entries"]] == \
+        [e["checkpoint_id"] for e in hist_before["entries"]
+         if e["checkpoint_id"] != victim]
+    assert _weights_sha(api_client, model_id) == weights_before
+
+    # OpenAPI: NO new path (the DELETE rides the existing checkpoint
+    # detail path); the new operation + response schema are exposed
+    spec = api_client.get("/openapi.json").json()
+    assert len(spec["paths"]) == 85
+    path = "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}"
+    assert "delete" in spec["paths"][path]
+    assert "get" in spec["paths"][path]      # the existing detail stays
+    assert "CheckpointDeletionResult" in spec["components"]["schemas"]

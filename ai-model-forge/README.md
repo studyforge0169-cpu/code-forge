@@ -2094,6 +2094,63 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 61 — explicit VERIFIED checkpoint retention (`DELETE .../checkpoints/{id}`)
+- **concept**: the storage counterpart of the completed improvement
+  loop. Repeated training accumulates immutable content-addressed
+  checkpoints with no safe way to reclaim any of them (only whole-model
+  delete existed). M61 adds ONE explicit, request-only operation:
+  `DELETE /models/{id}/checkpoints/{checkpoint_id}` removes exactly
+  ONE checkpoint — never automatically, no background GC, no keep-N,
+  no age policy, no bulk mode
+- **the guard (fixed order)**: (1) scope through the authoritative
+  listing — unknown model/checkpoint, or a checkpoint whose manifest
+  is unreadable (the listing skips it), -> 404, nothing deleted;
+  (2) integrity verification through the EXISTING M3 verifier
+  (corrupt weights, missing weights -> 409: deletion never bypasses
+  integrity validation); (3) a LIVE reference-safety analysis over the
+  authoritative listings; (4) ONE atomic removal
+- **blocking references** (computed live via the SAME selectors and
+  the SAME read-only `..._for_checkpoint` filters the listing routes
+  use — no stored index, no second registry): the live M52 best; the
+  published `latest_checkpoint`; the manifest's stored
+  `best_checkpoint` weights reference; and every persisted checkpoint
+  id in the immutable EVIDENCE record families — workflow plans and
+  stage artifacts (M53/M55/M56/M57/M60 pins included), M4 evaluations,
+  M5 comparisons (either side), M6 gate decisions
+  (candidate/baseline/suggestion), M10 suite runs, M15 samples and M16
+  sample-quality measurements. Protected -> 409 with a deterministic
+  ordered blocker list (`best`, `published`, `manifest_reference`,
+  `workflow_reference`, `evaluation_reference`, `comparison_reference`,
+  `gate_reference`, `suite_run_reference`, `sample_reference`,
+  `sample_quality_reference`)
+- **deliberately NOT blocking (inspected + documented)**: pure lineage
+  metadata — a surviving checkpoint's `parent_checkpoint_id` and run
+  provenance (`initial`/`final`/`rolled_back_to`) — and the computed
+  views (M59 history, M8 dashboard). Lineage is informational history
+  the architecture explicitly tolerates losing (the dashboard emits a
+  diagnostic for a missing reference and keeps valid artifacts
+  visible); nothing resolves lineage to state; and blocking it would
+  protect EVERY checkpoint ever created, because M3 chains checkpoints
+  within each run (each checkpoint's parent is its predecessor, the
+  run's final is the provenance final) — retention would be dead code.
+  Appearing in M59 history protects nothing: after a deletion the
+  history recomputes naturally over the survivors
+- **atomicity**: the smallest reusable storage primitive
+  (`atomic_delete_dir`: one `os.rename` to a hidden `.tmp-delete-*`
+  sibling the listings already skip, then rmtree — the mirror of the
+  atomic writers). No observer can ever see a half-deleted checkpoint;
+  a crash can only leave a hidden residue, never a valid-looking
+  partial one. The checkpoint registry IS the directory listing, so
+  removal needs no manifest/pointer updates — the model manifest,
+  weights.pt and every record family stay untouched
+- **result**: a small deterministic response (`files_removed`,
+  `bytes_reclaimed`); unrelated checkpoints stay byte-identical; the
+  M52 best, the published state, M46 by-run listings and M59 history
+  stay coherent over the surviving registry
+- OpenAPI: NO new path — the DELETE rides the existing checkpoint
+  detail route; path count stays 85 (new operation +
+  `CheckpointDeletionResult` schema)
+
 ### Milestone 60 — declarative BEST-PUBLICATION stage (`publish`)
 - **concept**: the loop's missing ACCEPT step. A workflow/recipe PUBLISH
   stage makes ONE immutable checkpoint the model's published/live state:
@@ -2408,7 +2465,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 606 tests
+pytest                       # 613 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2917,7 +2974,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 606 tests across 20 suites
+  tests/               # 613 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

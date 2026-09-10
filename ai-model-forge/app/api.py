@@ -45,6 +45,7 @@ from .schemas import (
     SampleRecord,
     SampleStrategy,
     BestCheckpointHistory,
+    CheckpointDeletionResult,
     CheckpointSelection,
     RollbackRequest,
     TokenizerConfig,
@@ -858,6 +859,29 @@ def index() -> HTMLResponse:
         existing <code>POST /workflows/run</code>, recipe runs and
         the M51 preflight all resolve through the same path.</li>
 
+      <li><b>M61 explicit verified checkpoint retention</b> —
+        <code>DELETE /models/&#123;id&#125;/checkpoints/&#123;ckpt&#125;</code>
+        removes exactly ONE checkpoint, only after live proof that
+        nothing authoritative depends on it: the guard verifies
+        integrity through the existing M3 verifier (a corrupt
+        checkpoint is refused — deletion never bypasses integrity
+        validation), then scans the authoritative listings for
+        blocking references — the live M52 best, the published
+        <code>latest_checkpoint</code>, the manifest's stored
+        best-known weights reference, and every persisted checkpoint
+        id in workflow / evaluation / comparison / gate / suite-run /
+        sample / sample-quality records (via the same read-only
+        filters the listing routes use). Protected checkpoints are
+        refused with 409 and a deterministic ordered blocker list; a
+        safe one is removed ATOMICALLY (one rename the registry scans
+        never observe as partial) with a small deterministic result
+        (files removed, bytes reclaimed). No automatic deletion, no
+        keep-N, no age policy, no bulk mode — explicit requests only.
+        Pure lineage metadata (checkpoint parents, run provenance) and
+        the M59 history / M8 dashboard computed views protect nothing:
+        after any deletion they recompute naturally over the surviving
+        registry.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -910,6 +934,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best</code> — deterministic selection by MINIMUM persisted validation loss (read-only, criterion explicit, M52)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best/history</code> — chronological history of the best-checkpoint selection movements, final entry always the M52 answer (read-only, computed live, zero storage, M59)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/&#123;ckpt&#125;</code> — one checkpoint</li>
+      <li><code>DELETE {prefix}/models/&#123;id&#125;/checkpoints/&#123;ckpt&#125;</code> — explicit VERIFIED checkpoint retention: one checkpoint, only with zero blocking authoritative references (M52 best / published / parents / provenance / workflow+evaluation+comparison+gate+suite+sample references), atomic removal, ordered blockers on 409 (M61)</li>
       <li><code>POST  {prefix}/models/&#123;id&#125;/rollback</code> — verified restore of a checkpoint</li>
       <li><code>POST  {prefix}/evaluations/run</code> — read-only evaluation (current state or checkpoint)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/evaluations</code> — immutable evaluation history</li>
@@ -1369,6 +1394,50 @@ def get_checkpoint(model_id: str, checkpoint_id: str) -> dict[str, Any]:
         return _forge().get_checkpoint(model_id, checkpoint_id).model_dump(mode="json")
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.delete("/models/{model_id}/checkpoints/{checkpoint_id}",
+            response_model=CheckpointDeletionResult, tags=["training"])
+def delete_checkpoint(model_id: str, checkpoint_id: str) -> CheckpointDeletionResult:
+    """Explicit VERIFIED checkpoint retention (M61): delete exactly ONE
+    checkpoint — only after live proof that nothing authoritative
+    depends on it.
+
+    The guard runs in a fixed order: scope through the authoritative
+    listing (unknown model/checkpoint, or an unreadable manifest the
+    listing skips -> 404, nothing deleted); integrity verification
+    through the existing M3 verifier (corrupt/unreadable weights ->
+    409 — deletion never bypasses integrity validation); the live
+    reference-safety analysis (the M52 best, the published
+    ``latest_checkpoint``, the manifest's stored best-known reference,
+    and every persisted checkpoint id in workflow/evaluation/
+    comparison/gate/suite-run/sample/sample-quality records -> 409
+    with the ordered blocker list); then ONE atomic removal (never a
+    partial checkpoint). No automatic deletion, no keep-N, no age
+    policy, no bulk mode. The deterministic result reports the removed
+    files and reclaimed bytes; every surviving state and record stays
+    untouched.
+    """
+    try:
+        return _forge().delete_checkpoint(model_id, checkpoint_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # protection rejection: re-derive the ordered blocker list for a
+        # structured 409 detail (the engine re-checked safety internally,
+        # so the message alone is authoritative; the list is diagnostic)
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().checkpoint_blockers(model_id, checkpoint_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "model_id": model_id,
+                    "checkpoint_id": checkpoint_id, "protected": True,
+                    "blockers": blockers}) from exc
 
 
 @api.post("/models/{model_id}/rollback", response_model=ModelRecord, tags=["training"])

@@ -24,6 +24,8 @@ from .recipes import RecipeEngine
 from .sampling import SamplingEngine
 from .sample_quality import SampleQualityEngine
 from .schemas import (
+    CheckpointDeletionBlocker,
+    CheckpointDeletionResult,
     ComparisonRecord,
     ComparisonVerdict,
     EvalStateKind,
@@ -298,6 +300,238 @@ class ModelForge:
 
     def rollback_model(self, model_id: str, checkpoint_id: str):
         return self.training.rollback(model_id, checkpoint_id)
+
+    # ------------------------------------------------------------------ #
+    # Explicit verified checkpoint retention (M61): the facade is the one
+    # integration point where every record family's engine is visible, so
+    # the LIVE reference-safety analysis lives here — computed from the
+    # authoritative listings on every call, never stored, never a second
+    # registry.
+    # ------------------------------------------------------------------ #
+
+    #: canonical deterministic blocker order (the API's 409 detail and the
+    #: engine's rejection message list blockers in exactly this order)
+    CHECKPOINT_BLOCKER_ORDER = (
+        "best",                    # the live M52 selection
+        "published",               # model manifest latest_checkpoint
+        "manifest_reference",      # model manifest best_checkpoint (weights ref)
+        "workflow_reference",      # pinned/explicit ids in workflow records
+        "evaluation_reference",    # M4 evaluation records
+        "comparison_reference",    # M5 comparison records (either side)
+        "gate_reference",          # M6 decisions (candidate/baseline/suggestion)
+        "suite_run_reference",     # M10 suite-run records
+        "sample_reference",        # M15 samples generated from the checkpoint
+        "sample_quality_reference",  # M16 sample-quality measurements
+    )
+
+    @staticmethod
+    def _workflow_checkpoint_refs(record: WorkflowRecord) -> list[tuple[str, str]]:
+        """Every checkpoint id one immutable workflow record depends on
+        (M61): the pins and explicit ids in the recorded PLAN (M53 state
+        refs, M54/M55 resume, M56 evaluation, M57 baseline, M60 publish)
+        plus the checkpoint ids in the recorded stage ARTIFACTS (training
+        final checkpoints, evaluated states, publications). Returns
+        (checkpoint_id, where) pairs; deterministic in record order."""
+        refs: list[tuple[str, str]] = []
+
+        def add(cid, where):
+            if cid:
+                refs.append((cid, where))
+
+        for stage in record.plan.stages:
+            sid = stage.stage_id
+            if stage.training is not None:
+                add(stage.training.resume_from_checkpoint_id,
+                    f"plan.{sid}.resume")
+                add(stage.training.resolved_resume_checkpoint_id,
+                    f"plan.{sid}.resume(best)")
+            if stage.evaluation is not None:
+                add(stage.evaluation.config.checkpoint_id,
+                    f"plan.{sid}.evaluation")
+                add(stage.evaluation.resolved_checkpoint_id,
+                    f"plan.{sid}.evaluation(best)")
+            if stage.comparison is not None:
+                for name, ref in (("state_a", stage.comparison.state_a),
+                                  ("state_b", stage.comparison.state_b)):
+                    add(ref.checkpoint_id, f"plan.{sid}.{name}")
+                    add(ref.resolved_checkpoint_id, f"plan.{sid}.{name}(best)")
+            if stage.gate is not None:
+                if stage.gate.policy is not None:
+                    add(stage.gate.policy.baseline_checkpoint_id,
+                        f"plan.{sid}.baseline")
+                    add(stage.gate.policy.resolved_baseline_checkpoint_id,
+                        f"plan.{sid}.baseline(best)")
+                add(stage.gate.candidate.checkpoint_id,
+                    f"plan.{sid}.candidate")
+                add(stage.gate.candidate.resolved_checkpoint_id,
+                    f"plan.{sid}.candidate(best)")
+            if stage.suite_run is not None:
+                add(stage.suite_run.state.checkpoint_id,
+                    f"plan.{sid}.suite_state")
+                add(stage.suite_run.state.resolved_checkpoint_id,
+                    f"plan.{sid}.suite_state(best)")
+            if stage.publish is not None:
+                add(stage.publish.checkpoint_id, f"plan.{sid}.publish")
+                add(stage.publish.resolved_checkpoint_id,
+                    f"plan.{sid}.publish(best)")
+        for sr in record.stages:
+            if sr.artifact is not None:
+                add(sr.artifact.checkpoint_id,
+                    f"artifact.{sr.stage_id}")
+        return refs
+
+    def checkpoint_blockers(self, model_id: str,
+                            ckpt_id: str) -> list[CheckpointDeletionBlocker]:
+        """LIVE reference-safety analysis for ONE checkpoint (M61): every
+        authoritative state or immutable EVIDENCE record that would be
+        invalidated by deleting it. Computed from the authoritative
+        listings on every call — the SAME selectors and the SAME
+        ``..._for_checkpoint`` filters the read APIs use (one source of
+        truth, no stored index, no second registry). Blocking references
+        (documented in the M61 report):
+
+        * ``best`` — the live M52 selection (never deletable);
+        * ``published`` — the model manifest's ``latest_checkpoint``
+          (the live/published state);
+        * ``manifest_reference`` — the manifest's ``best_checkpoint``
+          stored best-known weights reference;
+        * ``workflow_reference`` — pins/explicit ids in immutable M7
+          workflow records (plans and stage artifacts — the audit
+          trail of what executed);
+        * ``evaluation_reference`` / ``comparison_reference`` /
+          ``gate_reference`` / ``suite_run_reference`` /
+          ``sample_reference`` / ``sample_quality_reference`` — the
+          persisted checkpoint ids in the M4/M5/M6/M10/M15/M16
+          EVIDENCE record families (which state was measured; via the
+          existing read-only ``..._for_checkpoint`` filters).
+
+        Deliberately NOT blocking (inspected and documented): pure
+        LINEAGE metadata — a surviving checkpoint's
+        ``parent_checkpoint_id`` and the model manifest's run
+        provenance (``initial``/``final``/``rolled_back_to``) — because
+        the architecture treats them as informational history, not
+        resolvable dependencies: nothing loads state through them and
+        the M8 reference graph explicitly tolerates a missing target
+        (a DashboardDiagnostic, valid artifacts stay visible). They
+        also CANNOT block without making retention dead code: M3
+        chains checkpoints within every run (each checkpoint's parent
+        is its predecessor; the run's final is the provenance final),
+        so blocking lineage would protect every checkpoint ever
+        created. Likewise the M59 best-history and the M8 dashboard
+        are computed views — appearing in them protects nothing.
+        Unknown model or a checkpoint not in the authoritative listing
+        (including an unreadable manifest, which the listing skips) ->
+        FileNotFoundError (404 at the API); deletion is refused, never
+        guessed. Read-only, never writes."""
+        listing = self.training.list_checkpoints(model_id)
+        if ckpt_id not in {c.checkpoint_id for c in listing}:
+            raise FileNotFoundError(
+                f"checkpoint '{ckpt_id}' not found for model '{model_id}'")
+        found: list[tuple[str, str]] = []
+
+        def add(reason: str, detail: str) -> None:
+            found.append((reason, detail))
+
+        # best (the ONE selector, computed live)
+        try:
+            if self.training.select_best_checkpoint(
+                    model_id).checkpoint.checkpoint_id == ckpt_id:
+                add("best", "the live M52 best-checkpoint selection")
+        except FileNotFoundError:
+            pass
+        model = self.storage.load_record(model_id)
+        if model.latest_checkpoint == ckpt_id:
+            add("published", "model manifest latest_checkpoint "
+                             "(the published/live state)")
+        if model.best_checkpoint == ckpt_id:
+            add("manifest_reference", "model manifest best_checkpoint "
+                                      "(stored best-known weights reference)")
+        for record in self.workflows.list_workflows(model_id):
+            for cid, where in self._workflow_checkpoint_refs(record):
+                if cid == ckpt_id:
+                    add("workflow_reference",
+                        f"{record.workflow_id} {where}")
+        evals = self.evaluation.list_evaluations_for_checkpoint(
+            model_id, ckpt_id)
+        if evals:
+            add("evaluation_reference",
+                "evaluations: " + ", ".join(e.eval_id for e in evals))
+        comps = self.comparison.list_comparisons_for_checkpoint(
+            model_id, ckpt_id)
+        if comps:
+            add("comparison_reference",
+                "comparisons: " + ", ".join(c.comparison_id for c in comps))
+        gate_refs: list[str] = []
+        for g in self.gates.list_decisions(model_id):
+            for side_name, side in (("candidate", g.candidate),
+                                    ("baseline", g.baseline)):
+                if (side is not None
+                        and side.state_kind == EvalStateKind.CHECKPOINT
+                        and side.checkpoint_id == ckpt_id):
+                    gate_refs.append(f"{g.decision_id}.{side_name}")
+            if g.suggested_checkpoint_id == ckpt_id:
+                gate_refs.append(f"{g.decision_id}.suggested_checkpoint_id")
+        if gate_refs:
+            add("gate_reference", "gates: " + ", ".join(gate_refs))
+        suites = self.suite_runs.list_suite_runs_for_checkpoint(
+            model_id, ckpt_id)
+        if suites:
+            add("suite_run_reference",
+                "suite runs: " + ", ".join(s.suite_run_id for s in suites))
+        samples = self.samples.list_samples_for_checkpoint(model_id, ckpt_id)
+        if samples:
+            add("sample_reference",
+                "samples: " + ", ".join(s.sample_id for s in samples))
+        sq = self.sample_quality.list_sample_evaluations_for_checkpoint(
+            model_id, ckpt_id)
+        if sq:
+            add("sample_quality_reference",
+                "sample evaluations: " + ", ".join(s.evaluation_id for s in sq))
+        order = {r: i for i, r in enumerate(self.CHECKPOINT_BLOCKER_ORDER)}
+        found.sort(key=lambda item: (order[item[0]], item[1]))
+        return [CheckpointDeletionBlocker(reason=r, detail=d)
+                for r, d in found]
+
+    def delete_checkpoint(self, model_id: str,
+                          ckpt_id: str) -> CheckpointDeletionResult:
+        """Explicit VERIFIED checkpoint retention (M61): remove ONE
+        checkpoint — only after proving, live, that nothing
+        authoritative depends on it. The full guard, in order:
+        (1) model/checkpoint scope through the authoritative listing
+        (unknown model, or a checkpoint the listing cannot see —
+        including an unreadable manifest, which it skips — ->
+        FileNotFoundError, nothing deleted);
+        (2) INTEGRITY VERIFICATION through the existing M3 verifier
+        (``verify_checkpoint``: weights load + content-hash check) — a
+        corrupt checkpoint is REFUSED, so deletion can never bypass
+        integrity validation;
+        (3) the LIVE reference-safety analysis
+        (``checkpoint_blockers``) — the M52 best, the published
+        ``latest_checkpoint`` and every referenced checkpoint are
+        protected deterministically -> ValueError listing the blockers;
+        (4) ATOMIC removal (one ``os.rename`` to a hidden sibling the
+        listing skips, then rmtree) — no partial checkpoint can ever be
+        observed, and no manifest/pointer needs updating because the
+        checkpoint registry IS the listing.
+        No automatic deletion, no keep-N, no age policy, no bulk mode —
+        exactly the one explicitly requested checkpoint. Never creates
+        a replacement checkpoint; never touches other checkpoints, the
+        published state, or any record family."""
+        listing = self.training.list_checkpoints(model_id)
+        if ckpt_id not in {c.checkpoint_id for c in listing}:
+            raise FileNotFoundError(
+                f"checkpoint '{ckpt_id}' not found for model '{model_id}'")
+        self.training.verify_checkpoint(model_id, ckpt_id)  # corrupt -> refuse
+        blockers = self.checkpoint_blockers(model_id, ckpt_id)
+        if blockers:
+            summary = "; ".join(f"{b.reason}: {b.detail}" for b in blockers)
+            raise ValueError(
+                f"checkpoint '{ckpt_id}' of model '{model_id}' is "
+                f"protected and cannot be deleted — {summary}")
+        files, nbytes = self.training.remove_checkpoint(model_id, ckpt_id)
+        return CheckpointDeletionResult(
+            model_id=model_id, checkpoint_id=ckpt_id,
+            files_removed=files, bytes_reclaimed=nbytes)
 
     # ------------------------------------------------------------------ #
     # Evaluation (thin delegation to the evaluation engine; read-only)

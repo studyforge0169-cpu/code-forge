@@ -713,6 +713,37 @@ class RollbackRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class CheckpointDeletionBlocker(BaseModel):
+    """Why ONE checkpoint may not be deleted (M61 reference safety).
+
+    ``reason`` is a stable category from the canonical blocker order
+    (best / published / manifest_reference / workflow_reference /
+    evaluation_reference / comparison_reference / gate_reference /
+    suite_run_reference / sample_reference /
+    sample_quality_reference); ``detail`` names the protecting
+    artifacts deterministically (ids, ordered). Computed LIVE from the
+    authoritative listings on every call — never stored, never a
+    second registry. Pure lineage metadata (checkpoint parents, run
+    provenance) and computed views (M59 history, M8 dashboard) are
+    deliberately NOT blockers — see the M61 report.
+    """
+
+    reason: str
+    detail: str
+
+
+class CheckpointDeletionResult(BaseModel):
+    """Deterministic result of ONE explicit verified checkpoint
+    deletion (M61): what was removed and how much storage it held.
+    The checkpoint's artifact set (manifest + weights) is gone
+    atomically; every surviving state and record is untouched."""
+
+    model_id: str
+    checkpoint_id: str
+    files_removed: int
+    bytes_reclaimed: int
+
+
 # --------------------------------------------------------------------------- #
 # Evaluation (read-only measurement of an existing model state)
 # --------------------------------------------------------------------------- #
