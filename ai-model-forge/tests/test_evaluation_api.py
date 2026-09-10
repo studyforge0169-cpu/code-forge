@@ -366,7 +366,7 @@ def test_m24_api_404s_isolation_and_prior_surfaces(api_client):
     # + 1 (M48 evaluations by-seed)
     # + 1 (M49 comparisons by-seed)
     # + 1 (M50 suite-runs by-reused) = 82
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
 
 
 # =========================================================================== #
@@ -473,7 +473,7 @@ def test_m28_api_404s_scoping_regressions_openapi(api_client):
     path = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
             "{dataset_id}")
     generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
@@ -600,7 +600,7 @@ def test_m30_api_404s_scoping_regressions_openapi(api_client):
     generic = "/api/v1/models/{model_id}/evaluations/{eval_id}"
     m28 = ("/api/v1/models/{model_id}/evaluations/by-dataset/"
            "{dataset_id}")
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["evaluation"]
@@ -768,7 +768,7 @@ def test_m36_api_404_422_isolation_regressions_openapi(api_client):
     # + 1 (M48 evaluations by-seed)
     # + 1 (M49 comparisons by-seed)
     # + 1 (M50 suite-runs by-reused) = 82
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     path = "/api/v1/models/{model_id}/evaluations/by-split/{split}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -914,7 +914,7 @@ def test_m38_api_by_state_kind_404_422s_isolation_regressions_openapi(
     # evaluation, EvaluationRecord items, state_kind $ref
     # EvalStateKind; route order by-split < by-state-kind < generic
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     path = ("/api/v1/models/{model_id}/evaluations/by-state-kind/"
             "{state_kind}")
     keys = list(spec["paths"])
@@ -1060,7 +1060,7 @@ def test_m47_api_errors_isolation_regressions_openapi(api_client):
     # + 1 (M34) + 1 (M35) + 1 (M36) + 1 (M37) + 1 (M38) + 1 (M39)
     # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
     # + 1 (M45) + 1 (M46) + 1 (M47 evaluations by-truncated) = 79
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     path = "/api/v1/models/{model_id}/evaluations/by-truncated/{truncated}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -1208,7 +1208,7 @@ def test_m48_api_errors_isolation_regressions_openapi(api_client):
     # + 1 (M34) + 1 (M35) + 1 (M36) + 1 (M37) + 1 (M38) + 1 (M39)
     # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
     # + 1 (M45) + 1 (M46) + 1 (M47) + 1 (M48 evaluations by-seed) = 80
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     path = "/api/v1/models/{model_id}/evaluations/by-seed/{seed}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1

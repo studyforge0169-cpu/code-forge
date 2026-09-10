@@ -744,6 +744,50 @@ class CheckpointDeletionResult(BaseModel):
     bytes_reclaimed: int
 
 
+class CheckpointRetentionEntry(BaseModel):
+    """ONE checkpoint's retention state in the M62 read-only overview.
+
+    Every field is authoritative persisted checkpoint metadata plus the
+    EXACT M61 analysis: ``blockers`` is the SAME ordered list
+    ``checkpoint_blockers`` produces (and the DELETE guard refuses on),
+    ``integrity_verified`` is the SAME M3 verifier outcome the delete
+    guard checks before blockers, and ``deletable`` is therefore exactly
+    what an immediate M61 ``DELETE`` would decide (True -> 200; False ->
+    409). ``files``/``size_bytes`` are the SAME measurement
+    ``remove_checkpoint`` reports on deletion. Computed live — never
+    stored, never cached."""
+
+    checkpoint_id: str
+    run_id: str
+    step: int
+    created_at: datetime
+    validation_loss: float                  # persisted (authoritative)
+    files: int                              # artifact-set file count
+    size_bytes: int                         # artifact-set byte size
+    integrity_verified: bool                # the M3 verifier's outcome
+    deletable: bool                         # M61's exact decision
+    blockers: list[CheckpointDeletionBlocker] = Field(default_factory=list)
+
+
+class CheckpointRetentionOverview(BaseModel):
+    """Read-only live-computed retention overview of ONE model's
+    checkpoint registry (M62): per-checkpoint deletability + ordered
+    blockers (the ONE M61 analysis) plus deterministic aggregates.
+    ``reclaimable_checkpoint_bytes`` counts ONLY checkpoint artifact
+    sets currently reported deletable — never model weights, tokenizer,
+    dataset or record storage. ``protected_checkpoints`` counts every
+    non-deletable checkpoint (referenced OR integrity-failed). Zero
+    storage, zero mutation, byte-identical over unchanged state."""
+
+    model_id: str
+    total_checkpoints: int
+    deletable_checkpoints: int
+    protected_checkpoints: int
+    total_checkpoint_bytes: int
+    reclaimable_checkpoint_bytes: int
+    checkpoints: list[CheckpointRetentionEntry] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Evaluation (read-only measurement of an existing model state)
 # --------------------------------------------------------------------------- #

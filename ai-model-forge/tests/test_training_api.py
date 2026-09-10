@@ -330,7 +330,7 @@ def test_m46_by_run_errors_empty_isolation_regressions_openapi(api_client):
     # + 1 (M34) + 1 (M35) + 1 (M36) + 1 (M37) + 1 (M38) + 1 (M39)
     # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
     # + 1 (M45) + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     path = "/api/v1/models/{model_id}/checkpoints/by-run/{run_id}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -484,7 +484,7 @@ def test_m52_best_checkpoint_tie_corruption_openapi(api_client):
     # 78 (M46 cumulative) + 1 (M47) + 1 (M48) + 1 (M49) + 1 (M50)
     # + 1 (M51 recipe plan) + 1 (M52 checkpoints best)
     # + 1 (M59 checkpoints best history) = 85
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     path = "/api/v1/models/{model_id}/checkpoints/best"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -569,7 +569,7 @@ def test_m54_api_resume_point_errors_and_openapi(api_client):
     # OpenAPI: the M54 field is part of the existing TrainingConfig
     # schema (path count moved 84 -> 85 with the M59 history route)
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     assert "resume_from_checkpoint_id" in spec["components"]["schemas"][
         "TrainingConfig"]["properties"]
 
@@ -791,7 +791,7 @@ def test_m59_history_openapi(api_client):
 
     spec = api_client.get("/openapi.json").json()
     # 84 (M52 cumulative) + 1 (M59 best history) = 85
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     keys = list(spec["paths"])
     assert keys.count(path) == 1
     item = spec["paths"][path]
@@ -887,8 +887,122 @@ def test_m61_api_explicit_checkpoint_retention(api_client):
     # OpenAPI: NO new path (the DELETE rides the existing checkpoint
     # detail path); the new operation + response schema are exposed
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 85
+    assert len(spec["paths"]) == 86
     path = "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}"
     assert "delete" in spec["paths"][path]
     assert "get" in spec["paths"][path]      # the existing detail stays
     assert "CheckpointDeletionResult" in spec["components"]["schemas"]
+
+
+# --------------------------------------------------------------------------- #
+# M62 — read-only retention overview (HTTP surface)
+# --------------------------------------------------------------------------- #
+
+def test_m62_api_retention_overview(api_client):
+    ds_id, tok_id, model_id = _prepare(api_client, "m62ov")
+    r = api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=12, eval_every_steps=4,
+        keep_best=False, seed=1))
+    assert r.status_code == 200, r.text
+    CK = f"{MODELS}/{model_id}/checkpoints"
+    listing = api_client.get(CK).json()
+    assert len(listing) == 3
+    best = api_client.get(f"{CK}/best").json()["checkpoint"]["checkpoint_id"]
+    latest = api_client.get(f"{MODELS}/{model_id}").json()["latest_checkpoint"]
+    referenced = latest
+    # one evidence reference through the public M4 route
+    r = api_client.post("/api/v1/evaluations/run", json={
+        "model_id": model_id, "dataset_id": ds_id, "tokenizer_id": tok_id,
+        "split": "validation", "batch_size": 8, "max_seq_len": 32,
+        "seed": 2, "checkpoint_id": referenced})
+    assert r.status_code == 200, r.text
+
+    RET = f"{CK}/retention"
+    r = api_client.get(RET)
+    assert r.status_code == 200, r.text
+    ov = r.json()
+    overview_body = r.content            # for the determinism check
+    assert ov["model_id"] == model_id
+    assert ov["total_checkpoints"] == 3
+    assert [e["checkpoint_id"] for e in ov["checkpoints"]] == \
+        [c["checkpoint_id"] for c in listing]     # canonical order
+    by_id = {e["checkpoint_id"]: e for e in ov["checkpoints"]}
+    protected = {cid for cid, e in by_id.items() if not e["deletable"]}
+    assert protected == {best, latest, referenced}
+    assert ov["deletable_checkpoints"] == 3 - len(protected)
+    assert ov["protected_checkpoints"] == len(protected)
+    assert ov["total_checkpoint_bytes"] == sum(e["size_bytes"]
+                                               for e in ov["checkpoints"])
+    assert ov["reclaimable_checkpoint_bytes"] == sum(
+        e["size_bytes"] for e in ov["checkpoints"] if e["deletable"])
+    for e in ov["checkpoints"]:
+        assert set(e) == {"checkpoint_id", "run_id", "step", "created_at",
+                          "validation_loss", "files", "size_bytes",
+                          "integrity_verified", "deletable", "blockers"}
+        assert e["files"] == 2 and e["integrity_verified"] is True
+
+    # M52 / M60 consistency through the public routes
+    best_entries = [e for e in ov["checkpoints"]
+                    if "best" in [b["reason"] for b in e["blockers"]]]
+    assert [e["checkpoint_id"] for e in best_entries] == [best]
+    pub_entries = [e for e in ov["checkpoints"]
+                   if "published" in [b["reason"] for b in e["blockers"]]]
+    assert [e["checkpoint_id"] for e in pub_entries] == [latest]
+
+    # THE headline parity: M61's 409 blocker list is EXACTLY the
+    # overview's blocker list for the same checkpoint (the user never
+    # sees "deletable" here and then a blocker there)
+    r = api_client.delete(f"{CK}/{referenced}")
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["blockers"] == by_id[referenced]["blockers"]
+    r = api_client.delete(f"{CK}/{best}")
+    assert r.status_code == 409
+    assert r.json()["detail"]["blockers"] == by_id[best]["blockers"]
+
+    # determinism over HTTP: byte-equal bodies on repeat
+    r2 = api_client.get(RET)
+    assert r2.status_code == 200 and r2.content == overview_body
+
+    # read-only: the overview itself never mutates storage (rejections
+    # above changed nothing; count still 3)
+    assert len(api_client.get(CK).json()) == 3
+
+    # a deletable entry really deletes with exactly the reported stats
+    victim = next(e["checkpoint_id"] for e in ov["checkpoints"]
+                  if e["deletable"])
+    entry = by_id[victim]
+    r = api_client.delete(f"{CK}/{victim}")
+    assert r.status_code == 200, r.text
+    res = r.json()
+    assert res["checkpoint_id"] == victim
+    assert res["files_removed"] == entry["files"]
+    assert res["bytes_reclaimed"] == entry["size_bytes"]
+    ov_after = api_client.get(RET).json()
+    assert ov_after["total_checkpoints"] == 2
+    assert victim not in {e["checkpoint_id"] for e in ov_after["checkpoints"]}
+
+    # unknown model 404; empty model 200 with zeroed totals
+    assert api_client.get(f"{MODELS}/no-such-m62/checkpoints/retention"
+                          ).status_code == 404
+    ds2, tok2, mid2 = _prepare(api_client, "m62empty")
+    r = api_client.get(f"{MODELS}/{mid2}/checkpoints/retention")
+    assert r.status_code == 200, r.text
+    empty = r.json()
+    assert empty["total_checkpoints"] == 0 and empty["checkpoints"] == []
+    assert empty["deletable_checkpoints"] == 0
+    assert empty["protected_checkpoints"] == 0
+    assert empty["total_checkpoint_bytes"] == 0
+    assert empty["reclaimable_checkpoint_bytes"] == 0
+
+    # OpenAPI: exactly one new path (85 -> 86), response schemas exposed
+    spec = api_client.get("/openapi.json").json()
+    assert len(spec["paths"]) == 86
+    RET_PATH = "/api/v1/models/{model_id}/checkpoints/retention"
+    assert set(spec["paths"][RET_PATH].keys()) == {"get"}
+    assert "CheckpointRetentionOverview" in spec["components"]["schemas"]
+    assert "CheckpointRetentionEntry" in spec["components"]["schemas"]
+    # the route is declared before the generic {checkpoint_id} capture
+    keys = list(spec["paths"].keys())
+    assert keys.index(RET_PATH) < keys.index(
+        "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}")

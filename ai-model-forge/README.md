@@ -2094,6 +2094,43 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 62 — read-only RETENTION OVERVIEW
+  (`GET /models/{model_id}/checkpoints/retention`)
+- **concept**: visibility before deletion. M61 made checkpoint retention
+  safe but blind — the only way to learn what is reclaimable, or what
+  protects a given checkpoint, was to attempt a deletion and read the
+  409. M62 adds ONE read-only, model-scoped, live-computed overview:
+  for every checkpoint in the authoritative M3 listing (canonical
+  (step, created_at) order) the persisted identity (checkpoint id,
+  run, step, created_at, validation_loss), the artifact-set size, the
+  M3 integrity-verification outcome, `deletable` — EXACTLY what an
+  immediate M61 `DELETE` would decide — and the SAME ordered blockers
+  the M61 409 reports
+- **one analysis**: the overview consumes the ONE M61 machinery — the
+  same `checkpoint_blockers` (never a second scanner), the same M3
+  verifier (an integrity-failed checkpoint is never reported
+  deletable), and the same artifact-set measurement the removal
+  result reports. The invariant, tested in both directions: a user
+  never sees `deletable` in M62 and then receives a blocker from M61
+- **aggregates**: deterministic sums over the entries — total /
+  deletable / protected counts and total / reclaimable checkpoint
+  bytes. `reclaimable` counts ONLY currently-deletable checkpoint
+  artifact sets (never model weights, tokenizer, dataset or record
+  storage); `protected` counts every non-deletable checkpoint
+  (referenced OR integrity-failed)
+- **semantics**: unknown model -> the family's 404; a valid model
+  with no checkpoints -> an EMPTY overview with zeroed totals (the
+  collection convention); an unreadable manifest is listing-invisible
+  (the established M61 corruption semantics). Read-only: zero
+  storage, zero mutation, byte-identical over unchanged state; the
+  view recomputes live through rollbacks, new references and
+  deletions (no cache, no pointer, no policy)
+- **visibility only**: it deletes nothing, retains nothing
+  automatically, runs no cleanup and persists no policy — a user
+  inspects the overview and then explicitly invokes M61 deletion
+- OpenAPI: path count 85 -> 86 (exactly this one new read-only
+  route, declared before the generic `{checkpoint_id}` capture)
+
 ### Milestone 61 — explicit VERIFIED checkpoint retention (`DELETE .../checkpoints/{id}`)
 - **concept**: the storage counterpart of the completed improvement
   loop. Repeated training accumulates immutable content-addressed
@@ -2465,7 +2502,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 613 tests
+pytest                       # 617 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2974,7 +3011,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 613 tests across 20 suites
+  tests/               # 617 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

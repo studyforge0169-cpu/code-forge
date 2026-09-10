@@ -26,6 +26,8 @@ from .sample_quality import SampleQualityEngine
 from .schemas import (
     CheckpointDeletionBlocker,
     CheckpointDeletionResult,
+    CheckpointRetentionEntry,
+    CheckpointRetentionOverview,
     ComparisonRecord,
     ComparisonVerdict,
     EvalStateKind,
@@ -532,6 +534,62 @@ class ModelForge:
         return CheckpointDeletionResult(
             model_id=model_id, checkpoint_id=ckpt_id,
             files_removed=files, bytes_reclaimed=nbytes)
+
+    def checkpoint_retention_overview(self, model_id: str
+                                      ) -> CheckpointRetentionOverview:
+        """Read-only live-computed retention overview of ONE model's
+        checkpoint registry (M62): for every checkpoint in the
+        authoritative M3 listing (canonical (step, created_at) order)
+        the EXACT M61 decision — ``deletable`` is True iff an immediate
+        M61 ``delete_checkpoint`` would succeed, i.e. the SAME M3
+        integrity verification passes AND the SAME live blocker
+        analysis (``checkpoint_blockers`` — the ONE analysis, never a
+        second scanner) returns nothing — plus the persisted identity
+        (run/step/created_at/validation_loss) and the SAME artifact-set
+        measurement the removal result reports. Aggregates are
+        deterministic sums over the entries; ``reclaimable`` counts
+        ONLY currently-deletable checkpoint artifact sets (never model
+        weights, tokenizer, dataset or record storage); ``protected``
+        counts every non-deletable checkpoint (referenced OR
+        integrity-failed). Zero storage, zero mutation, byte-identical
+        over unchanged state; unknown model -> FileNotFoundError (404
+        at the API); a valid model with no checkpoints -> an EMPTY
+        overview with zeroed totals (the collection convention). A
+        checkpoint whose manifest is unreadable is listing-invisible
+        and therefore never appears (the established M61 corruption
+        semantics)."""
+        listing = self.training.list_checkpoints(model_id)
+        entries: list[CheckpointRetentionEntry] = []
+        for c in listing:
+            blockers = self.checkpoint_blockers(model_id, c.checkpoint_id)
+            try:
+                self.training.verify_checkpoint(model_id, c.checkpoint_id)
+                integrity_verified = True
+            except (RuntimeError, FileNotFoundError):
+                integrity_verified = False
+            files, nbytes = self.training.checkpoint_artifact_stats(
+                model_id, c.checkpoint_id)
+            entries.append(CheckpointRetentionEntry(
+                checkpoint_id=c.checkpoint_id,
+                run_id=c.run_id,
+                step=c.step,
+                created_at=c.created_at,
+                validation_loss=c.validation_loss,
+                files=files,
+                size_bytes=nbytes,
+                integrity_verified=integrity_verified,
+                deletable=integrity_verified and not blockers,
+                blockers=blockers))
+        deletable = [e for e in entries if e.deletable]
+        return CheckpointRetentionOverview(
+            model_id=model_id,
+            total_checkpoints=len(entries),
+            deletable_checkpoints=len(deletable),
+            protected_checkpoints=len(entries) - len(deletable),
+            total_checkpoint_bytes=sum(e.size_bytes for e in entries),
+            reclaimable_checkpoint_bytes=sum(e.size_bytes
+                                             for e in deletable),
+            checkpoints=entries)
 
     # ------------------------------------------------------------------ #
     # Evaluation (thin delegation to the evaluation engine; read-only)

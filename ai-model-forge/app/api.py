@@ -46,6 +46,7 @@ from .schemas import (
     SampleStrategy,
     BestCheckpointHistory,
     CheckpointDeletionResult,
+    CheckpointRetentionOverview,
     CheckpointSelection,
     RollbackRequest,
     TokenizerConfig,
@@ -882,6 +883,26 @@ def index() -> HTMLResponse:
         after any deletion they recompute naturally over the surviving
         registry.</li>
 
+      <li><b>M62 read-only retention overview</b> —
+        <code>GET /models/&#123;id&#125;/checkpoints/retention</code>
+        makes the M61 retention state visible BEFORE any deletion
+        attempt: for every checkpoint in the authoritative listing
+        (canonical (step, created_at) order) the persisted identity,
+        the artifact-set size, the M3 integrity-verification outcome,
+        <code>deletable</code> — EXACTLY what an immediate M61 DELETE
+        would decide (the SAME verifier + the SAME ONE blocker
+        analysis; never "deletable" here then a blocker there) — and
+        the SAME ordered blockers the M61 409 reports, plus
+        deterministic aggregates (total / deletable / protected
+        counts; total / reclaimable checkpoint bytes — reclaimable
+        counts only currently-deletable checkpoint artifact sets,
+        never model weights or record storage). Visibility only: it
+        deletes nothing, retains nothing automatically, runs no
+        cleanup and persists no policy — a user inspects the overview
+        and then explicitly invokes M61 deletion. Computed live on
+        every call: zero storage, zero mutation, byte-identical over
+        unchanged state.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -933,6 +954,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/by-run/&#123;run&#125;</code> — checkpoints of one training run (provenance-validated, M46)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best</code> — deterministic selection by MINIMUM persisted validation loss (read-only, criterion explicit, M52)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best/history</code> — chronological history of the best-checkpoint selection movements, final entry always the M52 answer (read-only, computed live, zero storage, M59)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/retention</code> — read-only retention overview: per-checkpoint deletability + ordered blockers (the exact M61 analysis) and reclaimable totals (live-computed, zero storage, M62)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/&#123;ckpt&#125;</code> — one checkpoint</li>
       <li><code>DELETE {prefix}/models/&#123;id&#125;/checkpoints/&#123;ckpt&#125;</code> — explicit VERIFIED checkpoint retention: one checkpoint, only with zero blocking authoritative references (M52 best / published / parents / provenance / workflow+evaluation+comparison+gate+suite+sample references), atomic removal, ordered blockers on 409 (M61)</li>
       <li><code>POST  {prefix}/models/&#123;id&#125;/rollback</code> — verified restore of a checkpoint</li>
@@ -1383,6 +1405,38 @@ def best_checkpoint_history(model_id: str) -> BestCheckpointHistory:
     """
     try:
         return _forge().best_checkpoint_history(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/checkpoints/retention",
+         response_model=CheckpointRetentionOverview, tags=["training"])
+def checkpoint_retention_overview(model_id: str) -> CheckpointRetentionOverview:
+    """Read-only retention overview of ONE model's checkpoint registry
+    (M62, live-computed view — visibility only).
+
+    For every checkpoint in the authoritative M3 listing (canonical
+    (step, created_at) order): the persisted identity (checkpoint id,
+    run, step, created_at, validation_loss), the artifact-set size, the
+    M3 integrity-verification outcome, ``deletable`` — EXACTLY what an
+    immediate M61 DELETE would decide (the SAME verifier and the SAME
+    ONE blocker analysis; a user never sees "deletable" here and then
+    receives a blocker there) — and the SAME ordered blockers the M61
+    409 reports. Plus deterministic aggregates: total / deletable /
+    protected counts and total / reclaimable checkpoint bytes
+    (reclaimable counts ONLY currently-deletable checkpoint artifact
+    sets — never model weights, tokenizer, dataset or record storage).
+    The overview deletes nothing, retains nothing automatically, runs
+    no cleanup and persists no policy — a user inspects it and then
+    explicitly invokes M61 deletion. Computed live on every call:
+    zero storage, zero mutation, byte-identical over unchanged state.
+    Unknown model -> 404; a valid model with no checkpoints -> an
+    EMPTY overview with zeroed totals. Declared before the generic
+    {checkpoint_id} detail route so "retention" can never be captured
+    as a checkpoint id.
+    """
+    try:
+        return _forge().checkpoint_retention_overview(model_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

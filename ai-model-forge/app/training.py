@@ -811,6 +811,17 @@ class TrainingEngine:
         state = self.verify_checkpoint(model_id, ckpt_id)
         self.storage.write_weights(model_id, state)
 
+    def checkpoint_artifact_stats(self, model_id: str,
+                                  ckpt_id: str) -> tuple[int, int]:
+        """(file count, byte size) of ONE checkpoint's artifact set —
+        the ONE measurement the M61 removal result reports and the M62
+        retention overview exposes (never a second size definition).
+        Read-only: walks the checkpoint directory exactly as
+        ``remove_checkpoint`` measures it before removing."""
+        ckpt_dir = self._ckpt_dir(model_id, ckpt_id)
+        files = sorted(p for p in ckpt_dir.rglob("*") if p.is_file())
+        return len(files), sum(p.stat().st_size for p in files)
+
     def remove_checkpoint(self, model_id: str, ckpt_id: str) -> tuple[int, int]:
         """Remove ONE checkpoint's artifact set ATOMICALLY (M61).
 
@@ -829,13 +840,11 @@ class TrainingEngine:
         touches the model manifest, other checkpoints, weights.pt or
         any record family; the checkpoint registry IS the directory
         listing, so the removal itself needs no pointer updates."""
-        ckpt_dir = self._ckpt_dir(model_id, ckpt_id)
-        files = sorted(p for p in ckpt_dir.rglob("*") if p.is_file())
-        nbytes = sum(p.stat().st_size for p in files)
-        atomic_delete_dir(ckpt_dir)
+        files, nbytes = self.checkpoint_artifact_stats(model_id, ckpt_id)
+        atomic_delete_dir(self._ckpt_dir(model_id, ckpt_id))
         log.info("deleted checkpoint %s of model %s (%d files, %d bytes)",
-                 ckpt_id, model_id, len(files), nbytes)
-        return len(files), nbytes
+                 ckpt_id, model_id, files, nbytes)
+        return files, nbytes
 
     # ------------------------------------------------------------------ #
 

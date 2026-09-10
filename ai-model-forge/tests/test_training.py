@@ -1067,3 +1067,317 @@ def test_m61_corruption_malformed_missing(env):
         env.forge.checkpoint_blockers(other, best)
     with pytest.raises(FileNotFoundError):
         env.forge.delete_checkpoint(other, "any")    # never trained
+
+
+# --------------------------------------------------------------------------- #
+# M62 — read-only retention overview
+# --------------------------------------------------------------------------- #
+
+def test_m62_overview_basics_order_totals_determinism(env):
+    # the read-only view: canonical ordering, persisted identity parity,
+    # exact totals arithmetic, determinism, zero writes, empty/unknown
+    import hashlib as _m62h
+    import os as _m62os
+
+    from app.schemas import EvaluationConfig
+
+    mid = env.new_model("m62-basics")
+    env.forge.run_training(env.cfg(mid, steps=12, eval_every_steps=4,
+                                   seed=1))
+    listing = env.forge.list_checkpoints(mid)
+    assert len(listing) == 3
+    best = env.forge.select_best_checkpoint(mid).checkpoint.checkpoint_id
+    latest = env.forge.get_model(mid).latest_checkpoint
+    referenced = latest
+    env.forge.run_evaluation(EvaluationConfig(
+        model_id=mid, dataset_id=env.datasets["base"],
+        tokenizer_id=env.tokenizer.id, split="validation", batch_size=8,
+        max_seq_len=32, seed=2, checkpoint_id=referenced))
+
+    def _inv() -> dict:
+        out = {}
+        for r, _d, fs in _m62os.walk(env.forge.storage.root):
+            for f in fs:
+                p = _m62os.path.join(r, f)
+                out[_m62os.path.relpath(
+                    p, env.forge.storage.root)] = _m62h.sha256(
+                        open(p, "rb").read()).hexdigest()
+        return out
+
+    before = _inv()
+    ov = env.forge.checkpoint_retention_overview(mid)
+    ov2 = env.forge.checkpoint_retention_overview(mid)
+    assert _inv() == before                     # ZERO writes, twice
+
+    assert ov.model_id == mid
+    assert ov.total_checkpoints == 3
+    # canonical M3 listing order (step, created_at)
+    assert [e.checkpoint_id for e in ov.checkpoints] == \
+        [c.checkpoint_id for c in listing]
+    for e, c in zip(ov.checkpoints, listing):
+        assert (e.checkpoint_id, e.run_id, e.step, e.created_at,
+                e.validation_loss) == \
+            (c.checkpoint_id, c.run_id, c.step, c.created_at,
+             c.validation_loss)                  # persisted identity
+        assert e.files == 2 and e.size_bytes > 0
+        assert e.integrity_verified is True
+        if e.deletable:
+            assert e.blockers == []
+        else:
+            assert e.blockers                    # a reason always exists
+    # the protected set is exactly best/latest/referenced
+    by_id = {e.checkpoint_id: e for e in ov.checkpoints}
+    assert {cid for cid, e in by_id.items() if not e.deletable} == \
+        {best, latest, referenced}
+    # aggregates are exact sums over the entries
+    deletable = [e for e in ov.checkpoints if e.deletable]
+    assert ov.deletable_checkpoints == len(deletable)
+    assert ov.protected_checkpoints == 3 - len(deletable)
+    assert ov.total_checkpoint_bytes == sum(e.size_bytes
+                                            for e in ov.checkpoints)
+    assert ov.reclaimable_checkpoint_bytes == sum(e.size_bytes
+                                                  for e in deletable)
+    # determinism: byte-equal responses over unchanged state
+    assert ov2.model_dump() == ov.model_dump()
+
+    # M52/M60 consistency: exactly ONE best entry, matching the selector;
+    # the published entry matches the manifest pointer; both protected
+    best_entries = [e for e in ov.checkpoints
+                    if "best" in [b.reason for b in e.blockers]]
+    assert [e.checkpoint_id for e in best_entries] == [best]
+    pub_entries = [e for e in ov.checkpoints
+                   if "published" in [b.reason for b in e.blockers]]
+    assert [e.checkpoint_id for e in pub_entries] == [latest]
+    assert by_id[best].deletable is False and by_id[latest].deletable is False
+
+    # empty model -> the collection convention (200-equivalent, zeroed)
+    fresh = env.new_model("m62-empty")
+    ov0 = env.forge.checkpoint_retention_overview(fresh)
+    assert ov0.total_checkpoints == 0 and ov0.checkpoints == []
+    assert ov0.deletable_checkpoints == 0 and ov0.protected_checkpoints == 0
+    assert ov0.total_checkpoint_bytes == 0
+    assert ov0.reclaimable_checkpoint_bytes == 0
+    # unknown model -> the family's 404
+    with pytest.raises(FileNotFoundError):
+        env.forge.checkpoint_retention_overview("no-such-m62")
+
+
+def test_m62_deletability_and_blockers_match_m61(env):
+    # THE headline invariant, both directions, on ONE rich landscape:
+    # every entry the overview reports deletable deletes successfully
+    # (with exactly the reported files/bytes); every protected entry is
+    # refused with exactly the reported blocker reasons; a corrupt
+    # checkpoint is never deletable (integrity_verified False); the
+    # manifest's best-known reference blocks. M59 winners without
+    # authoritative references stay deletable (the M61 policy).
+    import json as _m62json
+    from pathlib import Path
+
+    from app.schemas import (
+        ComparisonRequest, ComparisonState, EvalStateKind,
+        EvaluationConfig, GatePolicy, GateRequest, ProbeSuiteCreateRequest,
+        SampleGenerateRequest, SampleStrategy, StageType, SuiteRunRequest,
+        WorkflowEvaluationStage, WorkflowPlan, WorkflowStage,
+    )
+
+    mid = env.new_model("m62-parity")
+    env.forge.run_training(env.cfg(mid, steps=12, eval_every_steps=4,
+                                   seed=1))
+    cks = env.forge.list_checkpoints(mid)
+    best = env.forge.select_best_checkpoint(mid).checkpoint.checkpoint_id
+    latest = env.forge.get_model(mid).latest_checkpoint
+    hist = [e.checkpoint_id
+            for e in env.forge.best_checkpoint_history(mid).entries]
+    # a HISTORICAL M59 winner with no authoritative references: the
+    # first winner that is neither best, published nor referenced below
+    victim = next(c.checkpoint_id for c in cks
+                  if c.checkpoint_id not in (best, latest))
+    assert victim in hist                       # a former winner
+
+    # reference the latest checkpoint through EVERY evidence family
+    env.forge.run_evaluation(EvaluationConfig(
+        model_id=mid, dataset_id=env.datasets["base"],
+        tokenizer_id=env.tokenizer.id, split="validation", batch_size=8,
+        max_seq_len=32, seed=2, checkpoint_id=latest))
+    env.forge.run_comparison(ComparisonRequest(
+        model_id=mid,
+        state_a=ComparisonState(state_kind=EvalStateKind.CHECKPOINT,
+                                checkpoint_id=latest),
+        state_b=ComparisonState(state_kind=EvalStateKind.CURRENT),
+        dataset_id=env.datasets["base"], tokenizer_id=env.tokenizer.id,
+        split="validation", batch_size=8, max_seq_len=32, seed=2))
+    env.forge.run_gate(GateRequest(
+        model_id=mid,
+        policy=GatePolicy(
+            name="m62-gate", model_id=mid,
+            dataset_id=env.datasets["base"],
+            tokenizer_id=env.tokenizer.id, split="validation",
+            batch_size=8, max_seq_len=32, seed=2,
+            baseline_type="checkpoint", baseline_checkpoint_id=latest,
+            tolerance=1.0),
+        candidate=ComparisonState(state_kind=EvalStateKind.CURRENT)))
+    env.forge.run_workflow(WorkflowPlan(
+        name="m62-wf", model_id=mid, stages=[WorkflowStage(
+            stage_id="ev", type=StageType.EVALUATE,
+            evaluation=WorkflowEvaluationStage(
+                config=EvaluationConfig(
+                    model_id=mid, dataset_id=env.datasets["base"],
+                    tokenizer_id=env.tokenizer.id, split="validation",
+                    batch_size=8, max_seq_len=32, seed=3,
+                    checkpoint_id=latest)))]))
+    env.forge.register_probe_suite(ProbeSuiteCreateRequest(
+        suite_id="m62-suite",
+        probes=[{"dataset_id": env.datasets["base"], "split": "validation",
+                 "tokenizer_id": env.tokenizer.id, "batch_size": 8,
+                 "max_seq_len": 32, "seed": 62001}]))
+    env.forge.run_suite(SuiteRunRequest(
+        model_id=mid, suite_id="m62-suite",
+        state=ComparisonState(state_kind=EvalStateKind.CHECKPOINT,
+                              checkpoint_id=latest)))
+    sample = env.forge.generate_sample(SampleGenerateRequest(
+        model_id=mid, checkpoint_id=latest,
+        tokenizer_id=env.tokenizer.id, prompt="river is",
+        strategy=SampleStrategy.GREEDY, max_new_tokens=4))
+    env.forge.evaluate_sample(mid, sample.sample_id)
+    referenced = latest      # carries EVERY evidence-family reference
+    # the manifest's stored best-known weights reference (a keep_best
+    # run) — forced DISTINCT from the global best via a fixture edit
+    env.forge.run_training(env.cfg(mid, steps=4, eval_every_steps=4,
+                                   seed=9, keep_best=True))
+    model = env.forge.get_model(mid)
+    assert model.best_checkpoint is not None
+    other = next(c for c in env.forge.list_checkpoints(mid)
+                 if c.checkpoint_id not in (model.best_checkpoint,
+                                            model.latest_checkpoint))
+    ck_path = (Path(env.forge.storage.model_dir(mid)) / "checkpoints"
+               / other.checkpoint_id / "manifest.json")
+    man = _m62json.loads(ck_path.read_text())
+    man["validation_loss"] = 0.5
+    ck_path.write_text(_m62json.dumps(man))
+    best = env.forge.select_best_checkpoint(mid).checkpoint.checkpoint_id
+    latest = env.forge.get_model(mid).latest_checkpoint
+
+    ov = env.forge.checkpoint_retention_overview(mid)
+    by_id = {e.checkpoint_id: e for e in ov.checkpoints}
+    # blockers match the M61 categories on the referenced checkpoint
+    # (the keep_best run moved `latest` to its own output; the evidence
+    # references still protect the checkpoint they were recorded on)
+    reasons = [b.reason for b in by_id[referenced].blockers]
+    assert "evaluation_reference" in reasons
+    assert "comparison_reference" in reasons and "gate_reference" in reasons
+    assert "workflow_reference" in reasons
+    assert "suite_run_reference" in reasons and "sample_reference" in reasons
+    assert "sample_quality_reference" in reasons
+    assert by_id[referenced].deletable is False
+    # the (new) published pointer is protected for exactly that reason
+    assert "published" in [b.reason for b in by_id[latest].blockers]
+    # the manifest best-known reference blocks its checkpoint
+    mb = [b.reason for b in by_id[model.best_checkpoint].blockers]
+    assert "manifest_reference" in mb
+    # best == published here only if the pointers coincide; either way
+    # both pointers' checkpoints are protected
+    assert by_id[best].deletable is False
+
+    # a corrupt checkpoint is never reported deletable: pick a
+    # currently-deletable HISTORICAL M59 winner (a former best with no
+    # authoritative references — the M61 policy) and corrupt its
+    # weights -> the overview flips to integrity_verified=False /
+    # deletable=False and M61 refuses with the integrity error (never
+    # a silent 200); restoring the weights restores the verdict
+    corrupt_target = next(
+        e.checkpoint_id for e in ov.checkpoints
+        if e.deletable and e.checkpoint_id in hist)
+    wpath = (Path(env.forge.storage.model_dir(mid)) / "checkpoints"
+             / corrupt_target / "weights.pt")
+    saved = wpath.read_bytes()
+    wpath.write_bytes(b"m62-corrupted")
+    ov_c = env.forge.checkpoint_retention_overview(mid)
+    entry = next(e for e in ov_c.checkpoints
+                 if e.checkpoint_id == corrupt_target)
+    assert entry.integrity_verified is False and entry.deletable is False
+    with pytest.raises(RuntimeError):
+        env.forge.delete_checkpoint(mid, corrupt_target)
+    wpath.write_bytes(saved)
+    ov_r = env.forge.checkpoint_retention_overview(mid)
+    entry_r = next(e for e in ov_r.checkpoints
+                   if e.checkpoint_id == corrupt_target)
+    assert entry_r.integrity_verified is True and entry_r.deletable is True
+
+    # direction 1: every PROTECTED entry is refused by M61 with the
+    # SAME ordered blocker reasons (nothing is deleted)
+    n_before = len(env.forge.list_checkpoints(mid))
+    for e in ov_r.checkpoints:
+        if e.deletable:
+            continue
+        with pytest.raises(ValueError) as excinfo:
+            env.forge.delete_checkpoint(mid, e.checkpoint_id)
+        msg = str(excinfo.value)
+        assert "protected" in msg
+        for b in e.blockers:
+            assert b.reason in msg
+    assert len(env.forge.list_checkpoints(mid)) == n_before
+
+    # direction 2: every DELETABLE entry deletes successfully with
+    # EXACTLY the reported files/bytes (the historical winner included)
+    for e in [x for x in ov_r.checkpoints if x.deletable]:
+        res = env.forge.delete_checkpoint(mid, e.checkpoint_id)
+        assert res.checkpoint_id == e.checkpoint_id
+        assert res.files_removed == e.files
+        assert res.bytes_reclaimed == e.size_bytes
+    after = env.forge.checkpoint_retention_overview(mid)
+    assert after.total_checkpoints == ov_r.total_checkpoints \
+        - ov_r.deletable_checkpoints
+    assert after.deletable_checkpoints == 0
+    assert after.reclaimable_checkpoint_bytes == 0
+
+
+def test_m62_overview_recomputes_after_state_changes(env):
+    # no caching anywhere: the overview tracks the live registry through
+    # a rollback (published pointer moves), a new reference (blockers
+    # grow) and a deletion (entries shrink) — always from current state
+    from app.schemas import EvaluationConfig
+
+    mid = env.new_model("m62-live")
+    env.forge.run_training(env.cfg(mid, steps=16, eval_every_steps=4,
+                                   seed=1))
+    cks = env.forge.list_checkpoints(mid)
+    assert len(cks) == 4
+    best = env.forge.select_best_checkpoint(mid).checkpoint.checkpoint_id
+    latest = env.forge.get_model(mid).latest_checkpoint
+    other = next(c.checkpoint_id for c in cks
+                 if c.checkpoint_id not in (best, latest))
+
+    ov1 = env.forge.checkpoint_retention_overview(mid)
+    pub_before = [e.checkpoint_id for e in ov1.checkpoints
+                  if "published" in [b.reason for b in e.blockers]]
+
+    # M60 semantics: rollback MOVES the published pointer -> the
+    # overview recomputes (the new published is protected, the old one
+    # loses its published blocker unless referenced otherwise)
+    env.forge.rollback_model(mid, other)
+    ov2 = env.forge.checkpoint_retention_overview(mid)
+    pub_after = [e.checkpoint_id for e in ov2.checkpoints
+                 if "published" in [b.reason for b in e.blockers]]
+    assert pub_after == [other] and pub_after != pub_before
+    assert env.forge.get_model(mid).latest_checkpoint == other
+
+    # a NEW authoritative reference protects a previously deletable
+    # checkpoint — the overview grows its blockers live
+    target = next(e.checkpoint_id for e in ov2.checkpoints if e.deletable)
+    env.forge.run_evaluation(EvaluationConfig(
+        model_id=mid, dataset_id=env.datasets["base"],
+        tokenizer_id=env.tokenizer.id, split="validation", batch_size=8,
+        max_seq_len=32, seed=4, checkpoint_id=target))
+    ov3 = env.forge.checkpoint_retention_overview(mid)
+    entry = next(e for e in ov3.checkpoints if e.checkpoint_id == target)
+    assert entry.deletable is False
+    assert "evaluation_reference" in [b.reason for b in entry.blockers]
+
+    # a deletion shrinks the view; totals recompute
+    victim = next(e.checkpoint_id for e in ov3.checkpoints if e.deletable)
+    env.forge.delete_checkpoint(mid, victim)
+    ov4 = env.forge.checkpoint_retention_overview(mid)
+    assert victim not in {e.checkpoint_id for e in ov4.checkpoints}
+    assert ov4.total_checkpoints == ov3.total_checkpoints - 1
+    assert ov4.total_checkpoint_bytes == sum(e.size_bytes
+                                             for e in ov4.checkpoints)
