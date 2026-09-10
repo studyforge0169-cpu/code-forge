@@ -2061,6 +2061,50 @@ generation never trains, evaluates, scores, ranks or judges output.
   evidence reuse) and the M18–M50 history surfaces are byte-identical
   before and after
 
+### Milestone 57 — declarative BEST-BASELINE gate policies
+  (`GatePolicy.baseline_from_best`)
+- **concept**: a workflow/recipe GATE stage's INLINE policy may declare
+  `baseline_from_best: true` — "judge the candidate against the model's
+  best checkpoint" — closing the last non-declarative slot of the
+  canonical improvement loop. The SAME workflow resolver that pins M53
+  state refs, M55 best-resume train stages and M56 best-evaluation
+  stages resolves the SAME M52 selection (minimum persisted
+  `validation_loss`) ONCE per plan at execution/M51-preflight time and
+  pins the concrete id (`resolved_baseline_checkpoint_id`, the M53
+  pinned form); the gate engine then receives a PURE M6 policy with an
+  explicit `baseline_checkpoint_id` — one selection system, one
+  executor, the gate layer never queries "best" and M6 decision
+  semantics (improved/unchanged/regressed, tolerance,
+  `max_regression_delta`, `minimum_loss`, suggestion-on-fail) are
+  untouched
+- **semantics**: XOR with the explicit `baseline_checkpoint_id` and
+  only valid with `baseline_type='checkpoint'` (the best IS a checkpoint
+  baseline; contradictions -> 422, never a silent preference;
+  `resolved_baseline_checkpoint_id` without best -> 422); a DIRECT
+  `POST /gates/evaluate` declaring best -> 422 (no workflow context;
+  `GET /models/{id}/checkpoints/best` answers it); a best-baseline
+  policy cannot be REGISTERED -> 422 (registry manifests are immutable
+  and shared across executions while the selection is resolved and
+  pinned per plan — the pin lives in the workflow record, never in the
+  registry); default `false` preserves every existing request exactly;
+  OpenAPI path count UNCHANGED (84) — schema fields only
+- **provenance & evidence**: the persisted decision embeds the EXECUTED
+  policy (explicit concrete baseline id, best stripped) and its
+  `baseline` side identifies the concrete checkpoint — evaluations and
+  the comparison reuse the existing exact-evidence lookups (declaring
+  best never duplicates evidence; two identical best-baseline gates in
+  one plan share ONE comparison); the declarative recipe manifest is
+  never rewritten while the immutable run record's plan pins the
+  concrete id and a different resolution means a different `plan_hash`
+- **timing**: resolution happens at PLAN START (the unchanged M53
+  architecture): the gate judges against the best that existed when the
+  workflow started — a checkpoint created later in the SAME plan is
+  reachable only via the candidate's explicit `from_stage`. Each NEW
+  execution re-resolves, so re-running the canonical loop — train,
+  evaluate(best), gate(candidate vs best), train from best,
+  evaluate(best) — picks up the improved state. Finite, explicit,
+  re-runnable; NO automatic repetition
+
 ### Milestone 56 — declarative BEST-EVALUATION stages
   (`WorkflowEvaluationStage.checkpoint_from_best`)
 - **concept**: a workflow/recipe EVALUATE stage may declare
@@ -2241,7 +2285,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 584 tests
+pytest                       # 590 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2750,7 +2794,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 584 tests across 20 suites
+  tests/               # 590 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

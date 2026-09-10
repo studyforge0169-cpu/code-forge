@@ -937,6 +937,26 @@ class GatePolicy(BaseModel):
     baseline_checkpoint_id: Optional[str] = Field(None, min_length=1, max_length=64)
     baseline_result_hash: Optional[str] = None          # 64-hex M4 result hash
 
+    # M57: DECLARATIVE best baseline — a WORKFLOW gate-stage option. True
+    # means "resolve the M52 best checkpoint (minimum persisted
+    # validation_loss) at workflow resolution time and use it as the
+    # CHECKPOINT baseline of this gate". The workflow engine's single
+    # resolver pins the concrete id on ``resolved_baseline_checkpoint_id``
+    # (the M53 pinned form); the gate engine then receives a PURE M6
+    # policy with an explicit ``baseline_checkpoint_id`` (the gate layer
+    # never queries "best"). XOR with the explicit id (both set is a
+    # contradiction, never a silent preference); only meaningful with
+    # baseline_type='checkpoint' (the best IS a checkpoint baseline).
+    # A DIRECT gate request declaring best is rejected (no workflow
+    # context to pin the selection) and a REGISTERED policy cannot
+    # declare it (registry manifests are immutable and shared — the pin
+    # lives in the per-plan workflow record, never in the registry).
+    baseline_from_best: bool = False
+    resolved_baseline_checkpoint_id: Optional[str] = Field(
+        None, min_length=1, max_length=64)
+    # ^ pinned by the workflow resolver ONLY (the M52 selection's
+    #   concrete id); valid only with baseline_from_best=True
+
     # Decision constraints
     tolerance: float = Field(1e-4, ge=0.0)              # |delta| <= tol -> unchanged
     max_regression_delta: Optional[float] = Field(None, ge=0.0)  # regressed-but-bounded pass
@@ -948,9 +968,12 @@ class GatePolicy(BaseModel):
     def _baseline_consistent(self) -> "GatePolicy":
         kind = self.baseline_type
         if kind == GateBaselineType.CHECKPOINT:
-            if not self.baseline_checkpoint_id:
+            if not self.baseline_checkpoint_id \
+                    and not self.baseline_from_best:
                 raise ValueError(
-                    "baseline_type='checkpoint' requires baseline_checkpoint_id")
+                    "baseline_type='checkpoint' requires "
+                    "baseline_checkpoint_id (or the declarative "
+                    "baseline_from_best=True)")
             if self.baseline_result_hash:
                 raise ValueError(
                     "baseline_type='checkpoint' cannot set baseline_result_hash")
@@ -980,6 +1003,23 @@ class GatePolicy(BaseModel):
                     "baseline (baseline_type='minimum_loss')")
         else:  # pragma: no cover - enum guards this
             raise ValueError(f"unknown baseline_type '{kind}'")
+        if self.baseline_from_best:
+            if kind != GateBaselineType.CHECKPOINT:
+                raise ValueError(
+                    "baseline_from_best declares the M52 best selection AS "
+                    "the checkpoint baseline — it requires "
+                    "baseline_type='checkpoint'")
+            if self.baseline_checkpoint_id is not None:
+                raise ValueError(
+                    "baseline_from_best conflicts with "
+                    "baseline_checkpoint_id: the M52 selection decides the "
+                    "baseline OR it is named explicitly, never both")
+        if self.resolved_baseline_checkpoint_id is not None \
+                and not self.baseline_from_best:
+            raise ValueError(
+                "resolved_baseline_checkpoint_id is the workflow "
+                "resolver's pinned M52 selection and is only valid with "
+                "baseline_from_best=True")
         if kind != GateBaselineType.MINIMUM_LOSS and self.max_regression_delta is not None:
             if self.tolerance > self.max_regression_delta:
                 raise ValueError(

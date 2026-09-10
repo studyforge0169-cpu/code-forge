@@ -344,6 +344,19 @@ class GateEngine:
 
     def run(self, request: GateRequest) -> GateDecision:
         start = time.monotonic()
+        # M57: best-baseline is a WORKFLOW gate-stage declaration — the
+        # workflow engine's single resolver pins the M52 selection into a
+        # concrete baseline_checkpoint_id BEFORE the gate engine runs, so
+        # this engine never queries "best". A DIRECT request declaring
+        # best (pinned or not) has no workflow context and is rejected:
+        # direct runs name the baseline explicitly (GET
+        # /models/{id}/checkpoints/best answers it).
+        if request.policy is not None and request.policy.baseline_from_best:
+            raise ValueError(
+                "baseline_from_best is a workflow gate-stage "
+                "declaration — direct gate requests name the baseline "
+                "explicitly (e.g. the answer of GET "
+                "/models/{id}/checkpoints/best)")
         # One resolution point: an inline policy passes through untouched
         # (exact M6 semantics); a registry policy_id resolves to its
         # immutable definition. Either way `policy` below is the executed

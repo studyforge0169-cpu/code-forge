@@ -103,6 +103,18 @@ class PolicyEngine:
 
     def register_policy(self, request: PolicyCreateRequest) -> PolicyDefinition:
         """Register one immutable policy; idempotent for identical content."""
+        # M57: a best-baseline policy cannot enter the registry — registry
+        # manifests are immutable and shared across executions, while the
+        # M52 best selection is resolved and pinned PER workflow plan
+        # (the pin lives in the workflow record, never in the registry).
+        # Best-baseline gates declare their policy INLINE in the stage.
+        if request.policy.baseline_from_best:
+            raise ValueError(
+                "baseline_from_best is a workflow gate-stage declaration "
+                "and cannot be registered: a registry policy is immutable "
+                "and shared while the M52 best selection is resolved and "
+                "pinned per workflow plan — declare the policy inline in "
+                "the gate stage")
         cfg_hash = policy_config_hash(request.policy)
         d = self._policy_dir(request.policy_id)
         manifest = d / "manifest.json"

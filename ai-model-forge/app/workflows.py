@@ -250,9 +250,11 @@ class WorkflowEngine:
         cross-time lock): the selection runs ONCE per plan and the concrete
         id is pinned into every unresolved 'best' StageStateRef
         (resolved_checkpoint_id), M55 best-resume train config
-        (resolved_resume_checkpoint_id) and M56 best-evaluation stage
-        (resolved_checkpoint_id), which then flows into the immutable run
-        record and its plan_hash — executions that resolved different
+        (resolved_resume_checkpoint_id), M56 best-evaluation stage
+        (resolved_checkpoint_id) and M57 best-baseline gate policy
+        (resolved_baseline_checkpoint_id), which then flows into the
+        immutable run record and its plan_hash — executions that
+        resolved different
         checkpoints have different execution identities. Idempotent: refs
         already carrying a pinned id keep it. A model with no selectable
         checkpoints raises FileNotFoundError BEFORE anything executes or
@@ -291,11 +293,28 @@ class WorkflowEngine:
                     and stage.evaluation.checkpoint_from_best
                     and stage.evaluation.resolved_checkpoint_id is None)
 
+        def _gate_baseline_unresolved(stage: WorkflowStage) -> bool:
+            # M57: a gate stage whose INLINE policy declares the best
+            # baseline and whose M52 selection has not been pinned yet
+            # (the resolver's pinned form keeps baseline_from_best=True +
+            # the concrete id). policy_id stages reference immutable
+            # registry definitions, which cannot declare best
+            # (registration rejects it) — only inline policies
+            # participate.
+            return (stage.type == StageType.GATE
+                    and stage.gate is not None
+                    and stage.gate.policy is not None
+                    and stage.gate.policy.baseline_from_best
+                    and stage.gate.policy.resolved_baseline_checkpoint_id
+                    is None)
+
         if not any(_unresolved(ref) for stage in plan.stages
                    for ref in _stage_refs(stage)) \
                 and not any(_train_unresolved(stage)
                             for stage in plan.stages) \
                 and not any(_evaluate_unresolved(stage)
+                            for stage in plan.stages) \
+                and not any(_gate_baseline_unresolved(stage)
                             for stage in plan.stages):
             return plan
         # ONE selection per plan through the M52 selector (unknown model or
@@ -325,10 +344,23 @@ class WorkflowEngine:
                                 "state_b": _pin(cmpst.state_b)})})
             elif stage.type == StageType.GATE and stage.gate is not None:
                 gt = stage.gate
+                gate_updates = {}
                 if _unresolved(gt.candidate):
+                    gate_updates["candidate"] = _pin(gt.candidate)
+                if _gate_baseline_unresolved(stage):
+                    # M57: pin the SAME single per-plan selection onto the
+                    # declarative best baseline of the gate's INLINE
+                    # policy (pinned form: baseline_from_best=True +
+                    # resolved_baseline_checkpoint_id=<concrete id>) —
+                    # the record and plan_hash carry the concrete
+                    # resolution exactly like M53 state refs, M55
+                    # best-resume train stages and M56 best-evaluation
+                    # stages.
+                    gate_updates["policy"] = gt.policy.model_copy(update={
+                        "resolved_baseline_checkpoint_id": ckpt_id})
+                if gate_updates:
                     stage = stage.model_copy(update={
-                        "gate": gt.model_copy(update={
-                            "candidate": _pin(gt.candidate)})})
+                        "gate": gt.model_copy(update=gate_updates)})
             elif stage.type == StageType.TRAIN and stage.training is not None:
                 tc = stage.training
                 if _train_unresolved(stage):
@@ -653,9 +685,30 @@ class WorkflowEngine:
         # GateEngine.run resolves both through PolicyEngine (the inline path
         # stays byte-identical to historical M6 behaviour).
         payload_gate: WorkflowGateStage = stage.gate  # type: ignore[assignment]
+        gate_policy = payload_gate.policy
+        if gate_policy is not None and gate_policy.baseline_from_best:
+            # M57: the resolver already pinned the M52 selection's
+            # concrete checkpoint id. Hand the gate engine a PURE M6
+            # policy with an explicit baseline_checkpoint_id (the same
+            # conversion pattern as M55/M56: the workflow layer selects,
+            # the gate layer receives the explicit id — no dynamic
+            # "best" query inside the gate engine, no silent fallback).
+            # The declarative trace (baseline_from_best=True + the pin)
+            # stays in the run record's plan.
+            if gate_policy.resolved_baseline_checkpoint_id is None:
+                raise ValueError(
+                    "baseline_from_best reached execution without a "
+                    "pinned M52 selection — the workflow resolver must "
+                    "run first (no dynamic 'best' query, no silent "
+                    "fallback to another baseline)")
+            gate_policy = gate_policy.model_copy(update={
+                "baseline_checkpoint_id":
+                    gate_policy.resolved_baseline_checkpoint_id,
+                "baseline_from_best": False,
+                "resolved_baseline_checkpoint_id": None})
         candidate = self._state_of(payload_gate.candidate, artifacts)
         decision_record = self.gates.run(GateRequest(
-            model_id=model_id, policy=payload_gate.policy,
+            model_id=model_id, policy=gate_policy,
             policy_id=payload_gate.policy_id, candidate=candidate))
         return (self._gate_artifact(decision_record),
                 decision_record.decision.value)

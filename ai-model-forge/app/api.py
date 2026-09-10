@@ -783,6 +783,25 @@ def index() -> HTMLResponse:
         from best, evaluate(best), gate — is now declarative; no
         automatic repetition.</li>
 
+      <li><b>M57 declarative best-baseline gate policies</b> — a
+        workflow/recipe GATE stage's INLINE policy may declare
+        <code>baseline_from_best</code>: the SAME resolver (M53)
+        resolves the SAME M52 selection ONCE per plan, pins the
+        concrete id (<code>resolved_baseline_checkpoint_id</code>) and
+        the gate engine receives a PURE M6 policy with an explicit
+        <code>baseline_checkpoint_id</code> (the gate layer never
+        queries "best"). XOR with the explicit id and only valid with
+        <code>baseline_type='checkpoint'</code> (the best IS a
+        checkpoint baseline; both set -> 422); a DIRECT
+        <code>POST /gates/evaluate</code> declaring best -> 422;
+        best-baseline policies cannot be REGISTERED (the registry is
+        immutable/shared — the pin lives in the per-plan workflow
+        record). The decision's embedded policy + baseline side carry
+        the concrete checkpoint used. The canonical loop — train,
+        evaluate(best), gate(candidate vs best), train from best,
+        evaluate(best) — is fully declarative; no automatic
+        repetition.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -1852,6 +1871,11 @@ def gates_evaluate(request: GateRequest) -> GateDecision:
     gate never trains, rolls back or selects anything — a failed checkpoint
     gate only suggests a rollback target for the caller to use via the M3
     rollback endpoint.
+    M57: ``baseline_from_best`` is a WORKFLOW gate-stage declaration — this
+    DIRECT route rejects it (422): the workflow engine's single resolver
+    pins the M52 best selection into a concrete ``baseline_checkpoint_id``
+    before the gate engine runs; name the baseline explicitly here (GET
+    /models/{id}/checkpoints/best answers it).
     """
     try:
         return _forge().run_gate(request)
@@ -2072,6 +2096,10 @@ def create_policy(request: PolicyCreateRequest) -> PolicyDefinition:
     is a 409 conflict — definitions are never overwritten. The registry adds
     stable identity and reusability only: the GateEngine keeps evaluating the
     exact M6 GatePolicy embedded in the definition.
+    M57: a policy declaring ``baseline_from_best`` cannot be registered
+    (422) — the M52 best selection is resolved and pinned per workflow
+    plan, so best-baseline gates declare their policy INLINE in the gate
+    stage.
     """
     try:
         return _forge().register_policy(request)

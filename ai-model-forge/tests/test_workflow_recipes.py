@@ -25,11 +25,14 @@ from pydantic import ValidationError
 
 from app.recipes import RecipeEngine, recipe_config_hash
 from app.schemas import (
+    ComparisonState,
     EvalStateKind,
     EvaluationConfig,
     GateBaselineType,
     GatePolicy,
+    GateRequest,
     ModelCreateRequest,
+    PolicyCreateRequest,
     ProbeSuiteCreateRequest,
     StageStateRef,
     StageType,
@@ -3268,3 +3271,462 @@ def test_m56_api_registration_to_execution(api_client):
         "properties"]
     assert "checkpoint_from_best" in props
     assert "resolved_checkpoint_id" in props
+
+
+# --------------------------------------------------------------------- M57
+# Declarative best BASELINE for gate policies: an INLINE gate policy may
+# declare baseline_from_best; the SAME M53 resolver resolves the SAME M52
+# selection ONCE per plan, pins the concrete id, and the gate engine
+# receives a PURE M6 policy with an explicit baseline_checkpoint_id.
+
+def _m57_gate_policy(env, model_id, **overrides):
+    kw = dict(name="m57-gate", model_id=model_id, dataset_id=env.ds_a,
+              tokenizer_id=env.tok_id, split="validation", batch_size=8,
+              max_seq_len=32, seed=2, baseline_type="checkpoint",
+              baseline_from_best=True, tolerance=1.0)
+    kw.update(overrides)
+    return GatePolicy(**kw)
+
+
+def _m57_best_gate_stage(sid, env, model_id, *, candidate_ckpt=None,
+                         from_stage=None, on_pass=None, **pol):
+    if candidate_ckpt is not None:
+        cand = StageStateRef(state_kind=EvalStateKind.CHECKPOINT,
+                             checkpoint_id=candidate_ckpt)
+    else:
+        cand = StageStateRef(state_kind=EvalStateKind.CHECKPOINT,
+                             from_stage=from_stage)
+    kw = {"stage_id": sid, "type": StageType.GATE,
+          "gate": WorkflowGateStage(
+              policy=_m57_gate_policy(env, model_id, **pol),
+              candidate=cand)}
+    if on_pass is not None:
+        kw["on_pass"] = on_pass
+    return WorkflowStage(**kw)
+
+
+def test_m57_schema_matrix_and_direct_rejection(env):
+    base = dict(name="m57-p", model_id=env.model_id, dataset_id=env.ds_a,
+                tokenizer_id=env.tok_id, split="validation", batch_size=8,
+                max_seq_len=32, seed=2)
+
+    # existing baseline forms stay valid and unchanged
+    GatePolicy(**base, baseline_type="checkpoint",
+               baseline_checkpoint_id=env.ck_main)
+    GatePolicy(**base, baseline_type="current")
+    GatePolicy(**base, baseline_type="minimum_loss", minimum_loss=5.0)
+    GatePolicy(**base, baseline_type="evaluation_result_hash",
+               baseline_result_hash="a" * 64)
+
+    # declarative best (a CHECKPOINT baseline whose id the M52 selection
+    # decides); pinned form; ride-along constraints stay legal
+    p = _m57_gate_policy(env, env.model_id)
+    assert p.baseline_from_best is True
+    assert p.resolved_baseline_checkpoint_id is None
+    _m57_gate_policy(env, env.model_id,
+                     resolved_baseline_checkpoint_id=env.ck_main)
+    _m57_gate_policy(env, env.model_id, minimum_loss=7.0)
+    _m57_gate_policy(env, env.model_id, tolerance=0.1,
+                     max_regression_delta=0.5)
+
+    # contradictory declarations are rejected (never silently preferred)
+    for bad in [
+            dict(baseline_from_best=True,
+                 baseline_checkpoint_id=env.ck_main),      # best XOR id
+            dict(baseline_type="current",
+                 baseline_from_best=True),                 # best is checkpoint
+            dict(baseline_type="evaluation_result_hash",
+                 baseline_result_hash="a" * 64,
+                 baseline_from_best=True),
+            dict(baseline_from_best=True,
+                 baseline_result_hash="a" * 64),
+            dict(resolved_baseline_checkpoint_id=env.ck_main),  # pin w/o best
+            dict(baseline_type="checkpoint")]:            # neither id nor best
+        with pytest.raises(ValidationError):
+            GatePolicy(**base, **bad)
+
+    # a DIRECT gate request declaring best is rejected (nothing persisted);
+    # the pinned form is rejected too — direct runs name the baseline
+    n_dec = len(env.forge.list_gate_decisions(env.model_id))
+    for pol in (_m57_gate_policy(env, env.model_id),
+                _m57_gate_policy(env, env.model_id,
+                                 resolved_baseline_checkpoint_id=env.ck_main)):
+        with pytest.raises(ValueError, match="workflow gate-stage"):
+            env.forge.run_gate(GateRequest(
+                model_id=env.model_id, policy=pol,
+                candidate=ComparisonState(state_kind=EvalStateKind.CURRENT)))
+    assert len(env.forge.list_gate_decisions(env.model_id)) == n_dec
+
+    # a best-baseline policy cannot be REGISTERED (registry manifests are
+    # immutable and shared; the pin lives in the per-plan workflow record)
+    with pytest.raises(ValueError, match="cannot be registered"):
+        env.forge.register_policy(PolicyCreateRequest(
+            policy_id="m57-bad-reg",
+            policy=_m57_gate_policy(env, env.model_id)))
+
+
+def test_m57_resolution_immutability_and_provenance(env):
+    import json as _m57json
+    from pathlib import Path as _M57Path
+
+    env.recipes.register(_recipe("m57-best", [
+        _m57_best_gate_stage("g_best", env, env.model_id,
+                             candidate_ckpt=env.ck_main)]))
+    argmin = _m55_argmin(env, env.model_id)
+    rman_bytes = env.manifest_bytes("m57-best")
+
+    # M51 preflight pins the M52 selection (same resolver as execution)
+    res = env.recipes.resolve("m57-best", env.model_id)
+    gp = res.plan.stages[0].gate.policy
+    assert gp.baseline_from_best is True
+    assert gp.resolved_baseline_checkpoint_id == argmin
+    assert gp.baseline_checkpoint_id is None
+
+    # execution: the record pins the concrete id; the gate engine
+    # received a PURE M6 policy — the persisted decision's embedded
+    # policy carries the EXPLICIT baseline id with best stripped, and
+    # the baseline side identifies the CONCRETE checkpoint
+    n_dec = len(env.forge.list_gate_decisions(env.model_id))
+    n_cmp = len(env.forge.list_comparisons(env.model_id))
+    n_eval = len(env.forge.list_evaluations(env.model_id))
+    rec = env.recipes.run("m57-best", env.model_id)
+    rgp = rec.plan.stages[0].gate.policy
+    assert rgp.baseline_from_best is True
+    assert rgp.resolved_baseline_checkpoint_id == argmin
+    assert rec.model_dump()["plan"] == res.model_dump()["plan"]
+    assert rec.plan_hash == res.plan.plan_hash()
+    assert rec.stages[0].artifact.gate_decision.value == "passed"
+    dec = env.forge.get_gate_decision(
+        env.model_id, rec.stages[0].artifact.artifact_id)
+    assert dec.policy.baseline_type == GateBaselineType.CHECKPOINT
+    assert dec.policy.baseline_checkpoint_id == argmin   # pure M6
+    assert dec.policy.baseline_from_best is False
+    assert dec.baseline.state_kind == EvalStateKind.CHECKPOINT
+    assert dec.baseline.checkpoint_id == argmin
+    assert dec.candidate.checkpoint_id == env.ck_main
+    assert len(env.forge.list_gate_decisions(env.model_id)) == n_dec + 1
+    assert len(env.forge.list_comparisons(env.model_id)) == n_cmp + 1
+    assert len(env.forge.list_evaluations(env.model_id)) == n_eval + 2
+
+    # re-run: the SAME evaluations/comparison are reused (identity = the
+    # concrete checkpoints + probe, NOT the 'best' declaration); only one
+    # new decision manifest is appended
+    rec2 = env.recipes.run("m57-best", env.model_id)
+    assert len(env.forge.list_gate_decisions(env.model_id)) == n_dec + 2
+    assert len(env.forge.list_comparisons(env.model_id)) == n_cmp + 1
+    assert len(env.forge.list_evaluations(env.model_id)) == n_eval + 2
+    assert rec2.plan_hash == rec.plan_hash               # determinism
+    p1 = (_M57Path(env.forge.storage.model_dir(env.model_id)) / "workflows"
+          / f"workflow-{rec.workflow_id}" / "manifest.json")
+    bytes1 = p1.read_bytes()
+
+    # a DIFFERENT checkpoint becomes best (test-fixture edit in throwaway
+    # storage): the old record keeps its pin byte-stable; a NEW preflight
+    # resolves the new best with a DIFFERENT plan identity; a pre-pinned
+    # policy is respected (idempotent resolution, no cross-time lock)
+    sel = env.forge.select_best_checkpoint(env.model_id)
+    other = next(c for c in env.forge.list_checkpoints(env.model_id)
+                 if c.checkpoint_id != argmin)
+    ck_path = (_M57Path(env.forge.storage.model_dir(env.model_id))
+               / "checkpoints" / other.checkpoint_id / "manifest.json")
+    man = _m57json.loads(ck_path.read_text())
+    man["validation_loss"] = sel.checkpoint.validation_loss / 2.0
+    ck_path.write_text(_m57json.dumps(man))
+    assert _m55_argmin(env, env.model_id) == other.checkpoint_id
+
+    res2 = env.recipes.resolve("m57-best", env.model_id)
+    assert (res2.plan.stages[0].gate.policy
+            .resolved_baseline_checkpoint_id == other.checkpoint_id)
+    assert res2.plan.plan_hash() != rec.plan_hash
+    assert p1.read_bytes() == bytes1            # old record byte-stable
+    old = _m57json.loads(bytes1)
+    assert old["plan"]["stages"][0]["gate"]["policy"][
+        "resolved_baseline_checkpoint_id"] == argmin
+    assert env.manifest_bytes("m57-best") == rman_bytes  # declarative
+    pre = WorkflowPlan(name="m57-prepin", model_id=env.model_id, stages=[
+        WorkflowStage(stage_id="g_pre", type=StageType.GATE,
+                      gate=WorkflowGateStage(
+                          policy=_m57_gate_policy(
+                              env, env.model_id,
+                              resolved_baseline_checkpoint_id=argmin),
+                          candidate=StageStateRef(
+                              state_kind=EvalStateKind.CHECKPOINT,
+                              checkpoint_id=env.ck_main)))])
+    kept = env.forge.workflows.resolve_best_state_refs(pre)
+    assert (kept.stages[0].gate.policy.resolved_baseline_checkpoint_id
+            == argmin)                      # pinned ids are never rewritten
+
+
+def test_m57_composite_and_zero_checkpoint_semantics(env):
+    env.recipes.register(_recipe("m57-child", [
+        _m57_best_gate_stage("child_g", env, env.model_id,
+                             candidate_ckpt=env.ck_main)]))
+    env.recipes.register(_recipe("m57-parent", [
+        _m57_best_gate_stage("own_g", env, env.model_id,
+                             candidate_ckpt=env.ck_main),
+        _call("leg", "m57-child")]))
+    argmin = _m55_argmin(env, env.model_id)
+
+    res = env.recipes.resolve("m57-parent", env.model_id)
+    assert [s.stage_id for s in res.plan.stages] == [
+        "own_g", "leg.child_g"]
+    for st in res.plan.stages:                  # ONE selection, both pinned
+        assert st.gate.policy.baseline_from_best is True
+        assert st.gate.policy.resolved_baseline_checkpoint_id == argmin
+    assert [(c.recipe_id, c.config_hash) for c in res.composition] == [
+        ("m57-child", env.recipes.get("m57-child").config_hash)]
+
+    n_wf = len(env.forge.list_workflows(env.model_id))
+    n_dec = len(env.forge.list_gate_decisions(env.model_id))
+    n_cmp = len(env.forge.list_comparisons(env.model_id))
+    rec = env.recipes.run("m57-parent", env.model_id)
+    assert rec.model_dump()["plan"] == res.model_dump()["plan"]
+    assert rec.plan_hash == res.plan.plan_hash()
+    for st in rec.plan.stages:
+        assert st.gate.policy.resolved_baseline_checkpoint_id == argmin
+    # ONE workflow record (no nested records); TWO decisions (one per
+    # gate stage) but ONE comparison — the second gate reuses the first's
+    # exact evidence (same pinned baseline + same candidate + same probe)
+    assert len(env.forge.list_workflows(env.model_id)) == n_wf + 1
+    assert len(env.forge.list_gate_decisions(env.model_id)) == n_dec + 2
+    assert len(env.forge.list_comparisons(env.model_id)) == n_cmp + 1
+
+    # zero-checkpoint model: a best-baseline gate recipe bound to THAT
+    # model hits the established 404 at BOTH preflight and run, nothing
+    # persisted; unknown model 404
+    fresh = env.fresh_model("m57-zero-ck")
+    env.recipes.register(_recipe("m57-zerock", [
+        WorkflowStage(stage_id="g_best", type=StageType.GATE,
+                      gate=WorkflowGateStage(
+                          policy=_m57_gate_policy(env, fresh),
+                          candidate=StageStateRef(
+                              state_kind=EvalStateKind.CURRENT)))]))
+    with pytest.raises(FileNotFoundError,
+                       match="no selectable checkpoints"):
+        env.recipes.resolve("m57-zerock", fresh)
+    with pytest.raises(FileNotFoundError,
+                       match="no selectable checkpoints"):
+        env.recipes.run("m57-zerock", fresh)
+    assert env.forge.list_workflows(fresh) == []
+    assert env.forge.list_gate_decisions(fresh) == []
+    with pytest.raises(FileNotFoundError):
+        env.recipes.resolve("m57-child", "no-such-model")
+
+
+def test_m57_canonical_loop_plan_start_timing(env):
+    # §14: train -> evaluate(best) -> gate(candidate from_stage, baseline
+    # best) -> train(resume_from_best) -> evaluate(best). The M53
+    # architecture resolves 'best' ONCE at PLAN START: ALL FOUR best
+    # declarations (ev1, the gate baseline, the M55 resume, ev2) pin the
+    # SAME selection computed from the checkpoints existing when the
+    # workflow STARTS — the gate judges tr1's output against the
+    # PLAN-START best, and ev2 reuses ev1's exact evidence. A LATER
+    # execution re-resolves and picks up the improved state.
+    import json as _m57json
+    from pathlib import Path as _M57Path
+
+    argmin_before = _m55_argmin(env, env.model_id)
+    tr1 = WorkflowStage(
+        stage_id="tr1", type=StageType.TRAIN,
+        training=TrainingConfig(
+            method="continued_pretraining", model_id=env.model_id,
+            dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+            learning_rate=3e-3, batch_size=8, max_seq_len=32,
+            eval_every_steps=2, seed=21, steps=4))
+    tr2 = _m55_best_train_stage("tr2", env, env.model_id, seed=22)
+    gate = _m57_best_gate_stage("gate1", env, env.model_id,
+                                from_stage="tr1", on_pass="tr2")
+    loop = WorkflowPlan(name="m57-loop", model_id=env.model_id,
+                        stages=[tr1, _m56_best_eval_stage("ev1", env,
+                                                          env.model_id),
+                                gate, tr2,
+                                _m56_best_eval_stage("ev2", env,
+                                                     env.model_id)])
+
+    resolved = env.forge.workflows.resolve_best_state_refs(loop)
+    pins = [resolved.stages[1].evaluation.resolved_checkpoint_id,
+            resolved.stages[2].gate.policy.resolved_baseline_checkpoint_id,
+            resolved.stages[3].training.resolved_resume_checkpoint_id,
+            resolved.stages[4].evaluation.resolved_checkpoint_id]
+    assert pins == [argmin_before] * 4          # ONE selection per plan
+
+    rec = env.forge.run_workflow(loop)
+    assert rec.status == WorkflowStatus.COMPLETED
+    st = rec.stages
+    # the gate judged tr1's output against the PLAN-START best (not
+    # against tr1's in-run output, not against any later state)
+    dec = env.forge.get_gate_decision(env.model_id,
+                                      st[2].artifact.artifact_id)
+    tr1_final = st[0].artifact.checkpoint_id
+    assert dec.candidate.checkpoint_id == tr1_final
+    assert dec.baseline.checkpoint_id == argmin_before
+    assert dec.policy.baseline_checkpoint_id == argmin_before
+    assert dec.policy.baseline_from_best is False    # pure M6 provenance
+    assert st[2].artifact.gate_decision.value == "passed"  # tolerance 1.0
+    # ev1/ev2 evaluated the SAME plan-start selection; ev2 reused ev1
+    assert st[1].artifact.checkpoint_id == argmin_before
+    assert st[4].artifact.checkpoint_id == argmin_before
+    assert st[4].artifact.artifact_id == st[1].artifact.artifact_id
+    # the M55 train stage resumed from the SAME plan-start selection
+    prov = [p for p in env.forge.get_model(env.model_id).training_provenance
+            if p.run_id == st[3].artifact.artifact_id][0]
+    assert prov.initial_checkpoint_id == argmin_before
+
+    # §15: a better checkpoint appears AFTER the run — the old record
+    # keeps its pins byte-stable; re-running the SAME plan re-resolves
+    ck = sorted((c for c in env.forge.list_checkpoints(env.model_id)
+                 if c.run_id == st[3].artifact.artifact_id),
+                key=lambda c: c.step)[-1]
+    ck_path = (_M57Path(env.forge.storage.model_dir(env.model_id))
+               / "checkpoints" / ck.checkpoint_id / "manifest.json")
+    man = _m57json.loads(ck_path.read_text())
+    man["validation_loss"] = 0.03125
+    ck_path.write_text(_m57json.dumps(man))
+    assert _m55_argmin(env, env.model_id) == ck.checkpoint_id
+
+    old_bytes = (_M57Path(env.forge.storage.model_dir(env.model_id))
+                 / "workflows" / f"workflow-{rec.workflow_id}"
+                 / "manifest.json").read_bytes()
+    rec2 = env.forge.run_workflow(loop)
+    pins2 = [rec2.plan.stages[1].evaluation.resolved_checkpoint_id,
+             rec2.plan.stages[2].gate.policy
+             .resolved_baseline_checkpoint_id,
+             rec2.plan.stages[3].training.resolved_resume_checkpoint_id,
+             rec2.plan.stages[4].evaluation.resolved_checkpoint_id]
+    assert pins2 == [ck.checkpoint_id] * 4       # re-resolution everywhere
+    assert rec2.plan_hash != rec.plan_hash
+    assert (_M57Path(env.forge.storage.model_dir(env.model_id))
+            / "workflows" / f"workflow-{rec.workflow_id}"
+            / "manifest.json").read_bytes() == old_bytes
+
+
+def test_m57_discrimination_best_vs_latest(env):
+    # §16: best != latest — the gate baseline must be the checkpoint with
+    # the MINIMUM PERSISTED validation_loss (the M52 criterion), never
+    # the published latest pointer. The M52 route stays authoritative.
+    import json as _m57json
+    from pathlib import Path as _M57Path
+
+    latest = _m57json.loads(
+        (_M57Path(env.forge.storage.model_dir(env.model_id))
+         / "manifest.json").read_text())["latest_checkpoint"]
+    # force the discrimination: give a NON-latest checkpoint the lowest
+    # persisted validation_loss (test-fixture edit in throwaway storage)
+    sel = env.forge.select_best_checkpoint(env.model_id)
+    non_latest = next(c for c in env.forge.list_checkpoints(env.model_id)
+                      if c.checkpoint_id != latest)
+    ck_path = (_M57Path(env.forge.storage.model_dir(env.model_id))
+               / "checkpoints" / non_latest.checkpoint_id / "manifest.json")
+    man = _m57json.loads(ck_path.read_text())
+    man["validation_loss"] = sel.checkpoint.validation_loss / 4.0
+    ck_path.write_text(_m57json.dumps(man))
+    expected = _m55_argmin(env, env.model_id)
+    assert expected == non_latest.checkpoint_id
+    assert expected != latest
+    # the M52 route agrees (ONE selector, persisted-loss criterion)
+    assert env.forge.select_best_checkpoint(
+        env.model_id).checkpoint.checkpoint_id == expected
+
+    env.recipes.register(_recipe("m57-disc", [
+        _m57_best_gate_stage("g_disc", env, env.model_id,
+                             candidate_ckpt=env.ck_main)]))
+    rec = env.recipes.run("m57-disc", env.model_id)
+    assert (rec.plan.stages[0].gate.policy
+            .resolved_baseline_checkpoint_id == expected)
+    dec = env.forge.get_gate_decision(
+        env.model_id, rec.stages[0].artifact.artifact_id)
+    assert dec.baseline.checkpoint_id == expected     # best, NOT latest
+    assert dec.baseline.checkpoint_id != latest
+    assert dec.policy.baseline_checkpoint_id == expected
+
+
+def test_m57_api_registration_to_execution(api_client):
+    h = _http_env(api_client, "m57a")
+    mid, ds, tok = h["mid"], h["ds"], h["tok"]
+    plan_url = "/api/v1/models/{m}/workflows/recipes/{r}/plan"
+    pol = {"name": "api57-gate", "model_id": mid, "dataset_id": ds,
+           "tokenizer_id": tok, "split": "validation", "batch_size": 8,
+           "max_seq_len": 32, "seed": 2, "baseline_type": "checkpoint",
+           "baseline_from_best": True, "tolerance": 1.0}
+    gate_stage = {"stage_id": "g_best", "type": "gate", "gate": {
+        "policy": pol,
+        "candidate": {"state_kind": "current"}}}
+
+    # contradictory declarations rejected at registration
+    for bad_pol in [
+            {**pol, "baseline_checkpoint_id": "ck"},
+            {**pol, "baseline_type": "current"},
+            {**pol, "baseline_from_best": False,
+             "resolved_baseline_checkpoint_id": "ck"}]:
+        r = api_client.post(RECIPES, json={
+            "recipe_id": "api57-bad", "stages": [{
+                "stage_id": "g", "type": "gate",
+                "gate": {"policy": bad_pol,
+                         "candidate": {"state_kind": "current"}}}]})
+        assert r.status_code == 422, r.text
+
+    # declarative registration OK; preflight on a zero-checkpoint model
+    # -> the established 404
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api57-best", "stages": [gate_stage]})
+    assert r.status_code == 201, r.text
+    r = api_client.get(plan_url.format(m=mid, r="api57-best"))
+    assert r.status_code == 404
+    assert "no selectable checkpoints" in r.json()["detail"]
+
+    # create checkpoints; compute the expected argmin locally
+    train_body = {"name": "boot-run", "method": "continued_pretraining",
+                  "model_id": mid, "dataset_id": ds, "tokenizer_id": tok,
+                  "learning_rate": 3e-3, "batch_size": 8, "max_seq_len": 32,
+                  "eval_every_steps": 2, "seed": 3, "steps": 4}
+    assert api_client.post("/api/v1/training/run",
+                           json=train_body).status_code == 200
+    listing = api_client.get(f"/api/v1/models/{mid}/checkpoints").json()
+    ordered = sorted(listing, key=lambda c: (c["step"], c["created_at"]))
+    expected = min(ordered, key=lambda c: c["validation_loss"])
+
+    got = api_client.get(plan_url.format(m=mid, r="api57-best"))
+    assert got.status_code == 200, got.text
+    res = got.json()
+    gp = res["plan"]["stages"][0]["gate"]["policy"]
+    assert gp["baseline_from_best"] is True
+    assert gp["resolved_baseline_checkpoint_id"] == expected["checkpoint_id"]
+    assert gp["baseline_checkpoint_id"] is None
+    assert api_client.get(
+        plan_url.format(m=mid, r="api57-best")).content == got.content
+
+    # execution pins the same concrete baseline (same registry state);
+    # the decision embeds the PURE M6 policy with the explicit id
+    run = api_client.post(RUNS.format(rid="api57-best"),
+                          json={"model_id": mid}).json()
+    assert run["status"] == "completed"
+    assert run["plan"] == res["plan"]
+    decisions = api_client.get(
+        f"/api/v1/models/{mid}/gates/decisions").json()
+    assert len(decisions) == 1
+    dec = decisions[0]
+    assert dec["decision"] == "passed"
+    assert dec["policy"]["baseline_checkpoint_id"] == expected["checkpoint_id"]
+    assert dec["policy"]["baseline_from_best"] is False
+    assert dec["baseline"]["checkpoint_id"] == expected["checkpoint_id"]
+    assert dec["baseline"]["state_kind"] == "checkpoint"
+
+    # a DIRECT gate request declaring best -> 422 (name the baseline)
+    r = api_client.post("/api/v1/gates/evaluate", json={
+        "model_id": mid, "policy": pol,
+        "candidate": {"state_kind": "current"}})
+    assert r.status_code == 422
+    assert "workflow gate-stage" in r.text
+
+    # a best-baseline policy cannot be REGISTERED -> 422
+    r = api_client.post("/api/v1/policies", json={
+        "policy_id": "api57-bad-reg", "policy": pol})
+    assert r.status_code == 422
+    assert "cannot be registered" in r.text
+
+    # OpenAPI: path count UNCHANGED; both fields in GatePolicy
+    spec = api_client.get("/openapi.json").json()
+    assert len(spec["paths"]) == 84
+    props = spec["components"]["schemas"]["GatePolicy"]["properties"]
+    assert "baseline_from_best" in props
+    assert "resolved_baseline_checkpoint_id" in props
