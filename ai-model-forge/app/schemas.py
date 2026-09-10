@@ -2199,11 +2199,56 @@ class WorkflowRecipeRunRequest(BaseModel):
     model, checkpoint, suite or gate. ``model_id`` must name an existing
     model; embedded stage configs pinned to a different model are rejected
     when the recipe is re-validated as a WorkflowPlan (422).
+
+    M58: ``repetitions`` is a BOUNDED FINITE execution parameter (never
+    part of the immutable recipe definition): the recipe is executed N
+    times SEQUENTIALLY, each iteration a FULL independent resolution +
+    execution cycle (so every 'best' declaration — M53 refs, M55 resume,
+    M56 evaluate, M57 gate baseline — re-resolves against the checkpoints
+    existing at THAT iteration's plan start and may advance between
+    iterations). Default 1 (and explicit null) reproduce today's exact
+    single-run behavior and response. An iteration that ends 'failed'
+    (the existing stage-exception semantics) or 'stopped' (a gate stop)
+    ends the sequence — no retry, no skip, no rollback; the already
+    persisted immutable records remain authoritative. Deliberately
+    conservative finite upper bound (16): each repetition is a full
+    training workflow; there is no unbounded/while-improving mode.
     """
 
     model_id: str = Field(..., min_length=1, max_length=64)
+    repetitions: int = Field(1, ge=1, le=16)
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    @field_validator("repetitions", mode="before")
+    @classmethod
+    def _repetitions_null_means_default(cls, value):
+        # explicit null behaves exactly like omission (default 1) — the
+        # field is never Optional in the schema and never means "forever"
+        return 1 if value is None else value
+
+
+class WorkflowRecipeRepetitionRun(BaseModel):
+    """Response of a recipe run with ``repetitions > 1`` (M58) — a thin
+    ORDERED VIEW over the N normal immutable WorkflowRecords the
+    sequential iterations produced (execution order 1..k). NOT a wrapper
+    record and NOT persisted: every record is a full existing M7/M12/M14
+    workflow execution and stays the authority; this view only carries
+    the requested/actual counts and the ordered ids so a caller can
+    identify every executed record (also available read-only through the
+    M35 by-recipe history). ``stopped_early`` is True exactly when the
+    sequence ended before the requested count (an iteration finished
+    'stopped' — a NORMAL gate outcome; a 'failed' iteration raises
+    instead, with its record persisted per the existing semantics).
+    """
+
+    recipe_id: str
+    model_id: str
+    repetitions: int                    # requested N (1 < N <= 16)
+    executed: int                       # k records actually produced
+    stopped_early: bool
+    workflow_ids: list[str]             # execution order, iteration 1..k
+    records: list[WorkflowRecord]       # full immutable records, ordered
 
 
 class WorkflowRecipeResolution(BaseModel):

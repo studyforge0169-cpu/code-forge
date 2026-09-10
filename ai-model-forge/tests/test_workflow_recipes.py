@@ -3730,3 +3730,339 @@ def test_m57_api_registration_to_execution(api_client):
     props = spec["components"]["schemas"]["GatePolicy"]["properties"]
     assert "baseline_from_best" in props
     assert "resolved_baseline_checkpoint_id" in props
+
+
+# --------------------------------------------------------------------- M58
+# Bounded finite recipe repetitions: repetitions=N on the recipe-run
+# request executes the recipe N times sequentially, each iteration a FULL
+# independent resolution + execution (best re-resolves per iteration and
+# may advance); N normal immutable records; stop/failure aborts the rest.
+
+def _m58_best_resume_stage(sid, env, model_id, seed):
+    return WorkflowStage(
+        stage_id=sid, type=StageType.TRAIN,
+        training=TrainingConfig(
+            method="continued_pretraining", model_id=model_id,
+            dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+            learning_rate=3e-3, batch_size=8, max_seq_len=32,
+            eval_every_steps=2, seed=seed, steps=4, resume_from_best=True))
+
+
+def _m58_loop_stages(env, model_id, seed_a, seed_b):
+    gate = WorkflowStage(
+        stage_id="gate1", type=StageType.GATE, on_pass="tr2",
+        gate=WorkflowGateStage(
+            policy=_m57_gate_policy(env, model_id),
+            candidate=StageStateRef(state_kind=EvalStateKind.CHECKPOINT,
+                                    from_stage="tr1")))
+    tr1 = WorkflowStage(
+        stage_id="tr1", type=StageType.TRAIN,
+        training=TrainingConfig(
+            method="continued_pretraining", model_id=model_id,
+            dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+            learning_rate=3e-3, batch_size=8, max_seq_len=32,
+            eval_every_steps=2, seed=seed_a, steps=4))
+    return [tr1, _m56_best_eval_stage("ev1", env, model_id), gate,
+            _m58_best_resume_stage("tr2", env, model_id, seed_b),
+            _m56_best_eval_stage("ev2", env, model_id)]
+
+
+def test_m58_request_validation_and_backward_compat(env):
+    from app.schemas import WorkflowRecipeRunRequest
+
+    # default / null / bounds (deliberately conservative finite MAX=16)
+    assert WorkflowRecipeRunRequest(model_id="m").repetitions == 1
+    assert WorkflowRecipeRunRequest(
+        model_id="m", repetitions=None).repetitions == 1
+    assert WorkflowRecipeRunRequest(
+        model_id="m", repetitions=16).repetitions == 16
+    for bad in (0, -1, 17, 1.5, "two"):
+        with pytest.raises(ValidationError):
+            WorkflowRecipeRunRequest(model_id="m", repetitions=bad)
+
+    # the recipe definition is NEVER mutated by a repeated run: same id,
+    # repetitions 1..N, manifest byte-identical throughout
+    env.recipes.register(_recipe("m58-res", [
+        _m58_best_resume_stage("tr", env, env.model_id, 31)]))
+    rman = env.manifest_bytes("m58-res")
+    one = env.forge.run_workflow_recipe("m58-res", env.model_id)
+    assert one.status == WorkflowStatus.COMPLETED
+    assert env.manifest_bytes("m58-res") == rman
+    two = env.forge.recipes.run_repeated("m58-res", env.model_id, 2)
+    assert len(two) == 2
+    assert env.manifest_bytes("m58-res") == rman
+    # a repeated run of the same recipe resolves against the CURRENT state:
+    # a later single run pins the argmin as it was at ITS plan start
+    # (captured before the run — the run's own training may move it)
+    argmin_before = _m55_argmin(env, env.model_id)
+    fresh = env.forge.run_workflow_recipe("m58-res", env.model_id)
+    assert (fresh.plan.stages[0].training.resolved_resume_checkpoint_id
+            == argmin_before)
+    assert fresh.workflow_id not in {r.workflow_id for r in two}
+
+
+def test_m58_best_advances_across_iterations(env):
+    # §15, deterministic: a FRESH model whose every pre-existing
+    # checkpoint is pinned at a high persisted validation_loss (fixture
+    # edit in throwaway storage) guarantees iteration 1's output becomes
+    # the new best, so iteration 2 MUST re-resolve to it — proving each
+    # iteration resolves independently (never resolve-once-replay-N).
+    import json as _m58json
+
+    fresh = env.fresh_model("m58-adv")
+    rep = env.forge.run_training(TrainingConfig(
+        method="continued_pretraining", model_id=fresh,
+        dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+        learning_rate=3e-3, batch_size=8, max_seq_len=32,
+        epochs=4, eval_every_steps=2, keep_best=False, seed=41))
+    assert len(rep.checkpoints) >= 1
+    for c in env.forge.list_checkpoints(fresh):
+        p = (env.forge.storage.model_dir(fresh) / "checkpoints"
+             / c.checkpoint_id / "manifest.json")
+        man = _m58json.loads(p.read_text())
+        man["validation_loss"] = 9.0
+        p.write_text(_m58json.dumps(man))
+    best_before = _m55_argmin(env, fresh)
+
+    env.recipes.register(_recipe("m58-adv", [
+        _m58_best_resume_stage("tr", env, fresh, 42)]))
+    records = env.recipes.run_repeated("m58-adv", fresh, 2)
+    assert len(records) == 2
+    assert [r.status for r in records] == [WorkflowStatus.COMPLETED] * 2
+    pin1 = records[0].plan.stages[0].training.resolved_resume_checkpoint_id
+    pin2 = records[1].plan.stages[0].training.resolved_resume_checkpoint_id
+    assert pin1 == best_before                     # iteration 1: plan start
+    iter1_cks = {c.checkpoint_id for c in env.forge.list_checkpoints(fresh)
+                 if c.run_id == records[0].stages[0].artifact.artifact_id}
+    assert pin2 in iter1_cks                       # iteration 2 ADVANCED
+    assert pin2 != pin1
+    assert records[0].plan_hash != records[1].plan_hash
+    # two normal immutable records, deterministic order
+    assert [r.workflow_id for r in records] == [
+        w.workflow_id for w in env.forge.list_workflows(fresh)]
+    assert all(r.recipe_id == "m58-adv" for r in records)
+    # provenance: each iteration trained FROM its own pin
+    for rec in records:
+        prov = [p for p in env.forge.get_model(fresh).training_provenance
+                if p.run_id == rec.stages[0].artifact.artifact_id][0]
+        assert prov.initial_checkpoint_id == \
+            rec.plan.stages[0].training.resolved_resume_checkpoint_id
+
+
+def test_m58_canonical_loop_repetitions(env):
+    # §16: the canonical loop (train -> evaluate(best) -> gate(candidate
+    # vs best) -> train(resume_from_best) -> evaluate(best)) with
+    # repetitions=2: two independent records; iteration 2's gate baseline
+    # is the argmin over the registry EXCLUDING iteration 2's own outputs
+    # (its own plan-start state) — recomputed here read-only from the
+    # persisted manifests; evidence reuse stays active.
+    env.recipes.register(_recipe("m58-loop", _m58_loop_stages(
+        env, env.model_id, 51, 52)))
+    n_wf = len(env.forge.list_workflows(env.model_id))
+    n_eval = len(env.forge.list_evaluations(env.model_id))
+    n_cmp = len(env.forge.list_comparisons(env.model_id))
+    n_dec = len(env.forge.list_gate_decisions(env.model_id))
+
+    records = env.recipes.run_repeated("m58-loop", env.model_id, 2)
+    assert len(records) == 2
+    assert [r.status for r in records] == [WorkflowStatus.COMPLETED] * 2
+    assert len(env.forge.list_workflows(env.model_id)) == n_wf + 2
+
+    # iteration 2 resolved independently: its pins describe the registry
+    # state at ITS plan start (everything except its own outputs)
+    iter2_runs = {records[1].stages[0].artifact.artifact_id,
+                  records[1].stages[3].artifact.artifact_id}
+    pre_iter2 = sorted((c for c in env.forge.list_checkpoints(env.model_id)
+                        if c.run_id not in iter2_runs),
+                       key=lambda c: (c.step, c.created_at))
+    expected2 = min(pre_iter2,
+                    key=lambda c: c.validation_loss).checkpoint_id
+    pin2 = records[1].plan.stages[2].gate.policy \
+        .resolved_baseline_checkpoint_id
+    assert pin2 == expected2
+    assert (records[1].plan.stages[1].evaluation
+            .resolved_checkpoint_id == expected2)
+    assert (records[1].plan.stages[3].training
+            .resolved_resume_checkpoint_id == expected2)
+    # §17: the existing hashing is deterministic over the RESOLVED plan —
+    # iteration hashes differ exactly when the resolutions differ (the
+    # advance itself is forced deterministically in the dedicated §15
+    # test; here the shared env may legitimately keep the same best)
+    pin1 = records[0].plan.stages[2].gate.policy \
+        .resolved_baseline_checkpoint_id
+    assert (records[0].plan_hash != records[1].plan_hash) == (pin1 != pin2)
+    # each iteration's gate passed against its own plan-start best
+    for rec in records:
+        dec = env.forge.get_gate_decision(
+            env.model_id, rec.stages[2].artifact.artifact_id)
+        assert dec.decision.value == "passed"
+        assert dec.policy.baseline_from_best is False   # pure M6
+        assert dec.policy.baseline_checkpoint_id == \
+            rec.plan.stages[2].gate.policy \
+            .resolved_baseline_checkpoint_id
+    # evidence reuse: each distinct (baseline, candidate) content pair
+    # produces at most ONE comparison; when an iteration replays the same
+    # resolved plan against the same published weights (deterministic
+    # training; an iteration whose runs do not beat the model baseline
+    # republishes nothing — M3 acceptance), iteration 2's outputs have
+    # the SAME content hashes and its comparison is REUSED (delta 1);
+    # distinct outcomes create one comparison per iteration (delta 2).
+    # Gate decisions are append-only evidence: exactly one per iteration.
+    assert 1 <= len(env.forge.list_comparisons(env.model_id)) - n_cmp <= 2
+    assert 1 <= len(env.forge.list_evaluations(env.model_id)) - n_eval <= 4
+    assert len(env.forge.list_gate_decisions(env.model_id)) == n_dec + 2
+    for rec in records:
+        assert (rec.stages[4].artifact.artifact_id
+                == rec.stages[1].artifact.artifact_id)
+    # M35 by-recipe history lists BOTH records of the batch
+    hist = env.forge.list_workflows_for_recipe(env.model_id, "m58-loop")
+    assert {r.workflow_id for r in records} <= {w.workflow_id for w in hist}
+
+
+def test_m58_abort_semantics(env):
+    # a gate decision that fails with no on_fail STOPS the workflow — a
+    # NORMAL outcome: repetitions stop there, the batch holds the ONE
+    # stopped record, remaining iterations never run
+    env.recipes.register(_recipe("m58-stop", [
+        WorkflowStage(stage_id="g", type=StageType.GATE,
+                      gate=WorkflowGateStage(
+                          policy=GatePolicy(
+                              name="hard", model_id=env.model_id,
+                              dataset_id=env.ds_a,
+                              tokenizer_id=env.tok_id,
+                              split="validation", batch_size=8,
+                              max_seq_len=32, seed=2,
+                              baseline_type="minimum_loss",
+                              minimum_loss=0.0),
+                          candidate=StageStateRef(
+                              state_kind=EvalStateKind.CHECKPOINT,
+                              checkpoint_id=env.ck_main)))]))
+    n_wf = len(env.forge.list_workflows(env.model_id))
+    records = env.recipes.run_repeated("m58-stop", env.model_id, 3)
+    assert len(records) == 1
+    assert records[0].status == WorkflowStatus.STOPPED
+    assert len(env.forge.list_workflows(env.model_id)) == n_wf + 1
+
+    # a stage that RAISES keeps the existing failure semantics: the
+    # failed record is persisted, the exception propagates (no retry,
+    # no skip), and later iterations never run
+    env.recipes.register(_recipe("m58-fail", [
+        WorkflowStage(stage_id="c", type=StageType.COMPARE,
+                      comparison=WorkflowComparisonStage(
+                          state_a=StageStateRef(
+                              state_kind=EvalStateKind.CHECKPOINT,
+                              checkpoint_id="no-such-checkpoint"),
+                          state_b=StageStateRef(
+                              state_kind=EvalStateKind.CHECKPOINT,
+                              checkpoint_id=env.ck_main),
+                          dataset_id=env.ds_a, split="validation",
+                          tokenizer_id=env.tok_id, batch_size=8,
+                          max_seq_len=32, tolerance=0.1))]))
+    n_wf = len(env.forge.list_workflows(env.model_id))
+    with pytest.raises(FileNotFoundError):
+        env.forge.recipes.run_repeated("m58-fail", env.model_id, 2)
+    assert len(env.forge.list_workflows(env.model_id)) == n_wf + 1
+    assert env.forge.list_workflows(env.model_id)[-1].status \
+        == WorkflowStatus.FAILED
+
+
+def test_m58_composite_repetitions(env):
+    # M14 composition works unchanged under repetition: each iteration
+    # expands independently; one selection per record
+    env.recipes.register(_recipe("m58-kid", [
+        _m56_best_eval_stage("kid_ev", env, env.model_id)]))
+    env.recipes.register(_recipe("m58-par", [
+        _call("leg", "m58-kid")]))
+    n_wf = len(env.forge.list_workflows(env.model_id))
+    n_eval = len(env.forge.list_evaluations(env.model_id))
+    records = env.recipes.run_repeated("m58-par", env.model_id, 2)
+    assert len(records) == 2
+    assert [r.status for r in records] == [WorkflowStatus.COMPLETED] * 2
+    for rec in records:
+        assert [s.stage_id for s in rec.plan.stages] == ["leg.kid_ev"]
+        assert rec.composition[0].recipe_id == "m58-kid"
+    # no nested records: exactly one workflow per iteration
+    assert len(env.forge.list_workflows(env.model_id)) == n_wf + 2
+    # evidence reuse: iteration 2 reuses iteration 1's evaluation when
+    # the best did not move (bounded, never more than one per iteration)
+    assert len(env.forge.list_evaluations(env.model_id)) - n_eval <= 2
+
+
+def test_m58_api_batch_response_and_history(api_client):
+    h = _http_env(api_client, "m58a")
+    mid, ds, tok = h["mid"], h["ds"], h["tok"]
+    plan_url = "/api/v1/models/{m}/workflows/recipes/{r}/plan"
+    probe = {"model_id": mid, "dataset_id": ds, "tokenizer_id": tok,
+             "split": "validation", "batch_size": 8, "max_seq_len": 32,
+             "seed": 2}
+    train_body = {"name": "boot-run", "method": "continued_pretraining",
+                  "model_id": mid, "dataset_id": ds, "tokenizer_id": tok,
+                  "learning_rate": 3e-3, "batch_size": 8, "max_seq_len": 32,
+                  "eval_every_steps": 2, "seed": 3, "steps": 4}
+
+    # invalid repetitions rejected at the boundary
+    for bad in (0, -1, 17, 1.5, "two"):
+        r = api_client.post(RUNS.format(rid="whatever"),
+                            json={"model_id": mid, "repetitions": bad})
+        assert r.status_code == 422, (bad, r.text)
+    # unknown recipe with valid repetitions -> 404, nothing persisted
+    r = api_client.post(RUNS.format(rid="no-such-recipe"),
+                        json={"model_id": mid, "repetitions": 2})
+    assert r.status_code == 404
+
+    # legacy body (no repetitions) and explicit null: today's exact
+    # single-record response shape
+    assert api_client.post("/api/v1/training/run",
+                           json=train_body).status_code == 200
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api58-loop",
+        "stages": [
+            {"stage_id": "ev1", "type": "evaluate",
+             "evaluation": {"config": probe,
+                            "checkpoint_from_best": True}}]})
+    assert r.status_code == 201, r.text
+    r = api_client.post(RUNS.format(rid="api58-loop"),
+                        json={"model_id": mid})
+    assert r.status_code == 200, r.text
+    single = r.json()
+    assert "workflow_id" in single and "records" not in single
+    r = api_client.post(RUNS.format(rid="api58-loop"),
+                        json={"model_id": mid, "repetitions": None})
+    assert r.status_code == 200, r.text
+    assert "workflow_id" in r.json() and "records" not in r.json()
+
+    # repetitions=2 -> ordered batch view over 2 normal records
+    r = api_client.post(RUNS.format(rid="api58-loop"),
+                        json={"model_id": mid, "repetitions": 2})
+    assert r.status_code == 200, r.text
+    batch = r.json()
+    assert batch["repetitions"] == 2 and batch["executed"] == 2
+    assert batch["stopped_early"] is False
+    assert len(batch["workflow_ids"]) == 2 and len(batch["records"]) == 2
+    assert [rec["workflow_id"] for rec in batch["records"]] \
+        == batch["workflow_ids"]
+    assert all(rec["status"] == "completed" for rec in batch["records"])
+    # each record is a full WorkflowRecord with recipe provenance
+    for rec in batch["records"]:
+        assert rec["recipe_id"] == "api58-loop"
+        assert (rec["plan"]["stages"][0]["evaluation"]
+                ["resolved_checkpoint_id"] is not None)
+    # M35 by-recipe history lists both; M51 preflight stays a SINGLE
+    # resolution preview (no repetition semantics)
+    hist = api_client.get(
+        f"/api/v1/models/{mid}/workflows/by-recipe/api58-loop").json()
+    assert set(batch["workflow_ids"]) <= {w["workflow_id"] for w in hist}
+    r = api_client.get(plan_url.format(m=mid, r="api58-loop"))
+    assert r.status_code == 200, r.text
+    assert "plan" in r.json() and "records" not in r.json()
+
+    # OpenAPI: path count UNCHANGED; the request gained the bounded
+    # field; the batch response component exists
+    spec = api_client.get("/openapi.json").json()
+    assert len(spec["paths"]) == 84
+    props = spec["components"]["schemas"]["WorkflowRecipeRunRequest"][
+        "properties"]
+    assert props["repetitions"]["default"] == 1
+    assert "maximum" in props["repetitions"] \
+        and props["repetitions"]["maximum"] == 16
+    assert "WorkflowRecipeRepetitionRun" in spec["components"]["schemas"]

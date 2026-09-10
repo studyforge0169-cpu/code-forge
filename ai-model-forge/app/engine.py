@@ -888,6 +888,17 @@ class ModelForge:
         expansion trace and stays a single workflow record."""
         return self.recipes.run(recipe_id, model_id)
 
+    def run_workflow_recipe_repeated(self, recipe_id: str, model_id: str,
+                                     repetitions: int) -> list[WorkflowRecord]:
+        """M58: execute ONE registered recipe N times sequentially — a thin
+        loop over the existing single-run path (one executor, one resolver
+        per iteration, one normal immutable record per iteration). Each
+        iteration resolves 'best' independently at its own plan start; a
+        'stopped' iteration (gate stop) ends the sequence; a 'failed'
+        iteration keeps the existing stage-exception semantics. No retry,
+        no rollback, no background execution."""
+        return self.recipes.run_repeated(recipe_id, model_id, repetitions)
+
     def resolve_workflow_recipe(self, recipe_id: str,
                                 model_id: str) -> WorkflowRecipeResolution:
         """Read-only resolution of ONE registered recipe against ONE

@@ -81,6 +81,7 @@ from .schemas import (
     WorkflowRecipeRef,
     WorkflowRecipeResolution,
     WorkflowRecord,
+    WorkflowStatus,
     validate_plan_stages,
     utcnow,
 )
@@ -421,6 +422,35 @@ class RecipeEngine:
         return self.workflows.run(plan, recipe_id=definition.recipe_id,
                                   recipe_hash=definition.config_hash,
                                   composition=composition)
+
+    def run_repeated(self, recipe_id: str, model_id: str,
+                     repetitions: int) -> list[WorkflowRecord]:
+        """Execute one registered recipe N times SEQUENTIALLY (M58) — a
+        thin orchestration loop around the EXISTING run() path, not a
+        second executor: every iteration is a FULL independent resolution
+        + execution cycle (recipe lookup -> model validation -> M14
+        expansion -> WorkflowPlan -> M53 best resolution -> ONE
+        WorkflowEngine.run -> ONE normal immutable record), so every
+        'best' declaration re-resolves against the checkpoints existing
+        at THAT iteration's plan start and may legitimately advance
+        between iterations. Strictly sequential (iteration k+1 starts
+        only after iteration k has completely finished and its persisted
+        artifacts exist); no concurrency, no queues. An iteration ending
+        'stopped' (a NORMAL gate outcome) ends the sequence early; an
+        iteration whose stage RAISES keeps the existing failure
+        semantics — the failed record is persisted and the exception
+        propagates (no retry, no skip, no rollback), with earlier
+        iterations already persisted as immutable history. Returns the
+        records in execution order; the caller owns the 1 <= N <= 16
+        bound validation (the request schema).
+        """
+        records: list[WorkflowRecord] = []
+        for _ in range(repetitions):
+            record = self.run(recipe_id, model_id)
+            records.append(record)
+            if record.status != WorkflowStatus.COMPLETED:
+                break
+        return records
 
     def resolve(self, recipe_id: str,
                 model_id: str) -> "WorkflowRecipeResolution":

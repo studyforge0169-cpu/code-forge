@@ -2061,6 +2061,44 @@ generation never trains, evaluates, scores, ranks or judges output.
   evidence reuse) and the M18–M50 history surfaces are byte-identical
   before and after
 
+### Milestone 58 — bounded finite recipe REPETITIONS
+  (`WorkflowRecipeRunRequest.repetitions`)
+- **concept**: the recipe-run request may declare `repetitions: N`
+  (default 1, bounded 1..16 — a deliberately conservative finite maximum;
+  null behaves as omitted): the recipe executes N times SEQUENTIALLY,
+  each iteration a FULL independent resolution + execution cycle through
+  the EXISTING single-run path (recipe lookup → model validation → M14
+  expansion → WorkflowPlan → M53 best resolution → ONE WorkflowEngine
+  run → ONE normal immutable record). This is the whole point: every
+  `best` declaration (M53 refs, M55 resume, M56 evaluate, M57 gate
+  baseline) re-resolves at THAT iteration's plan start, so the
+  improvement loop advances across iterations instead of replaying one
+  frozen resolution
+- **records**: N normal immutable `WorkflowRecord`s (never a wrapper
+  record, never nested records, no repetition storage tree, no loop
+  state); deterministic execution order 1..k; the registered recipe
+  manifest is never mutated — the count is an execution REQUEST
+  parameter, so the same recipe runs as 1, 5 or 10 repetitions
+- **responses**: `repetitions=1` (default or null) reproduces today's
+  exact single-record response; `repetitions>1` returns an ordered
+  batch view (`WorkflowRecipeRepetitionRun`: requested/actual counts,
+  `stopped_early`, ordered workflow ids, the full records — also
+  available read-only via the M35 by-recipe history)
+- **abort semantics**: strictly sequential, no concurrency; an
+  iteration ending `stopped` (a NORMAL gate outcome) ends the sequence
+  and the batch is returned; an iteration whose stage RAISES keeps the
+  existing failure semantics (the failed record persists, the error
+  maps to 404/409/422, later iterations NEVER run) — no retry, no
+  skip, no automatic rollback, no "continue anyway"
+- **boundaries**: bounded and explicit only — no unbounded repetition,
+  no while-improving, no convergence detection, no background queue;
+  M51 preflight stays a SINGLE-iteration resolution preview (later
+  iterations cannot be predicted: each re-resolves against the state
+  its predecessors created); evidence reuse stays fully active
+  (identical replays reuse exact evaluations/comparisons)
+- OpenAPI: path count UNCHANGED (84); the request schema gains the
+  bounded field and the batch response is a new schema component
+
 ### Milestone 57 — declarative BEST-BASELINE gate policies
   (`GatePolicy.baseline_from_best`)
 - **concept**: a workflow/recipe GATE stage's INLINE policy may declare
@@ -2285,7 +2323,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 590 tests
+pytest                       # 596 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2794,7 +2832,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 590 tests across 20 suites
+  tests/               # 596 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

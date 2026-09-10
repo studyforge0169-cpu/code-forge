@@ -56,6 +56,7 @@ from .schemas import (
     WorkflowRecipe,
     WorkflowRecipeCreateRequest,
     WorkflowRecipeRunRequest,
+    WorkflowRecipeRepetitionRun,
     WorkflowRecipeResolution,
     WorkflowStatus,
 )
@@ -801,6 +802,22 @@ def index() -> HTMLResponse:
         evaluate(best), gate(candidate vs best), train from best,
         evaluate(best) — is fully declarative; no automatic
         repetition.</li>
+
+      <li><b>M58 bounded finite recipe repetitions</b> — the recipe-run
+        request may declare <code>repetitions: N</code> (default 1,
+        bounded 1..16): the recipe executes N times SEQUENTIALLY, each
+        iteration a FULL independent resolution + execution, so every
+        <code>best</code> declaration (M53 refs, M55 resume, M56
+        evaluate, M57 gate baseline) re-resolves at THAT iteration's
+        plan start and may advance between iterations. N normal
+        immutable workflow records (no wrapper record, no second
+        executor, no repetition storage); repetitions=1 reproduces
+        today's exact behavior and response; repetitions&gt;1 returns
+        an ordered batch view (counts + workflow ids + full records).
+        An iteration ending <code>stopped</code> (gate stop) or
+        <code>failed</code> ends the sequence — no retry, no skip, no
+        rollback. Bounded and explicit only: no unbounded, no
+        while-improving, no convergence detection.</li>
 
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
@@ -2527,10 +2544,12 @@ def resolve_workflow_recipe(model_id: str, recipe_id: str
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@api.post("/workflows/recipes/{recipe_id}/runs", response_model=WorkflowRecord,
+@api.post("/workflows/recipes/{recipe_id}/runs",
+          response_model=WorkflowRecord | WorkflowRecipeRepetitionRun,
           tags=["workflows"])
 def run_workflow_recipe(recipe_id: str,
-                        request: WorkflowRecipeRunRequest) -> WorkflowRecord:
+                        request: WorkflowRecipeRunRequest
+                        ) -> WorkflowRecord | WorkflowRecipeRepetitionRun:
     """Execute ONE registered workflow recipe against ONE explicit model.
 
     The model is the only runtime binding; the recipe's stage list (EXPANDED
@@ -2542,9 +2561,31 @@ def run_workflow_recipe(recipe_id: str,
     inline plans and map to 404/409/422. Recipe provenance (recipe_id +
     config_hash) plus the additive composition trace (M14) are recorded on
     the run; referenced recipes never claim the run in their lineage.
+
+    M58: ``repetitions`` (default 1, bounded 1..16) executes the recipe N
+    times sequentially — each iteration a FULL independent resolution +
+    execution, so 'best' references may advance between iterations.
+    repetitions=1 (or null) returns exactly today's single WorkflowRecord;
+    repetitions>1 returns an ordered batch view (requested/actual counts +
+    ordered workflow ids + the full immutable records). An iteration ending
+    'stopped' (gate stop) ends the sequence and the batch is returned; a
+    'failed' iteration keeps the existing error semantics (the failed
+    record persists, the error is raised, later iterations never run). No
+    automatic retry, no rollback, no unbounded repetition.
     """
     try:
-        return _forge().run_workflow_recipe(recipe_id, request.model_id)
+        if request.repetitions == 1:
+            return _forge().run_workflow_recipe(recipe_id, request.model_id)
+        records = _forge().run_workflow_recipe_repeated(
+            recipe_id, request.model_id, request.repetitions)
+        return WorkflowRecipeRepetitionRun(
+            recipe_id=recipe_id,
+            model_id=request.model_id,
+            repetitions=request.repetitions,
+            executed=len(records),
+            stopped_early=len(records) < request.repetitions,
+            workflow_ids=[r.workflow_id for r in records],
+            records=records)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (ValueError, RuntimeError) as exc:
