@@ -2061,6 +2061,43 @@ generation never trains, evaluates, scores, ranks or judges output.
   evidence reuse) and the M18–M50 history surfaces are byte-identical
   before and after
 
+### Milestone 56 — declarative BEST-EVALUATION stages
+  (`WorkflowEvaluationStage.checkpoint_from_best`)
+- **concept**: a workflow/recipe EVALUATE stage may declare
+  `checkpoint_from_best: true` — "evaluate the model's best checkpoint" —
+  closing the last state-reference gap of M53/M55. The SAME workflow
+  resolver that pins M53 state refs and M55 best-resume train stages
+  resolves the SAME M52 selection (minimum persisted `validation_loss`)
+  ONCE per plan at execution/M51-preflight time and pins the concrete id
+  (`resolved_checkpoint_id`, the M53 pinned form); the M4 evaluation path
+  then receives a PURE explicit-checkpoint probe — one selection system,
+  one executor, the evaluation layer never queries "best" and never
+  silently falls back to current weights
+- **semantics**: XOR with the explicit `config.checkpoint_id` and with
+  `checkpoint_from_stage` (a contradiction -> 422, never a silent
+  preference; `resolved_checkpoint_id` without best -> 422); the DIRECT
+  `POST /evaluations/run` route has no such field (unknown field -> 422) —
+  direct runs name the checkpoint explicitly (e.g. the answer of
+  `GET /checkpoints/best`); default `false` preserves every existing
+  request exactly; OpenAPI path count UNCHANGED (84) — schema fields only
+- **evidence**: identity stays the CONCRETE checkpoint + the existing M4
+  probe identity — an evaluation for the resolved best checkpoint is
+  reused through the existing M5/M6-style exact-evidence lookup (declaring
+  `best` never duplicates evidence; two identical `evaluate(best)` stages
+  in one plan share ONE evaluation record)
+- **immutability & timing**: the declarative recipe stays
+  `checkpoint_from_best: true` (manifest never rewritten); the immutable
+  run record's plan pins the concrete id and its `plan_hash` differs
+  across resolutions of different checkpoints. Resolution happens at PLAN
+  START (the documented M53/M55 architecture): every `best` in ONE plan —
+  including M55 `resume_from_best` train stages and M56 evaluate stages —
+  shares the SAME single per-plan selection computed from the checkpoints
+  existing when the workflow starts; in-run stage outputs are referenced
+  explicitly via `checkpoint_from_stage` (no hidden state discovery).
+  Each NEW execution re-resolves, so re-running the canonical loop picks
+  up the improved state — finite, explicit, re-runnable; NO automatic
+  repetition, no auto-improvement
+
 ### Milestone 55 — declarative BEST-RESUME for train stages
   (`TrainingConfig.resume_from_best`)
 - **concept**: a workflow/recipe TRAIN stage may declare
@@ -2204,7 +2241,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 579 tests
+pytest                       # 584 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2713,7 +2750,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 579 tests across 20 suites
+  tests/               # 584 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

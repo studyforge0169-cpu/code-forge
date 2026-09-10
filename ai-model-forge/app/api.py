@@ -767,6 +767,22 @@ def index() -> HTMLResponse:
         best, evaluate, gate — is ONE finite, explicit, re-runnable
         recipe; no automatic repetition.</li>
 
+      <li><b>M56 declarative best-evaluation stages</b> — a
+        workflow/recipe EVALUATE stage may declare
+        <code>checkpoint_from_best</code>: the SAME resolver (M53)
+        resolves the SAME M52 selection ONCE per plan, pins the
+        concrete id and the M4 evaluation path receives a PURE
+        explicit-checkpoint probe (the evaluation layer never queries
+        "best"; existing exact evidence for the concrete checkpoint is
+        reused). XOR with the explicit id and with
+        <code>checkpoint_from_stage</code> (both -> 422); the direct
+        M4 evaluation route has no such field (name the checkpoint
+        explicitly); the declarative recipe manifest is never rewritten
+        while the immutable run record pins the concrete id. Every
+        stage of the canonical loop — train, evaluate(best), train
+        from best, evaluate(best), gate — is now declarative; no
+        automatic repetition.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -1280,6 +1296,11 @@ def evaluation_run(config: EvaluationConfig) -> EvaluationRecord:
     checkpoint_id = None -> the model's current published weights; otherwise a
     verified immutable checkpoint of that model. Nothing is modified: only one
     immutable evaluation record is created under models/<id>/evaluations/.
+    M56: ``checkpoint_from_best`` is a WORKFLOW evaluation-stage declaration
+    with no place on this DIRECT route (unknown field -> 422) — the workflow
+    engine's single resolver pins the M52 best selection into a concrete
+    ``checkpoint_id`` before the M4 engine runs; name the checkpoint
+    explicitly here (GET /checkpoints/best answers it).
     """
     try:
         return _forge().run_evaluation(config)

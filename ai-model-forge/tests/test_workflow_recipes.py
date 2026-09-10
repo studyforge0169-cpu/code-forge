@@ -2906,3 +2906,365 @@ def test_m55_api_registration_to_execution(api_client):
     props = spec["components"]["schemas"]["TrainingConfig"]["properties"]
     assert "resume_from_best" in props
     assert "resolved_resume_checkpoint_id" in props
+
+
+# --------------------------------------------------------------------- M56
+# Declarative best-evaluation stages: checkpoint_from_best resolves through
+# the SAME M53 resolver (ONE M52 selection per plan), pins the concrete id,
+# and hands the M4 path a PURE explicit-checkpoint probe; evidence identity
+# stays the concrete checkpoint + probe (no duplicates for 'best').
+
+def _m56_probe(env, model_id, **overrides):
+    kw = dict(model_id=model_id, dataset_id=env.ds_a,
+              tokenizer_id=env.tok_id, split="validation",
+              batch_size=8, max_seq_len=32, seed=2)
+    kw.update(overrides)
+    return EvaluationConfig(**kw)
+
+
+def _m56_best_eval_stage(sid, env, model_id, **overrides):
+    return WorkflowStage(
+        stage_id=sid, type=StageType.EVALUATE,
+        evaluation=WorkflowEvaluationStage(
+            config=_m56_probe(env, model_id), checkpoint_from_best=True,
+            **overrides))
+
+
+def test_m56_schema_matrix_and_direct_api_rejection(env):
+    # current state (no selector): config.checkpoint_id=None stays valid
+    cur = WorkflowEvaluationStage(config=_m56_probe(env, env.model_id))
+    assert cur.checkpoint_from_best is False
+    assert cur.resolved_checkpoint_id is None
+    # explicit checkpoint stays valid
+    WorkflowEvaluationStage(
+        config=_m56_probe(env, env.model_id, checkpoint_id=env.ck_main))
+    # from_stage stays valid; declarative best + pinned best are valid
+    WorkflowEvaluationStage(config=_m56_probe(env, env.model_id),
+                            checkpoint_from_stage="tr1")
+    WorkflowEvaluationStage(config=_m56_probe(env, env.model_id),
+                            checkpoint_from_best=True)
+    WorkflowEvaluationStage(config=_m56_probe(env, env.model_id),
+                            checkpoint_from_best=True,
+                            resolved_checkpoint_id=env.ck_main)
+    # contradictory state selectors are rejected (never silently preferred)
+    with pytest.raises(ValidationError):
+        WorkflowEvaluationStage(
+            config=_m56_probe(env, env.model_id, checkpoint_id=env.ck_main),
+            checkpoint_from_best=True)                     # best XOR id
+    with pytest.raises(ValidationError):
+        WorkflowEvaluationStage(
+            config=_m56_probe(env, env.model_id),
+            checkpoint_from_best=True,
+            checkpoint_from_stage="tr1")                   # best XOR from_stage
+    with pytest.raises(ValidationError):
+        WorkflowEvaluationStage(                           # pin w/o best
+            config=_m56_probe(env, env.model_id),
+            resolved_checkpoint_id=env.ck_main)
+    # the DIRECT M4 evaluation config has no workflow context and no such
+    # field: 'best' cannot even be expressed on a direct request
+    with pytest.raises(ValidationError):
+        EvaluationConfig(**{**_m56_probe(env, env.model_id).model_dump(),
+                            "checkpoint_from_best": True})
+
+
+def test_m56_best_eval_resolution_evidence_immutability(env):
+    import json as _m56json
+    from pathlib import Path as _M56Path
+
+    env.recipes.register(_recipe("m56-best", [
+        _m56_best_eval_stage("ev_best", env, env.model_id)]))
+    argmin = _m55_argmin(env, env.model_id)
+    rman_bytes = env.manifest_bytes("m56-best")
+
+    # M51 preflight pins the M52 selection (same resolver as execution)
+    res = env.recipes.resolve("m56-best", env.model_id)
+    st = res.plan.stages[0].evaluation
+    assert st.checkpoint_from_best is True
+    assert st.resolved_checkpoint_id == argmin
+    assert st.config.checkpoint_id is None
+
+    # execution: the record pins the concrete id; the M4 path evaluated the
+    # CONCRETE checkpoint (verified state hash = the checkpoint's manifest
+    # weights hash) — never a dynamic "best" query inside evaluation
+    n_eval = len(env.forge.list_evaluations(env.model_id))
+    rec = env.recipes.run("m56-best", env.model_id)
+    rst = rec.plan.stages[0].evaluation
+    assert rst.checkpoint_from_best is True
+    assert rst.resolved_checkpoint_id == argmin
+    assert rec.model_dump()["plan"] == res.model_dump()["plan"]
+    assert rec.plan_hash == res.plan.plan_hash()
+    assert rec.stages[0].artifact.checkpoint_id == argmin
+    ev = env.forge.get_evaluation(env.model_id,
+                                  rec.stages[0].artifact.artifact_id)
+    assert ev.state_kind == EvalStateKind.CHECKPOINT
+    assert ev.checkpoint_id == argmin
+    ck = env.forge.training.get_checkpoint(env.model_id, argmin)
+    assert ev.state_hash == ck.weights_sha256
+    assert len(env.forge.list_evaluations(env.model_id)) == n_eval + 1
+    p1 = (_M56Path(env.forge.storage.model_dir(env.model_id)) / "workflows"
+          / f"workflow-{rec.workflow_id}" / "manifest.json")
+    bytes1 = p1.read_bytes()
+
+    # re-run: the SAME evaluation is reused (identity = concrete checkpoint
+    # + probe, NOT the declaration) — no duplicate evidence, same plan_hash
+    rec2 = env.recipes.run("m56-best", env.model_id)
+    assert rec2.stages[0].artifact.artifact_id == ev.eval_id
+    assert rec2.plan_hash == rec.plan_hash
+    assert len(env.forge.list_evaluations(env.model_id)) == n_eval + 1
+    # cross-form reuse: an EXPLICIT-checkpoint stage of the same probe
+    # consumes the same immutable evaluation record
+    expl = WorkflowStage(
+        stage_id="ev_x", type=StageType.EVALUATE,
+        evaluation=WorkflowEvaluationStage(
+            config=_m56_probe(env, env.model_id, checkpoint_id=argmin)))
+    recx = env.forge.run_workflow(WorkflowPlan(
+        name="m56-explicit", model_id=env.model_id, stages=[expl]))
+    assert recx.stages[0].artifact.artifact_id == ev.eval_id
+    assert len(env.forge.list_evaluations(env.model_id)) == n_eval + 1
+
+    # a DIFFERENT checkpoint becomes best (test-fixture edit in throwaway
+    # storage): the old record keeps its pin byte-stable; a NEW preflight
+    # resolves the new best with a DIFFERENT plan identity; a pre-pinned
+    # stage is respected (idempotent resolution, no cross-time lock)
+    other = next(c for c in env.forge.list_checkpoints(env.model_id)
+                 if c.checkpoint_id != argmin)
+    ck_path = (_M56Path(env.forge.storage.model_dir(env.model_id))
+               / "checkpoints" / other.checkpoint_id / "manifest.json")
+    man = _m56json.loads(ck_path.read_text())
+    man["validation_loss"] = 0.25
+    ck_path.write_text(_m56json.dumps(man))
+    assert _m55_argmin(env, env.model_id) == other.checkpoint_id
+
+    res2 = env.recipes.resolve("m56-best", env.model_id)
+    assert (res2.plan.stages[0].evaluation.resolved_checkpoint_id
+            == other.checkpoint_id)
+    assert res2.plan.plan_hash() != rec.plan_hash
+    assert p1.read_bytes() == bytes1            # old record byte-stable
+    old = _m56json.loads(bytes1)
+    assert old["plan"]["stages"][0]["evaluation"][
+        "resolved_checkpoint_id"] == argmin
+    assert env.manifest_bytes("m56-best") == rman_bytes  # declarative
+    pre = WorkflowPlan(name="m56-prepin", model_id=env.model_id, stages=[
+        WorkflowStage(stage_id="ev_pre", type=StageType.EVALUATE,
+                      evaluation=WorkflowEvaluationStage(
+                          config=_m56_probe(env, env.model_id),
+                          checkpoint_from_best=True,
+                          resolved_checkpoint_id=argmin))])
+    kept = env.forge.workflows.resolve_best_state_refs(pre)
+    assert (kept.stages[0].evaluation.resolved_checkpoint_id
+            == argmin)                      # pinned ids are never rewritten
+
+
+def test_m56_composite_and_zero_checkpoint_semantics(env):
+    env.recipes.register(_recipe("m56-child", [
+        _m56_best_eval_stage("child_ev", env, env.model_id)]))
+    env.recipes.register(_recipe("m56-parent", [
+        _m56_best_eval_stage("own_ev", env, env.model_id),
+        _call("leg", "m56-child")]))
+    argmin = _m55_argmin(env, env.model_id)
+
+    res = env.recipes.resolve("m56-parent", env.model_id)
+    assert [s.stage_id for s in res.plan.stages] == [
+        "own_ev", "leg.child_ev"]
+    for st in res.plan.stages:                  # ONE selection, both pinned
+        assert st.evaluation.checkpoint_from_best is True
+        assert st.evaluation.resolved_checkpoint_id == argmin
+    assert [(c.recipe_id, c.config_hash) for c in res.composition] == [
+        ("m56-child", env.recipes.get("m56-child").config_hash)]
+
+    n_wf = len(env.forge.list_workflows(env.model_id))
+    n_eval = len(env.forge.list_evaluations(env.model_id))
+    rec = env.recipes.run("m56-parent", env.model_id)
+    assert rec.model_dump()["plan"] == res.model_dump()["plan"]
+    assert rec.plan_hash == res.plan.plan_hash()
+    for st in rec.plan.stages:
+        assert st.evaluation.resolved_checkpoint_id == argmin
+    # ONE workflow record (no nested records); ONE evaluation (the second
+    # best-evaluation stage reuses the first's exact evidence)
+    assert len(env.forge.list_workflows(env.model_id)) == n_wf + 1
+    assert len(env.forge.list_evaluations(env.model_id)) == n_eval + 1
+    assert (rec.stages[0].artifact.artifact_id
+            == rec.stages[1].artifact.artifact_id)
+
+    # zero-checkpoint model: a best-evaluation recipe bound to THAT model
+    # (evaluation configs are model-pinned) hits the established 404 at
+    # BOTH preflight and run, nothing persisted; unknown model 404
+    fresh = env.fresh_model("m56-zero-ck")
+    env.recipes.register(_recipe("m56-zerock", [
+        _m56_best_eval_stage("ev_best", env, fresh)]))
+    with pytest.raises(FileNotFoundError,
+                       match="no selectable checkpoints"):
+        env.recipes.resolve("m56-zerock", fresh)
+    with pytest.raises(FileNotFoundError,
+                       match="no selectable checkpoints"):
+        env.recipes.run("m56-zerock", fresh)
+    assert env.forge.list_workflows(fresh) == []
+    with pytest.raises(FileNotFoundError):
+        env.recipes.resolve("m56-child", "no-such-model")
+
+
+def test_m56_canonical_loop_resolution_timing(env):
+    # §10/§11: train -> evaluate(best) -> train(resume_from_best) ->
+    # evaluate(best). The M53 architecture resolves 'best' ONCE at PLAN
+    # START: BOTH evaluate stages and the M55 best-resume train stage pin
+    # the SAME selection computed from the checkpoints existing when the
+    # workflow STARTS — stage 4 does NOT see stage 3's in-run output
+    # (intra-run outputs are referenced explicitly via
+    # checkpoint_from_stage). Stage 4 therefore reuses stage 2's exact
+    # evidence. A LATER execution re-resolves and picks up the improved
+    # state — the finite improvement loop, re-runnable without
+    # hard-coded checkpoint ids.
+    argmin_before = _m55_argmin(env, env.model_id)
+    # a probe seed no earlier test used: the loop's evaluate(best) stages
+    # are guaranteed to CREATE their evidence exactly once (ev2 then reuses
+    # ev1's record), independent of the shared module environment
+    best_ev1 = _m56_best_eval_stage("ev1", env, env.model_id)
+    best_ev2 = _m56_best_eval_stage("ev2", env, env.model_id)
+    for st in (best_ev1, best_ev2):
+        st.evaluation.config.seed = 7
+    train1 = WorkflowStage(
+        stage_id="tr1", type=StageType.TRAIN,
+        training=TrainingConfig(
+            method="continued_pretraining", model_id=env.model_id,
+            dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+            learning_rate=3e-3, batch_size=8, max_seq_len=32,
+            eval_every_steps=2, seed=9, steps=4))
+    train2 = _m55_best_train_stage("tr2", env, env.model_id, seed=6)
+    loop = WorkflowPlan(name="m56-loop", model_id=env.model_id,
+                        stages=[train1, best_ev1, train2, best_ev2])
+
+    resolved = env.forge.workflows.resolve_best_state_refs(loop)
+    pins = [resolved.stages[i].evaluation.resolved_checkpoint_id
+            for i in (1, 3)]
+    assert pins == [argmin_before, argmin_before]     # one selection/plan
+    assert (resolved.stages[2].training.resolved_resume_checkpoint_id
+            == argmin_before)
+
+    n_eval = len(env.forge.list_evaluations(env.model_id))
+    rec = env.forge.run_workflow(loop)
+    assert rec.status == WorkflowStatus.COMPLETED
+    assert rec.stages[1].artifact.checkpoint_id == argmin_before
+    assert rec.stages[3].artifact.checkpoint_id == argmin_before
+    assert (rec.stages[3].artifact.artifact_id
+            == rec.stages[1].artifact.artifact_id)     # evidence reuse
+    assert len(env.forge.list_evaluations(env.model_id)) == n_eval + 1
+    prov = [p for p in env.forge.get_model(env.model_id).training_provenance
+            if p.run_id == rec.stages[2].artifact.artifact_id][0]
+    assert prov.initial_checkpoint_id == argmin_before  # M55 train-from-best
+
+    # stage 3's in-run output is reachable ONLY explicitly (from_stage):
+    # make one of its checkpoints the new best (test-fixture edit in
+    # throwaway storage) and re-run the SAME plan — the next execution
+    # re-resolves and evaluates the improved state, with a different
+    # execution identity; the old record keeps its pins byte-stable
+    tr2_run = rec.stages[2].artifact.artifact_id
+    new_ck = sorted((c for c in env.forge.list_checkpoints(env.model_id)
+                     if c.run_id == tr2_run), key=lambda c: c.step)[-1]
+    import json as _m56json
+    from pathlib import Path as _M56Path
+    ck_path = (_M56Path(env.forge.storage.model_dir(env.model_id))
+               / "checkpoints" / new_ck.checkpoint_id / "manifest.json")
+    man = _m56json.loads(ck_path.read_text())
+    man["validation_loss"] = 0.125
+    ck_path.write_text(_m56json.dumps(man))
+    assert _m55_argmin(env, env.model_id) == new_ck.checkpoint_id
+
+    rec2 = env.forge.run_workflow(loop)
+    assert (rec2.plan.stages[1].evaluation.resolved_checkpoint_id
+            == new_ck.checkpoint_id)                   # re-resolution
+    assert rec2.plan.stages[3].evaluation.resolved_checkpoint_id \
+        == new_ck.checkpoint_id
+    assert (rec2.plan.stages[2].training.resolved_resume_checkpoint_id
+            == new_ck.checkpoint_id)
+    assert rec2.plan_hash != rec.plan_hash
+    assert rec2.stages[1].artifact.checkpoint_id == new_ck.checkpoint_id
+    old = _m56json.loads((_M56Path(env.forge.storage.model_dir(env.model_id))
+                          / "workflows" / f"workflow-{rec.workflow_id}"
+                          / "manifest.json").read_bytes())
+    assert old["plan"]["stages"][1]["evaluation"][
+        "resolved_checkpoint_id"] == argmin_before
+
+
+def test_m56_api_registration_to_execution(api_client):
+    h = _http_env(api_client, "m56a")
+    mid, ds, tok = h["mid"], h["ds"], h["tok"]
+    plan_url = "/api/v1/models/{m}/workflows/recipes/{r}/plan"
+    probe = {"model_id": mid, "dataset_id": ds, "tokenizer_id": tok,
+             "split": "validation", "batch_size": 8, "max_seq_len": 32,
+             "seed": 2}
+    best_stage = {"stage_id": "ev_best", "type": "evaluate",
+                  "evaluation": {"config": probe,
+                                 "checkpoint_from_best": True}}
+
+    # contradictory state selectors rejected at registration
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api56-bad1", "stages": [{
+            "stage_id": "ev", "type": "evaluate",
+            "evaluation": {"config": {**probe, "checkpoint_id": "ck"},
+                           "checkpoint_from_best": True}}]})
+    assert r.status_code == 422, r.text
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api56-bad2", "stages": [{
+            "stage_id": "ev", "type": "evaluate",
+            "evaluation": {"config": probe, "checkpoint_from_best": True,
+                           "checkpoint_from_stage": "tr"}}]})
+    assert r.status_code == 422, r.text
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api56-bad3", "stages": [{
+            "stage_id": "ev", "type": "evaluate",
+            "evaluation": {"config": probe,
+                           "resolved_checkpoint_id": "ck"}}]})
+    assert r.status_code == 422, r.text
+
+    # declarative registration OK; preflight on a zero-checkpoint model
+    # -> the established 404
+    r = api_client.post(RECIPES, json={
+        "recipe_id": "api56-best", "stages": [best_stage]})
+    assert r.status_code == 201, r.text
+    r = api_client.get(plan_url.format(m=mid, r="api56-best"))
+    assert r.status_code == 404
+    assert "no selectable checkpoints" in r.json()["detail"]
+
+    # create checkpoints; compute the expected argmin locally
+    train_body = {"name": "boot-run", "method": "continued_pretraining",
+                  "model_id": mid, "dataset_id": ds, "tokenizer_id": tok,
+                  "learning_rate": 3e-3, "batch_size": 8, "max_seq_len": 32,
+                  "eval_every_steps": 2, "seed": 3, "steps": 4}
+    assert api_client.post("/api/v1/training/run",
+                           json=train_body).status_code == 200
+    listing = api_client.get(f"/api/v1/models/{mid}/checkpoints").json()
+    ordered = sorted(listing, key=lambda c: (c["step"], c["created_at"]))
+    expected = min(ordered, key=lambda c: c["validation_loss"])
+
+    got = api_client.get(plan_url.format(m=mid, r="api56-best"))
+    assert got.status_code == 200, got.text
+    res = got.json()
+    ev = res["plan"]["stages"][0]["evaluation"]
+    assert ev["checkpoint_from_best"] is True
+    assert ev["resolved_checkpoint_id"] == expected["checkpoint_id"]
+    assert ev["config"]["checkpoint_id"] is None
+    assert api_client.get(
+        plan_url.format(m=mid, r="api56-best")).content == got.content
+
+    # execution pins the same concrete checkpoint (same registry state)
+    run = api_client.post(RUNS.format(rid="api56-best"),
+                          json={"model_id": mid}).json()
+    assert run["status"] == "completed"
+    assert run["plan"] == res["plan"]
+    assert (run["stages"][0]["artifact"]["checkpoint_id"]
+            == expected["checkpoint_id"])
+
+    # a DIRECT M4 evaluation request cannot express 'best' (no workflow
+    # context): the unknown field is rejected — name the checkpoint
+    r = api_client.post("/api/v1/evaluations/run",
+                        json={**probe, "checkpoint_from_best": True})
+    assert r.status_code == 422
+    assert "checkpoint_from_best" in r.text
+
+    # OpenAPI: path count UNCHANGED; both fields on the stage schema
+    spec = api_client.get("/openapi.json").json()
+    assert len(spec["paths"]) == 84
+    props = spec["components"]["schemas"]["WorkflowEvaluationStage"][
+        "properties"]
+    assert "checkpoint_from_best" in props
+    assert "resolved_checkpoint_id" in props

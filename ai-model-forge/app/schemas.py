@@ -1266,11 +1266,30 @@ class WorkflowEvaluationStage(BaseModel):
     pointer at an earlier train stage's final checkpoint. When
     ``checkpoint_from_stage`` is set, ``config.checkpoint_id`` must stay unset
     (no ambiguity), and the resolved checkpoint is evaluated on the config's
-    probe with M5/M6-style exact evaluation reuse."""
+    probe with M5/M6-style exact evaluation reuse.
+
+    M56: ``checkpoint_from_best`` is the DECLARATIVE best-state selector —
+    "evaluate the M52 best checkpoint" (minimum persisted validation_loss).
+    The workflow engine's single resolver (M53) pins the SAME per-plan M52
+    selection on ``resolved_checkpoint_id`` (the M53 pinned form); execution
+    then hands the M4 path a PURE explicit-checkpoint config — the
+    evaluation layer never queries "best" (no dynamic selection, no silent
+    fallback to current). XOR with the explicit id and with
+    ``checkpoint_from_stage`` (a contradiction is rejected, never silently
+    preferred); a pre-pinned id is respected (idempotent resolution) and is
+    only valid with ``checkpoint_from_best=True``. Direct M4 evaluation
+    requests have no workflow context and no such field — they name the
+    checkpoint explicitly (GET /checkpoints/best answers it)."""
 
     config: EvaluationConfig
     checkpoint_from_stage: Optional[str] = Field(None, min_length=1,
                                                  max_length=64)
+    # M56: declarative best-evaluation selector (workflow-only); the pin is
+    # set by the workflow engine's single resolver ONLY (the M52 selection's
+    # concrete id) and is valid only with checkpoint_from_best=True
+    checkpoint_from_best: bool = False
+    resolved_checkpoint_id: Optional[str] = Field(
+        None, min_length=1, max_length=64)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1280,6 +1299,21 @@ class WorkflowEvaluationStage(BaseModel):
             raise ValueError(
                 "checkpoint_from_stage conflicts with config.checkpoint_id: "
                 "set exactly one")
+        if self.checkpoint_from_best and self.config.checkpoint_id is not None:
+            raise ValueError(
+                "checkpoint_from_best conflicts with config.checkpoint_id: "
+                "the M52 selection decides the checkpoint OR it is named "
+                "explicitly, never both")
+        if self.checkpoint_from_best and self.checkpoint_from_stage:
+            raise ValueError(
+                "checkpoint_from_best conflicts with checkpoint_from_stage: "
+                "set exactly one state selector")
+        if self.resolved_checkpoint_id is not None \
+                and not self.checkpoint_from_best:
+            raise ValueError(
+                "resolved_checkpoint_id is the workflow resolver's pinned "
+                "M52 selection and is only valid with "
+                "checkpoint_from_best=True")
         return self
 
 

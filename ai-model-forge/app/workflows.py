@@ -249,6 +249,8 @@ class WorkflowEngine:
         checkpoints that exist at that moment (no stored pointer, no
         cross-time lock): the selection runs ONCE per plan and the concrete
         id is pinned into every unresolved 'best' StageStateRef
+        (resolved_checkpoint_id), M55 best-resume train config
+        (resolved_resume_checkpoint_id) and M56 best-evaluation stage
         (resolved_checkpoint_id), which then flows into the immutable run
         record and its plan_hash — executions that resolved different
         checkpoints have different execution identities. Idempotent: refs
@@ -280,9 +282,20 @@ class WorkflowEngine:
                     and stage.training.resolved_resume_checkpoint_id
                     is None)
 
+        def _evaluate_unresolved(stage: WorkflowStage) -> bool:
+            # M56: a declarative best-evaluation stage whose M52
+            # selection has not been pinned yet (the resolver's pinned
+            # form keeps checkpoint_from_best=True + the concrete id).
+            return (stage.type == StageType.EVALUATE
+                    and stage.evaluation is not None
+                    and stage.evaluation.checkpoint_from_best
+                    and stage.evaluation.resolved_checkpoint_id is None)
+
         if not any(_unresolved(ref) for stage in plan.stages
                    for ref in _stage_refs(stage)) \
                 and not any(_train_unresolved(stage)
+                            for stage in plan.stages) \
+                and not any(_evaluate_unresolved(stage)
                             for stage in plan.stages):
             return plan
         # ONE selection per plan through the M52 selector (unknown model or
@@ -327,6 +340,19 @@ class WorkflowEngine:
                     stage = stage.model_copy(update={
                         "training": tc.model_copy(update={
                             "resolved_resume_checkpoint_id": ckpt_id})})
+            elif stage.type == StageType.EVALUATE \
+                    and stage.evaluation is not None:
+                ev = stage.evaluation
+                if _evaluate_unresolved(stage):
+                    # M56: pin the SAME single per-plan selection onto the
+                    # declarative best-evaluation stage (pinned form:
+                    # checkpoint_from_best=True + resolved_checkpoint_
+                    # id=<concrete id>) — the record and plan_hash carry
+                    # the concrete resolution exactly like M53 state refs
+                    # and M55 best-resume train stages.
+                    stage = stage.model_copy(update={
+                        "evaluation": ev.model_copy(update={
+                            "resolved_checkpoint_id": ckpt_id})})
             pinned.append(stage)
         # a REAL WorkflowPlan (full validation incl. _plan_consistent)
         return WorkflowPlan(name=plan.name, model_id=plan.model_id,
@@ -495,6 +521,22 @@ class WorkflowEngine:
         if stage.type == StageType.EVALUATE:
             payload = stage.evaluation  # type: ignore[assignment]
             cfg: EvaluationConfig = payload.config.model_copy()
+            if payload.checkpoint_from_best:
+                # M56: the resolver already pinned the M52 selection's
+                # concrete checkpoint id. Hand the M4 evaluation path a
+                # PURE explicit-checkpoint config (the same conversion
+                # pattern as M55 train stages: the workflow layer selects,
+                # the evaluation layer receives the explicit id — no
+                # dynamic "best" query, no silent fallback to current).
+                # The declarative trace (checkpoint_from_best=True + the
+                # pin) stays in the run record's plan.
+                if payload.resolved_checkpoint_id is None:
+                    raise ValueError(
+                        "checkpoint_from_best reached execution without a "
+                        "pinned M52 selection — the workflow resolver must "
+                        "run first (no silent fallback to current weights)")
+                cfg = cfg.model_copy(update={
+                    "checkpoint_id": payload.resolved_checkpoint_id})
             if payload.checkpoint_from_stage:
                 ckpt_id = self._final_checkpoint_of(
                     payload.checkpoint_from_stage, artifacts)
