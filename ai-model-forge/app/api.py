@@ -837,6 +837,27 @@ def index() -> HTMLResponse:
         repeated run's successive advances); it decides nothing — no
         automatic stopping, no convergence detection.</li>
 
+      <li><b>M60 declarative best-publication stage</b> — a
+        workflow/recipe PUBLISH stage closes the loop's missing
+        ACCEPT step: <code>publish_from_best</code> declares
+        <code>PUBLISH(best)</code> and the SAME resolver (M53) resolves
+        the SAME M52 selection ONCE per plan, pins the concrete
+        checkpoint id (<code>resolved_checkpoint_id</code>), and the
+        executor runs the EXISTING M3 verified rollback machinery —
+        integrity verification, atomic weights restore as current,
+        <code>latest_checkpoint</code> update — never a second
+        publication mechanism, never a weights copy, never a new
+        pointer system, and the immutable source checkpoint is never
+        touched. XOR with the explicit <code>checkpoint_id</code>
+        (both or neither -> 422); the direct M3 rollback route keeps
+        naming the concrete checkpoint ('best' never leaks into M3).
+        The canonical acceptance loop — train, evaluate(best),
+        gate(best), publish(best) — is now fully declarative; on a
+        gate stop the publish stage is simply skipped (nothing is
+        published from a rejected state). No new endpoint: the
+        existing <code>POST /workflows/run</code>, recipe runs and
+        the M51 preflight all resolve through the same path.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare

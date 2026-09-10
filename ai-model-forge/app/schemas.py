@@ -1275,6 +1275,7 @@ class StageType(str, Enum):
     COMPARE = "compare"        # M5 A/B comparison (equivalent evidence reused)
     GATE = "gate"              # M6 policy decision (branching source)
     SUITE_RUN = "suite_run"    # M10 suite run (multi-probe M4 batch, M11 stage)
+    PUBLISH = "publish"        # M3 verified restore as current (M60 adapter)
     RECIPE = "recipe"          # recipe reference (M14; registered recipes only)
 
 
@@ -1296,6 +1297,7 @@ class ArtifactKind(str, Enum):
     COMPARISON = "comparison"
     GATE_DECISION = "gate_decision"
     SUITE_RUN = "suite_run"
+    PUBLICATION = "publication"
 
 
 class StageStateRef(BaseModel):
@@ -1484,6 +1486,62 @@ class WorkflowSuiteRunStage(BaseModel):
 
 
 
+class WorkflowPublishStage(BaseModel):
+    """M60 publication stage: make ONE immutable checkpoint the model's
+    PUBLISHED/live state through the EXISTING M3 verified rollback
+    machinery (verify the checkpoint's integrity -> atomically restore
+    its weights as the model's current weights -> update the manifest's
+    ``latest_checkpoint``) — a thin workflow adapter, never a second
+    publication mechanism, never a second weights copy, never a new
+    latest-pointer system, and it never mutates the source checkpoint.
+
+    Exactly ONE publication source: the DECLARATIVE M52 best selection
+    (``publish_from_best`` — ``PUBLISH(best)``, the canonical loop's
+    terminal acceptance action) XOR an explicit immutable
+    ``checkpoint_id``. The best source is resolved by the workflow
+    engine's single M53 resolver into the concrete checkpoint id pinned
+    on ``resolved_checkpoint_id`` (the M53 pinned form — the plan/record
+    and its ``plan_hash`` carry the concrete resolution, exactly like
+    M53 state refs, M55 best-resume, M56 best-evaluation and M57
+    best-baseline stages). The executor ALWAYS receives a concrete
+    checkpoint id and never asks "what is best?" — and the direct M3
+    rollback API keeps naming the concrete checkpoint explicitly ('best'
+    never leaks into M3; the workflow layer owns the declarative ->
+    concrete conversion).
+    """
+
+    checkpoint_id: Optional[str] = Field(None, min_length=1, max_length=64)
+    # M60: declarative best-publication selector (workflow-only); the pin
+    # is set by the workflow engine's single resolver ONLY (the M52
+    # selection's concrete id) and is valid only with
+    # publish_from_best=True
+    publish_from_best: bool = False
+    resolved_checkpoint_id: Optional[str] = Field(
+        None, min_length=1, max_length=64)
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    @model_validator(mode="after")
+    def _source_unambiguous(self) -> "WorkflowPublishStage":
+        if self.publish_from_best and self.checkpoint_id is not None:
+            raise ValueError(
+                "publish_from_best conflicts with checkpoint_id: the M52 "
+                "selection decides the published checkpoint OR it is named "
+                "explicitly, never both")
+        if not self.publish_from_best and self.checkpoint_id is None:
+            raise ValueError(
+                "a publish stage needs exactly one source: publish_from_best "
+                "(the M52 selection) or an explicit checkpoint_id")
+        if self.resolved_checkpoint_id is not None \
+                and not self.publish_from_best:
+            raise ValueError(
+                "resolved_checkpoint_id is the workflow resolver's pinned "
+                "M52 selection and is only valid with "
+                "publish_from_best=True")
+        return self
+
+
+
 class WorkflowRecipeCallStage(BaseModel):
     """A recipe-reference stage inside a registered recipe (M14).
 
@@ -1520,6 +1578,7 @@ class WorkflowStage(BaseModel):
     comparison: Optional[WorkflowComparisonStage] = None  # type=compare
     gate: Optional[WorkflowGateStage] = None              # type=gate
     suite_run: Optional[WorkflowSuiteRunStage] = None     # type=suite_run
+    publish: Optional[WorkflowPublishStage] = None        # type=publish (M60)
     recipe: Optional[WorkflowRecipeCallStage] = None      # type=recipe (M14)
     on_pass: Optional[str] = Field(None, min_length=1, max_length=64)
     on_fail: Optional[str] = Field(None, min_length=1, max_length=64)
@@ -1530,18 +1589,19 @@ class WorkflowStage(BaseModel):
     def _payload_matches_type(self) -> "WorkflowStage":
         payloads = [p for p in (self.training, self.evaluation,
                                 self.comparison, self.gate, self.suite_run,
-                                self.recipe)
+                                self.publish, self.recipe)
                     if p is not None]
         if len(payloads) != 1:
             raise ValueError(
                 "a stage must set exactly one payload (training/evaluation/"
-                "comparison/gate/suite_run/recipe) for its type")
+                "comparison/gate/suite_run/publish/recipe) for its type")
         (payload,) = payloads
         expected = {StageType.TRAIN: TrainingConfig,
                     StageType.EVALUATE: WorkflowEvaluationStage,
                     StageType.COMPARE: WorkflowComparisonStage,
                     StageType.GATE: WorkflowGateStage,
                     StageType.SUITE_RUN: WorkflowSuiteRunStage,
+                    StageType.PUBLISH: WorkflowPublishStage,
                     StageType.RECIPE: WorkflowRecipeCallStage}[self.type]
         if not isinstance(payload, expected):
             raise ValueError(

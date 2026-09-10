@@ -44,6 +44,8 @@ from app.schemas import (
     WorkflowEvaluationStage,
     WorkflowGateStage,
     WorkflowPlan,
+    WorkflowPublishStage,
+    WorkflowRecipeCallStage,
     WorkflowRecipeCreateRequest,
     WorkflowStage,
     WorkflowStatus,
@@ -4066,3 +4068,518 @@ def test_m58_api_batch_response_and_history(api_client):
     assert "maximum" in props["repetitions"] \
         and props["repetitions"]["maximum"] == 16
     assert "WorkflowRecipeRepetitionRun" in spec["components"]["schemas"]
+
+
+# --------------------------------------------------------------------- M60
+# Declarative best-publication stage: publish_from_best resolves through
+# the SAME M53 resolver (one M52 selection per plan), pins the concrete
+# id, and executes the EXISTING M3 verified rollback machinery — the
+# authoritative invariant: resolved best checkpoint == published/live
+# checkpoint after a successful PUBLISH(best).
+
+def _m60_best_stage(sid, **overrides):
+    kw = dict(publish_from_best=True)
+    kw.update(overrides)
+    return WorkflowStage(stage_id=sid, type=StageType.PUBLISH,
+                         publish=WorkflowPublishStage(**kw))
+
+
+def _m60_explicit_stage(sid, ckpt):
+    return WorkflowStage(stage_id=sid, type=StageType.PUBLISH,
+                         publish=WorkflowPublishStage(checkpoint_id=ckpt))
+
+
+def _m60_file_hashes(env, model_id, ckpt_id):
+    import hashlib as _h
+    d = env.forge.storage.model_dir(model_id) / "checkpoints" / ckpt_id
+    return {name: _h.sha256((d / name).read_bytes()).hexdigest()
+            for name in ("manifest.json", "weights.pt")}
+
+
+def _m60_weights_equal(env, model_id, ckpt_id):
+    import torch as _t
+    state = env.forge.training.verify_checkpoint(model_id, ckpt_id)
+    cur = _t.load(env.forge.storage.weights_path(model_id),
+                  map_location="cpu", weights_only=True)
+    return set(state) == set(cur) and all(
+        _t.equal(state[k], cur[k]) for k in state)
+
+
+def _m60_argmin(records):
+    """Independent expected-value replay (the M59 pattern): minimum
+    persisted validation_loss, canonical (step, created_at) ASCENDING
+    tie-break, non-finite never candidates."""
+    best = None
+    for c in records:
+        c = c if isinstance(c, dict) else c.model_dump()
+        v = c["validation_loss"]
+        if not (v == v and -float("inf") < v < float("inf")):
+            continue
+        key = (v, c["step"], c["created_at"])
+        if best is None or key < best[0]:
+            best = (key, c["checkpoint_id"])
+    return best[1]
+
+
+def test_m60_schema_matrix_and_m3_surface_unchanged(env):
+    # declarative form: default False only with an explicit id; the
+    # best declaration; the resolver's pinned form; contradictions
+    assert WorkflowPublishStage(checkpoint_id="ck"
+                                 ).publish_from_best is False
+    assert WorkflowPublishStage(
+        publish_from_best=True).resolved_checkpoint_id is None
+    WorkflowPublishStage(publish_from_best=True,
+                         resolved_checkpoint_id=env.ck_main)  # pinned OK
+    with pytest.raises(ValidationError):     # both sources
+        WorkflowPublishStage(publish_from_best=True, checkpoint_id="ck")
+    with pytest.raises(ValidationError):     # neither source
+        WorkflowPublishStage()
+    with pytest.raises(ValidationError):     # pin without the declaration
+        WorkflowPublishStage(checkpoint_id="ck",
+                             resolved_checkpoint_id="ck")
+
+    # stage wiring: payload matches type; gate-only branches rejected
+    st = _m60_best_stage("p1")
+    assert st.type == StageType.PUBLISH and st.publish.publish_from_best
+    with pytest.raises(ValidationError):
+        WorkflowStage(stage_id="p2", type=StageType.PUBLISH,
+                      publish=WorkflowPublishStage(publish_from_best=True),
+                      on_pass="later")
+    with pytest.raises(ValidationError):
+        WorkflowStage(stage_id="p3", type=StageType.EVALUATE,
+                      publish=WorkflowPublishStage(publish_from_best=True))
+    # publish stages carry no from_stage refs: no structural change
+    plan = WorkflowPlan(name="m60-s", model_id=env.model_id,
+                        stages=[_m60_best_stage("p4")])
+    assert plan.stages[0].publish.publish_from_best is True
+
+    # 'best' never leaks into M3: the rollback request still names the
+    # concrete checkpoint only (no new field)
+    from app.schemas import RollbackRequest as _M60RollbackRequest
+    assert set(_M60RollbackRequest.model_fields) == {"checkpoint_id"}
+
+    # a plan WITHOUT best declarations passes through the resolver
+    # unchanged (byte-identical plan_hash)
+    plain = WorkflowPlan(name="m60-plain", model_id=env.model_id,
+                         stages=[_m60_explicit_stage("p5", env.ck_main)])
+    resolved = env.forge.workflows.resolve_best_state_refs(plain)
+    assert resolved.plan_hash() == plain.plan_hash()
+    env.no_tmp()
+
+
+def test_m60_publish_best_closes_drift(env):
+    # THE primary acceptance test (drift): best A != latest B,
+    # validation_loss(A) < validation_loss(B); PUBLISH(best) must
+    # resolve + pin A BEFORE execution, publish A through M3, leave
+    # both checkpoints immutable, create no new checkpoint, and keep
+    # the M52/M59 read-only answers unchanged.
+    import json as _m60json
+
+    latest = env.forge.get_model(env.model_id).latest_checkpoint
+    sel = env.forge.select_best_checkpoint(env.model_id)
+    non_latest = next(c for c in env.forge.list_checkpoints(env.model_id)
+                      if c.checkpoint_id != latest)
+    ck_path = (env.forge.storage.model_dir(env.model_id) / "checkpoints"
+               / non_latest.checkpoint_id / "manifest.json")
+    man = _m60json.loads(ck_path.read_text())
+    man["validation_loss"] = sel.checkpoint.validation_loss / 4.0
+    ck_path.write_text(_m60json.dumps(man))
+    a_id = _m55_argmin(env, env.model_id)          # A: the new best
+    assert a_id == non_latest.checkpoint_id and a_id != latest
+
+    pre_a = _m60_file_hashes(env, env.model_id, a_id)       # A immutable?
+    pre_b = _m60_file_hashes(env, env.model_id, latest)     # B immutable?
+    n_ck = len(env.forge.list_checkpoints(env.model_id))
+    history_before = [e.model_dump() for e in
+                      env.forge.best_checkpoint_history(env.model_id).entries]
+    a_loss = env.forge.get_checkpoint(env.model_id, a_id).validation_loss
+
+    env.recipes.register(_recipe("m60-drift", [
+        _m60_best_stage("pub_best")]))
+
+    # M51 preflight pins the SAME concrete id through the SAME resolver
+    res = env.recipes.resolve("m60-drift", env.model_id)
+    assert (res.plan.stages[0].publish.resolved_checkpoint_id
+            == a_id)
+    assert res.plan.stages[0].publish.publish_from_best is True
+
+    rec = env.recipes.run("m60-drift", env.model_id)
+    assert rec.status == WorkflowStatus.COMPLETED
+    pub = rec.plan.stages[0].publish
+    assert pub.publish_from_best is True
+    assert pub.resolved_checkpoint_id == a_id      # pinned before execution
+    assert pub.checkpoint_id is None               # no explicit leak
+    assert rec.plan.model_dump() == res.plan.model_dump()  # preflight parity
+    art = rec.stages[0].artifact
+    assert art.kind.value == "publication"
+    assert art.artifact_id == a_id                 # record names the source
+    assert art.checkpoint_id == a_id
+    assert art.state_hash == env.forge.get_checkpoint(
+        env.model_id, a_id).weights_sha256         # authoritative identity
+    assert art.final_validation_loss == a_loss
+    assert art.result_hash is None                 # no fabricated hash
+
+    # the invariant: published/live state == resolved best
+    assert env.forge.get_model(env.model_id).latest_checkpoint == a_id
+    assert _m60_weights_equal(env, env.model_id, a_id)
+
+    # immutability + no new checkpoint + no duplicated payload
+    assert _m60_file_hashes(env, env.model_id, a_id) == pre_a
+    assert _m60_file_hashes(env, env.model_id, latest) == pre_b
+    assert len(env.forge.list_checkpoints(env.model_id)) == n_ck
+    set_fields = {k for k, v in art.model_dump().items() if v is not None}
+    assert set_fields <= {"kind", "artifact_id", "checkpoint_id",
+                          "state_hash", "final_validation_loss"
+                          }    # reference-only artifact (no payload copy)
+
+    # M52 / M59 read-only answers unchanged by the publication
+    after = env.forge.select_best_checkpoint(env.model_id)
+    assert after.checkpoint.checkpoint_id == a_id
+    assert [e.model_dump() for e in
+            env.forge.best_checkpoint_history(env.model_id).entries] \
+        == history_before
+    env.no_tmp()
+
+
+def test_m60_explicit_idempotent_deterministic(env):
+    # explicit checkpoint publication still works (the M3 concrete form)
+    target = env.ck_late
+    env.recipes.register(_recipe("m60-explicit", [
+        _m60_explicit_stage("pub_x", target)]))
+    rec = env.recipes.run("m60-explicit", env.model_id)
+    assert rec.status == WorkflowStatus.COMPLETED
+    assert rec.plan.stages[0].publish.publish_from_best is False
+    assert rec.plan.stages[0].publish.checkpoint_id == target
+    assert env.forge.get_model(env.model_id).latest_checkpoint == target
+
+    # publishing an ALREADY-published best is safe (idempotent): the
+    # M3 restore re-verifies and rewrites the same state
+    best_id = _m55_argmin(env, env.model_id)
+    env.recipes.register(_recipe("m60-repub", [
+        _m60_best_stage("pub_again")]))
+    w_before = _m60_file_hashes(env, env.model_id, best_id)
+    rec2 = env.recipes.run("m60-repub", env.model_id)
+    assert rec2.status == WorkflowStatus.COMPLETED
+    assert env.forge.get_model(env.model_id).latest_checkpoint == best_id
+    assert _m60_weights_equal(env, env.model_id, best_id)
+    assert _m60_file_hashes(env, env.model_id, best_id) == w_before
+
+    # determinism: equivalent publish-best runs produce equivalent
+    # records (identical semantic result_hash; ids excluded)
+    rec3 = env.recipes.run("m60-repub", env.model_id)
+    assert rec3.status == WorkflowStatus.COMPLETED
+    assert rec3.result_hash == rec2.result_hash
+    assert rec3.plan_hash == rec2.plan_hash
+    assert rec3.workflow_id != rec2.workflow_id   # distinct runs, same semantics
+
+    # the executor guard: a publish_from_best stage reaching execution
+    # WITHOUT a pin is refused (no dynamic 'best' query, no fallback) —
+    # unreachable through public paths (run() resolves first), proven
+    # here directly on the stage adapter
+    with pytest.raises(ValueError, match="pinned M52 selection"):
+        env.forge.workflows._execute_stage(
+            env.forge.get_model(env.model_id),
+            _m60_best_stage("pub_guard"), {})
+    env.no_tmp()
+
+
+def test_m60_resolution_errors_ties_and_corruption(env):
+    import json as _m60json
+
+    # exact M52 tie semantics through the resolver: two checkpoints at
+    # the SAME minimum resolve to the canonical first-among-equals
+    # (the pair is made STRICTLY minimal by construction: half the
+    # current global minimum, so no other checkpoint can compete)
+    listing = env.forge.list_checkpoints(env.model_id)
+    cur_min = min(c.validation_loss for c in listing
+                  if c.validation_loss == c.validation_loss
+                  and c.validation_loss not in (float("inf"),
+                                                float("-inf")))
+    ties = listing[:2]
+    for c in ties:
+        p = (env.forge.storage.model_dir(env.model_id) / "checkpoints"
+             / c.checkpoint_id / "manifest.json")
+        m = _m60json.loads(p.read_text())
+        m["validation_loss"] = cur_min / 2.0
+        p.write_text(_m60json.dumps(m))
+    expected = _m60_argmin([c.model_dump() for c in
+                            env.forge.list_checkpoints(env.model_id)])
+    assert env.forge.select_best_checkpoint(
+        env.model_id).checkpoint.checkpoint_id == expected
+    assert env.forge.select_best_checkpoint(env.model_id).tied is True
+    res = env.recipes.resolve("m60-repub", env.model_id)
+    assert (res.plan.stages[0].publish.resolved_checkpoint_id
+            == expected)
+    rec = env.recipes.run("m60-repub", env.model_id)
+    assert rec.plan.stages[0].publish.resolved_checkpoint_id == expected
+
+    # unknown model / no selectable checkpoints -> the established
+    # FileNotFoundError BEFORE anything executes or persists
+    n_wf = len(env.forge.list_workflows(env.model_id))
+    with pytest.raises(FileNotFoundError):
+        env.forge.workflows.run(WorkflowPlan(
+            name="m60-unknown", model_id="no-such-m60",
+            stages=[_m60_best_stage("p")]))
+    fresh = env.fresh_model("m60-empty")
+    with pytest.raises(FileNotFoundError):
+        env.forge.workflows.run(WorkflowPlan(
+            name="m60-empty", model_id=fresh,
+            stages=[_m60_best_stage("p")]))
+    assert len(env.forge.list_workflows(env.model_id)) == n_wf
+
+    # corrupt resolved checkpoint: M3 verification refuses (existing
+    # semantics), the stage fails, the previous published state and the
+    # immutable evidence survive, and the failed record persists
+    pub_id = env.forge.get_model(env.model_id).latest_checkpoint
+    wpath = (env.forge.storage.model_dir(env.model_id) / "checkpoints"
+             / pub_id / "weights.pt")
+    saved = wpath.read_bytes()
+    wpath.write_bytes(b"m60-corrupted-weights")
+    env.recipes.register(_recipe("m60-corrupt", [
+        _m60_best_stage("pub_c")]))
+    n_wf = len(env.forge.list_workflows(env.model_id))
+    try:
+        with pytest.raises(RuntimeError):
+            env.recipes.run("m60-corrupt", env.model_id)
+    finally:
+        wpath.write_bytes(saved)   # restore the fixture immediately
+    wrecs = env.forge.list_workflows(env.model_id)   # append-only, oldest 1st
+    assert len(wrecs) == n_wf + 1
+    failed = wrecs[-1]                                 # newest is last
+    assert failed.status == WorkflowStatus.FAILED
+    assert failed.failed_stage_id == "pub_c"
+    assert failed.stages[0].executed and failed.stages[0].error
+    # the publication never happened: live state kept its weights
+    assert env.forge.get_model(env.model_id).latest_checkpoint == pub_id
+    env.no_tmp()
+
+
+def test_m60_canonical_loop_and_gate_stop(env):
+    # the canonical acceptance sequence in ONE ordinary recipe:
+    # TRAIN -> EVALUATE(best) -> GATE(best) -> PUBLISH(best); ONE
+    # per-plan selection pins evaluate, gate baseline AND publish
+    argmin = _m55_argmin(env, env.model_id)
+    env.recipes.register(_recipe("m60-loop", [
+        WorkflowStage(
+            stage_id="tr", type=StageType.TRAIN,
+            training=TrainingConfig(
+                method="continued_pretraining", model_id=env.model_id,
+                dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+                learning_rate=3e-3, batch_size=8, max_seq_len=32,
+                eval_every_steps=2, seed=7, steps=4)),
+        WorkflowStage(
+            stage_id="ev", type=StageType.EVALUATE,
+            evaluation=WorkflowEvaluationStage(
+                config=EvaluationConfig(
+                    model_id=env.model_id, dataset_id=env.ds_a,
+                    tokenizer_id=env.tok_id, split="validation",
+                    batch_size=8, max_seq_len=32),
+                checkpoint_from_best=True)),
+        WorkflowStage(
+            stage_id="gate", type=StageType.GATE,
+            gate=WorkflowGateStage(
+                policy=_m57_gate_policy(env, env.model_id, tolerance=5.0),
+                candidate=StageStateRef(
+                    state_kind=EvalStateKind.BEST))),
+        _m60_best_stage("pub")]))
+    rec = env.recipes.run("m60-loop", env.model_id)
+    assert rec.status == WorkflowStatus.COMPLETED
+    for st in rec.stages:
+        assert st.executed and not st.skipped
+    # ONE selection per plan: every best declaration pins the SAME id
+    pins = [rec.plan.stages[1].evaluation.resolved_checkpoint_id,
+            rec.plan.stages[2].gate.policy.resolved_baseline_checkpoint_id,
+            rec.plan.stages[2].gate.candidate.resolved_checkpoint_id,
+            rec.plan.stages[3].publish.resolved_checkpoint_id]
+    assert pins == [argmin] * 4
+    assert rec.stages[3].artifact.kind.value == "publication"
+    assert env.forge.get_model(env.model_id).latest_checkpoint == argmin
+    assert _m60_weights_equal(env, env.model_id, argmin)
+
+    # gate stop: a FAILED gate without on_fail SKIPS the publish stage
+    # — nothing is ever published from a rejected state
+    kept = env.forge.get_model(env.model_id).latest_checkpoint
+    env.recipes.register(_recipe("m60-stop", [
+        WorkflowStage(
+            stage_id="g_hard", type=StageType.GATE,
+            gate=WorkflowGateStage(
+                policy=GatePolicy(
+                    name="m60-hard", model_id=env.model_id,
+                    dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+                    split="validation", batch_size=8, max_seq_len=32,
+                    seed=2, baseline_type="minimum_loss",
+                    minimum_loss=1e-9),
+                candidate=StageStateRef(
+                    state_kind=EvalStateKind.CURRENT))),
+        _m60_best_stage("pub_never")]))
+    rec2 = env.recipes.run("m60-stop", env.model_id)
+    assert rec2.status == WorkflowStatus.STOPPED
+    assert rec2.stages[0].executed and rec2.stages[0].artifact
+    assert rec2.stages[1].skipped and not rec2.stages[1].executed
+    assert rec2.stages[1].artifact is None
+    assert env.forge.get_model(env.model_id).latest_checkpoint == kept
+    env.no_tmp()
+
+
+def test_m60_composition_and_repetitions(env):
+    import json as _m60json
+
+    # M14 composition: the publish stage rides the ordinary recipe
+    # architecture (no special executor)
+    env.recipes.register(_recipe("m60-inner", [
+        _m60_best_stage("pub_in")]))
+    env.recipes.register(_recipe("m60-outer", [
+        WorkflowStage(stage_id="call", type=StageType.RECIPE,
+                      recipe=WorkflowRecipeCallStage(recipe_id="m60-inner"))]))
+    best = _m55_argmin(env, env.model_id)
+    rec = env.recipes.run("m60-outer", env.model_id)
+    assert rec.status == WorkflowStatus.COMPLETED
+    assert rec.composition and rec.composition[0].recipe_id == "m60-inner"
+    assert rec.plan.stages[0].publish.resolved_checkpoint_id == best
+    assert env.forge.get_model(env.model_id).latest_checkpoint == best
+
+    # M58 repetitions: each iteration independently re-resolves its best
+    # at ITS plan start and publishes it (fresh model; every checkpoint
+    # pinned at a high loss so iteration 1's training MUST advance best)
+    fresh = env.fresh_model("m60-rep")
+    rep = env.forge.run_training(TrainingConfig(
+        method="continued_pretraining", model_id=fresh,
+        dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+        learning_rate=3e-3, batch_size=8, max_seq_len=32,
+        epochs=4, eval_every_steps=2, keep_best=False, seed=61))
+    assert len(rep.checkpoints) >= 1
+    for c in env.forge.list_checkpoints(fresh):
+        p = (env.forge.storage.model_dir(fresh) / "checkpoints"
+             / c.checkpoint_id / "manifest.json")
+        m = _m60json.loads(p.read_text())
+        m["validation_loss"] = 9.0
+        p.write_text(_m60json.dumps(m))
+    argmin1 = _m60_argmin([c.model_dump() for c in
+                           env.forge.list_checkpoints(fresh)])
+
+    env.recipes.register(_recipe("m60-rep-loop", [
+        WorkflowStage(
+            stage_id="tr", type=StageType.TRAIN,
+            training=TrainingConfig(
+                method="continued_pretraining", model_id=fresh,
+                dataset_id=env.ds_a, tokenizer_id=env.tok_id,
+                learning_rate=3e-3, batch_size=8, max_seq_len=32,
+                eval_every_steps=2, seed=62, steps=4,
+                resume_from_best=True)),
+        _m60_best_stage("pub")]))
+
+    records = env.recipes.run_repeated("m60-rep-loop", fresh, 2)
+    assert len(records) == 2
+    assert all(r.status == WorkflowStatus.COMPLETED for r in records)
+    # iteration 1 pinned + published the plan-start best (a 9.0 fixture)
+    pin1 = records[0].plan.stages[1].publish.resolved_checkpoint_id
+    assert pin1 == argmin1
+    assert records[0].stages[1].artifact.checkpoint_id == argmin1
+    # iteration 2 re-resolved: its best is an OUTPUT of iteration 1's
+    # train stage (the 9.0 fixtures can no longer win) and was published
+    run1 = records[0].stages[0].artifact.artifact_id
+    pin2 = records[1].plan.stages[1].publish.resolved_checkpoint_id
+    assert pin2 != pin1
+    assert env.forge.get_checkpoint(fresh, pin2).run_id == run1
+    pre_iter2 = [c for c in env.forge.list_checkpoints(fresh)
+                 if c.run_id != records[1].stages[0].artifact.artifact_id]
+    assert pin2 == _m60_argmin([c.model_dump() for c in pre_iter2])
+    assert env.forge.get_model(fresh).latest_checkpoint == pin2
+    assert _m60_weights_equal(env, fresh, pin2)
+    # the M55 resume and the M60 publish inside ONE iteration pinned
+    # the SAME per-plan selection
+    for r in records:
+        assert (r.plan.stages[0].training.resolved_resume_checkpoint_id
+                == r.plan.stages[1].publish.resolved_checkpoint_id)
+    env.no_tmp()
+
+
+def test_m60_api_surface_openapi(api_client):
+    # HTTP surface: registration validation, the inline run route, the
+    # drift closed through public APIs only, and OpenAPI unchanged
+    h = _http_env(api_client, "m60a")
+    mid, ds, tok = h["mid"], h["ds"], h["tok"]
+
+    # contradictory stage declarations rejected at registration (422)
+    for bad in [
+            {"publish_from_best": True, "checkpoint_id": "ck"},
+            {},
+            {"checkpoint_id": "ck", "resolved_checkpoint_id": "ck"}]:
+        body = {"recipe_id": "api60-bad", "stages": [
+            {"stage_id": "p", "type": "publish", "publish": bad}]}
+        r = api_client.post(RECIPES, json=body)
+        assert r.status_code == 422, r.text
+
+    # a valid declarative recipe registers; a valid explicit one too
+    body = {"recipe_id": "api60-pub", "stages": [
+        {"stage_id": "pub_best", "type": "publish",
+         "publish": {"publish_from_best": True}}]}
+    r = api_client.post(RECIPES, json=body)
+    assert r.status_code == 201, r.text
+
+    # publish(best) on a model with no checkpoints -> the established
+    # 404 (M52: nothing is manufactured), nothing persisted
+    n_wf = len(api_client.get(f"{MODELS}/{mid}/workflows").json())
+    r = api_client.post("/api/v1/workflows/run", json={
+        "name": "api60-empty", "model_id": mid,
+        "stages": [{"stage_id": "p", "type": "publish",
+                    "publish": {"publish_from_best": True}}]})
+    assert r.status_code == 404, r.text
+    assert len(api_client.get(f"{MODELS}/{mid}/workflows").json()) == n_wf
+
+    # train over the public API, force the drift through the PUBLIC M3
+    # rollback route, then close it with PUBLISH(best)
+    tr = api_client.post("/api/v1/training/run", json={
+        "name": "api60-run", "method": "continued_pretraining",
+        "model_id": mid, "dataset_id": ds, "tokenizer_id": tok,
+        "learning_rate": 3e-3, "batch_size": 8, "steps": 8,
+        "max_seq_len": 32, "eval_every_steps": 4, "keep_best": False,
+        "seed": 3})
+    assert tr.status_code == 200, tr.text
+    best = api_client.get(f"{MODELS}/{mid}/checkpoints/best").json()
+    best_id = best["checkpoint"]["checkpoint_id"]
+    other = next(c["checkpoint_id"] for c in
+                 api_client.get(f"{MODELS}/{mid}/checkpoints").json()
+                 if c["checkpoint_id"] != best_id)
+    rb = api_client.post(f"{MODELS}/{mid}/rollback",
+                         json={"checkpoint_id": other})
+    assert rb.status_code == 200, rb.text
+    assert rb.json()["latest_checkpoint"] == other            # drift
+    assert best_id != other
+
+    r = api_client.post("/api/v1/workflows/run", json={
+        "name": "api60-close", "model_id": mid,
+        "stages": [{"stage_id": "pub", "type": "publish",
+                    "publish": {"publish_from_best": True}}]})
+    assert r.status_code == 200, r.text
+    rec = r.json()
+    assert rec["status"] == "completed"
+    assert rec["plan"]["stages"][0]["publish"][
+        "resolved_checkpoint_id"] == best_id
+    assert rec["stages"][0]["artifact"]["checkpoint_id"] == best_id
+    got = api_client.get(f"{MODELS}/{mid}").json()
+    assert got["latest_checkpoint"] == best_id      # published == best
+    assert api_client.get(f"{MODELS}/{mid}/checkpoints/best").json()[
+        "checkpoint"]["checkpoint_id"] == best_id     # M52 unchanged
+    hist = api_client.get(f"{MODELS}/{mid}/checkpoints/best/history"
+                          ).json()["entries"]
+    assert hist[-1]["checkpoint_id"] == best_id        # M59 unchanged
+    # M58 surface with the publish stage: two repetitions over HTTP
+    r = api_client.post(f"{RECIPES}/api60-pub/runs", json={
+        "model_id": mid, "repetitions": 2})
+    assert r.status_code == 200, r.text
+    batch = r.json()
+    assert batch["executed"] == 2 and batch["stopped_early"] is False
+    assert all(rec["plan"]["stages"][0]["publish"][
+        "resolved_checkpoint_id"] == best_id for rec in batch["records"])
+
+    # OpenAPI: NO new route (the stage rides existing schemas)
+    spec = api_client.get("/openapi.json").json()
+    assert len(spec["paths"]) == 85
+    assert "WorkflowPublishStage" in spec["components"]["schemas"]
+    props = spec["components"]["schemas"]["WorkflowPublishStage"][
+        "properties"]
+    assert props["publish_from_best"]["default"] is False
+    stage_props = spec["components"]["schemas"]["WorkflowStage"][
+        "properties"]
+    assert stage_props["publish"] is not None

@@ -63,6 +63,7 @@ from .schemas import (
     WorkflowArtifact,
     WorkflowGateStage,
     WorkflowPlan,
+    WorkflowPublishStage,
     WorkflowRecord,
     WorkflowRecipeRef,
     WorkflowStage,
@@ -251,8 +252,9 @@ class WorkflowEngine:
         id is pinned into every unresolved 'best' StageStateRef
         (resolved_checkpoint_id), M55 best-resume train config
         (resolved_resume_checkpoint_id), M56 best-evaluation stage
-        (resolved_checkpoint_id) and M57 best-baseline gate policy
-        (resolved_baseline_checkpoint_id), which then flows into the
+        (resolved_checkpoint_id), M57 best-baseline gate policy
+        (resolved_baseline_checkpoint_id) and M60 best-publication stage
+        (resolved_checkpoint_id), which then flows into the
         immutable run record and its plan_hash — executions that
         resolved different
         checkpoints have different execution identities. Idempotent: refs
@@ -308,6 +310,15 @@ class WorkflowEngine:
                     and stage.gate.policy.resolved_baseline_checkpoint_id
                     is None)
 
+        def _publish_unresolved(stage: WorkflowStage) -> bool:
+            # M60: a declarative best-publication stage whose M52
+            # selection has not been pinned yet (the resolver's pinned
+            # form keeps publish_from_best=True + the concrete id).
+            return (stage.type == StageType.PUBLISH
+                    and stage.publish is not None
+                    and stage.publish.publish_from_best
+                    and stage.publish.resolved_checkpoint_id is None)
+
         if not any(_unresolved(ref) for stage in plan.stages
                    for ref in _stage_refs(stage)) \
                 and not any(_train_unresolved(stage)
@@ -315,6 +326,8 @@ class WorkflowEngine:
                 and not any(_evaluate_unresolved(stage)
                             for stage in plan.stages) \
                 and not any(_gate_baseline_unresolved(stage)
+                            for stage in plan.stages) \
+                and not any(_publish_unresolved(stage)
                             for stage in plan.stages):
             return plan
         # ONE selection per plan through the M52 selector (unknown model or
@@ -384,6 +397,21 @@ class WorkflowEngine:
                     # and M55 best-resume train stages.
                     stage = stage.model_copy(update={
                         "evaluation": ev.model_copy(update={
+                            "resolved_checkpoint_id": ckpt_id})})
+            elif stage.type == StageType.PUBLISH \
+                    and stage.publish is not None:
+                pb = stage.publish
+                if _publish_unresolved(stage):
+                    # M60: pin the SAME single per-plan selection onto the
+                    # declarative best-publication stage (pinned form:
+                    # publish_from_best=True + resolved_checkpoint_
+                    # id=<concrete id>) — the record and plan_hash carry
+                    # the concrete resolution exactly like M53 state refs,
+                    # M55 best-resume train stages and M56 best-evaluation
+                    # stages. The executor receives the concrete id and
+                    # never asks "what is best?".
+                    stage = stage.model_copy(update={
+                        "publish": pb.model_copy(update={
                             "resolved_checkpoint_id": ckpt_id})})
             pinned.append(stage)
         # a REAL WorkflowPlan (full validation incl. _plan_consistent)
@@ -679,6 +707,43 @@ class WorkflowEngine:
                 result_hash=record.result_hash,
                 state_hash=record.state_hash,
                 checkpoint_id=state.checkpoint_id), None)
+
+        # PUBLISH (M60): a thin workflow adapter over the EXISTING M3
+        # verified rollback/publication machinery — the SAME
+        # TrainingEngine.rollback the POST /models/{id}/rollback route
+        # uses (verify the checkpoint's integrity, atomically restore
+        # its weights as the model's current weights, update the
+        # manifest's latest_checkpoint). There is no second publication
+        # implementation, no weights copy, no new pointer system and the
+        # immutable source checkpoint is never touched. The stage ALWAYS
+        # holds a concrete checkpoint id: publish_from_best was pinned by
+        # the single M53 resolver before execution (the workflow layer
+        # selects, the M3 layer receives the explicit id — the same
+        # separation as M55/M56/M57; no dynamic "best" query, no silent
+        # fallback), and an explicit checkpoint_id names the immutable
+        # checkpoint directly. The artifact references the published
+        # checkpoint (its persisted content hash + validation loss) —
+        # reference-oriented evidence, no payload duplication.
+        if stage.type == StageType.PUBLISH:
+            payload_pub: WorkflowPublishStage = stage.publish  # type: ignore[assignment]
+            if payload_pub.publish_from_best:
+                if payload_pub.resolved_checkpoint_id is None:
+                    raise ValueError(
+                        "publish_from_best reached execution without a "
+                        "pinned M52 selection — the workflow resolver must "
+                        "run first (no dynamic 'best' query, no silent "
+                        "fallback to another checkpoint)")
+                pub_id = payload_pub.resolved_checkpoint_id
+            else:
+                pub_id = payload_pub.checkpoint_id
+            self.training.rollback(model_id, pub_id)
+            published = self.training.get_checkpoint(model_id, pub_id)
+            return (WorkflowArtifact(
+                kind=ArtifactKind.PUBLICATION,
+                artifact_id=pub_id,
+                checkpoint_id=pub_id,
+                state_hash=published.weights_sha256,
+                final_validation_loss=published.validation_loss), None)
 
         # GATE: M6 is the single source of truth for decision semantics.
         # The stage carries either an inline policy or a registry policy_id —

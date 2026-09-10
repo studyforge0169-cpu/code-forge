@@ -2094,6 +2094,58 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 60 — declarative BEST-PUBLICATION stage (`publish`)
+- **concept**: the loop's missing ACCEPT step. A workflow/recipe PUBLISH
+  stage makes ONE immutable checkpoint the model's published/live state:
+  `publish_from_best` declares `PUBLISH(best)` — the canonical terminal
+  acceptance action `TRAIN → EVALUATE(best) → GATE(best) → PUBLISH(best)`.
+  The stage executes the EXISTING M3 verified rollback machinery (the
+  same `TrainingEngine.rollback` behind `POST /models/{id}/rollback`:
+  verify the checkpoint's integrity → atomically restore its weights as
+  the current weights → update `latest_checkpoint`). A thin workflow
+  adapter — never a second publication mechanism, never a second
+  weights copy, never a new latest-pointer system, never a mutation of
+  the immutable source checkpoint
+- **one resolution path**: `publish_from_best` is resolved by the SAME
+  M53 resolver as M53 state refs, M55 best-resume, M56 best-evaluation
+  and M57 best-baselines — ONE M52 selection per plan (minimum
+  persisted `validation_loss`, canonical tie-break), pinned as the
+  concrete checkpoint id on `resolved_checkpoint_id`, flowing into the
+  immutable run record and its `plan_hash`. The executor ALWAYS
+  receives a concrete id and never asks "what is best?"; M58
+  repetitions re-resolve per iteration exactly like every other `best`
+  declaration; the M51 preflight pins the same id
+- **exactly one source**: `publish_from_best` XOR an explicit
+  `checkpoint_id` (both set, or neither -> 422); a pinned
+  `resolved_checkpoint_id` is only valid with `publish_from_best=True`
+  (the resolver's pinned form). The direct M3 rollback route keeps
+  naming the concrete checkpoint explicitly — 'best' never leaks into
+  M3; the workflow layer owns the declarative → concrete conversion
+- **failure safety**: publication is the existing atomic M3 path —
+  integrity verification FIRST (a corrupt/unreadable resolved
+  checkpoint fails the stage; nothing is published, the previous
+  published state and the immutable source stay intact), then the
+  atomic weights write. A failing stage persists the normal `failed`
+  run record with the error and the skipped remainder; on a gate stop
+  (no `on_fail` branch) the publish stage is simply skipped — nothing
+  is ever published from a rejected state
+- **lineage**: the run record's plan carries the declarative request
+  (`publish_from_best=True`) plus the pinned concrete id; the stage
+  artifact is reference-oriented — the published checkpoint's id, its
+  persisted weights content hash (`state_hash`) and its persisted
+  validation loss — no checkpoint payload is duplicated into workflow
+  records. The authoritative invariant after a successful
+  `PUBLISH(best)`: resolved best checkpoint == published/live
+  checkpoint
+- **storage**: zero new artifacts per se — publication rewrites the
+  model's `weights.pt` (the existing published-state file) and updates
+  the model manifest's `latest_checkpoint`/`updated_at`, both through
+  the established M3 path; no new checkpoint is created, no second
+  best pointer exists, and the checkpoint registry is untouched
+- OpenAPI: no new route — the stage surface rides the existing
+  `POST /workflows/run`, recipe-run and M51 preflight schemas; path
+  count stays 85
+
 ### Milestone 58 — bounded finite recipe REPETITIONS
   (`WorkflowRecipeRunRequest.repetitions`)
 - **concept**: the recipe-run request may declare `repetitions: N`
@@ -2356,7 +2408,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 599 tests
+pytest                       # 606 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2865,7 +2917,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 599 tests across 20 suites
+  tests/               # 606 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
@@ -3008,8 +3060,10 @@ methods beyond CPT/SFT (incl. LoRA) are intentionally later milestones.
   or a different tolerance — that is by design, and each decision records exactly which
   policy/probe/baseline produced it
 - M6 gates never execute rollback/retraining/model selection: a failed checkpoint gate
-  only records `suggested_checkpoint_id` + a hint. The user (or a future orchestrator
-  milestone) must call the M3 rollback endpoint explicitly — nothing is automatic
+  only records `suggested_checkpoint_id` + a hint. Since M60 the user may AUTHOR an
+  explicit PUBLISH stage (resolved/pinned through the same M53/M52 machinery, executed
+  by the M3 rollback path) after the gate or on a gate branch of a workflow — but the
+  gate itself still executes nothing, and nothing is ever automatic
 - Gate policies are inline (no registry/CRUD) and every request appends a decision; the
   "current weights" baseline (B) and evaluation-result-hash baseline (C) mean what they
   say *at request time*: (B) is re-measured live and (C) stays valid only while the
