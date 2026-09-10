@@ -287,6 +287,15 @@ class ModelForge:
         (404 at the API)."""
         return self.training.select_best_checkpoint(model_id)
 
+    def best_checkpoint_history(self, model_id: str):
+        """M59: read-only chronological history of the M52 best-checkpoint
+        selection movements — the running argmin replayed over the
+        authoritative listing with the ONE shared winner rule. Computed
+        live (zero persistence); the final entry is always the live M52
+        answer; unknown model -> FileNotFoundError (404); a valid model
+        with no selectable checkpoints has an empty history."""
+        return self.training.best_checkpoint_history(model_id)
+
     def rollback_model(self, model_id: str, checkpoint_id: str):
         return self.training.rollback(model_id, checkpoint_id)
 

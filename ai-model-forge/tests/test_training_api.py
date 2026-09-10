@@ -330,7 +330,7 @@ def test_m46_by_run_errors_empty_isolation_regressions_openapi(api_client):
     # + 1 (M34) + 1 (M35) + 1 (M36) + 1 (M37) + 1 (M38) + 1 (M39)
     # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
     # + 1 (M45) + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 84
+    assert len(spec["paths"]) == 85
     path = "/api/v1/models/{model_id}/checkpoints/by-run/{run_id}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -476,14 +476,15 @@ def test_m52_best_checkpoint_tie_corruption_openapi(api_client):
     assert gone.status_code == 404
     assert "no selectable checkpoints" in gone.json()["detail"]
 
-    # OpenAPI: 84 paths, the new path exactly once, GET-only, training
+    # OpenAPI: 85 paths (M59 added the best-history route), GET-only, training
     # tag, model_id param, typed $ref response, and the display order
     # listing < by-run < best < generic detail (best can never be
     # captured as {checkpoint_id})
     spec = api_client.get("/openapi.json").json()
     # 78 (M46 cumulative) + 1 (M47) + 1 (M48) + 1 (M49) + 1 (M50)
-    # + 1 (M51 recipe plan) + 1 (M52 checkpoints best) = 84
-    assert len(spec["paths"]) == 84
+    # + 1 (M51 recipe plan) + 1 (M52 checkpoints best)
+    # + 1 (M59 checkpoints best history) = 85
+    assert len(spec["paths"]) == 85
     path = "/api/v1/models/{model_id}/checkpoints/best"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -565,9 +566,250 @@ def test_m54_api_resume_point_errors_and_openapi(api_client):
                    resume_from_checkpoint_id="")
     assert api_client.post(TRAIN_RUN, json=bad).status_code == 422
 
-    # OpenAPI: path count UNCHANGED (84); the field is part of the
-    # existing TrainingConfig schema
+    # OpenAPI: the M54 field is part of the existing TrainingConfig
+    # schema (path count moved 84 -> 85 with the M59 history route)
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 84
+    assert len(spec["paths"]) == 85
     assert "resume_from_checkpoint_id" in spec["components"]["schemas"][
         "TrainingConfig"]["properties"]
+
+
+# --------------------------------------------------------------------- M59
+# Best-checkpoint improvement HISTORY: read-only, computed live, only the
+# checkpoints that BECAME the M52-selected best; final entry == M52; the
+# ONE shared winner rule; zero storage.
+
+def _m59_expected_history(listing: list[dict]) -> list[dict]:
+    """Independent local replay: chronological (created_at, id) order,
+    running argmin under the M52 winner rule (lower loss, or an equal
+    loss with a strictly earlier canonical (step, created_at) key)."""
+    chronological = sorted(listing,
+                           key=lambda c: (c["created_at"], c["checkpoint_id"]))
+    entries = []
+    best = None
+    for c in chronological:
+        if best is not None:
+            if c["validation_loss"] > best["validation_loss"]:
+                continue
+            if c["validation_loss"] == best["validation_loss"] \
+                    and (c["step"], c["created_at"]) \
+                    >= (best["step"], best["created_at"]):
+                continue
+        entries.append({
+            "checkpoint_id": c["checkpoint_id"],
+            "run_id": c["run_id"],
+            "step": c["step"],
+            "created_at": c["created_at"],
+            "validation_loss": c["validation_loss"],
+            "perplexity": c["perplexity"],
+            "delta_loss_nats": (None if best is None else
+                                c["validation_loss"]
+                                - best["validation_loss"])})
+        best = c
+    return entries
+
+
+def test_m59_history_parity_determinism_errors(api_client):
+    from pathlib import Path
+
+    from app import engine as engine_module
+
+    ds_id, tok_id, model_id = _prepare(api_client, "m59hist")
+    assert api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=8, eval_every_steps=4)).status_code == 200
+    listing = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    assert len(listing) == 2
+    hist_url = f"{MODELS}/{model_id}/checkpoints/best/history"
+
+    mdir = Path(engine_module._forge.storage.model_dir(model_id))
+    n_files = sum(1 for p in mdir.rglob("*") if p.is_file())
+
+    got = api_client.get(hist_url)
+    assert got.status_code == 200, got.text
+    hist = got.json()
+    expected = _m59_expected_history(listing)
+    # shape + parity with the independent local replay
+    assert hist["model_id"] == model_id
+    assert hist["criterion"] == "minimum_persisted_validation_loss"
+    assert hist["candidate_count"] == len(listing)
+    assert hist["entries"] == expected
+    # only WINNERS appear: a 2-checkpoint run with monotone losses has
+    # both as winners; craft a non-winner to prove exclusion
+    import json as _json
+    ck_dir = (Path(engine_module._forge.storage.model_dir(model_id))
+              / "checkpoints" / listing[-1]["checkpoint_id"])
+    man = _json.loads((ck_dir / "manifest.json").read_text())
+    man["validation_loss"] = listing[0]["validation_loss"] + 5.0  # worse
+    (ck_dir / "manifest.json").write_text(_json.dumps(man))
+    listing2 = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    hist2 = api_client.get(hist_url).json()
+    assert hist2["entries"] == _m59_expected_history(listing2)
+    assert [e["checkpoint_id"] for e in hist2["entries"]] == \
+        [listing2[0]["checkpoint_id"]]
+    # the FINAL entry equals the M52 selection (verbatim, not approximate)
+    sel = api_client.get(f"{MODELS}/{model_id}/checkpoints/best").json()
+    assert hist2["entries"][-1]["checkpoint_id"] \
+        == sel["checkpoint"]["checkpoint_id"]
+    assert hist2["entries"][-1]["validation_loss"] \
+        == sel["checkpoint"]["validation_loss"]
+    # monotonic non-increasing; deltas correct (first None); the sign
+    # convention is current - previous (negative = improvement)
+    losses = [e["validation_loss"] for e in hist2["entries"]]
+    assert all(losses[i] <= losses[i - 1] for i in range(1, len(losses)))
+    assert hist2["entries"][0]["delta_loss_nats"] is None
+    for i in range(1, len(hist2["entries"])):
+        assert abs(hist2["entries"][i]["delta_loss_nats"]
+                   - (losses[i] - losses[i - 1])) < 1e-12
+        assert hist2["entries"][i]["delta_loss_nats"] <= 0.0
+    # verbatim provenance fields from the authoritative record
+    rec = api_client.get(
+        f"{MODELS}/{model_id}/checkpoints/"
+        f"{hist2['entries'][0]['checkpoint_id']}").json()
+    assert hist2["entries"][0]["run_id"] == rec["run_id"]
+    assert hist2["entries"][0]["step"] == rec["step"]
+    assert hist2["entries"][0]["created_at"] == rec["created_at"]
+
+    # determinism: repeated GETs are byte-identical; read-only: zero writes
+    again = api_client.get(hist_url)
+    assert again.content == api_client.get(hist_url).content
+    assert again.json() == hist2
+    assert sum(1 for p in mdir.rglob("*") if p.is_file()) == n_files
+
+    # unknown model -> 404 (same taxonomy as the checkpoint family)
+    assert api_client.get(
+        f"{MODELS}/ghost-m59/checkpoints/best/history").status_code == 404
+
+    # valid model with ZERO checkpoints -> EMPTY history (consistent with
+    # the collection endpoints); the M52 SELECTION route stays 404
+    _, _, fresh_id = _prepare(api_client, "m59fresh")
+    empty = api_client.get(f"{MODELS}/{fresh_id}/checkpoints/best/history")
+    assert empty.status_code == 200
+    assert empty.json()["entries"] == []
+    assert empty.json()["candidate_count"] == 0
+    assert api_client.get(
+        f"{MODELS}/{fresh_id}/checkpoints/best").status_code == 404
+    assert api_client.get(f"{MODELS}/{fresh_id}/checkpoints").json() == []
+
+    # model scoping: a SECOND model's checkpoints never contaminate
+    ds2, tok2, mid2 = _prepare(api_client, "m59other")
+    assert api_client.post(TRAIN_RUN, json=_run_cfg(
+        mid2, ds2, tok2, steps=4, eval_every_steps=2)).status_code == 200
+    listing_other = api_client.get(f"{MODELS}/{mid2}/checkpoints").json()
+    hist_other = api_client.get(
+        f"{MODELS}/{mid2}/checkpoints/best/history").json()
+    assert hist_other["candidate_count"] == len(listing_other)
+    ids = {e["checkpoint_id"] for e in hist_other["entries"]}
+    other_ids = {c["checkpoint_id"] for c in listing_other}
+    assert ids <= other_ids
+    assert not (ids & {e["checkpoint_id"] for e in hist2["entries"]})
+
+
+def test_m59_history_tie_nonfinite_live_computation(api_client):
+    import json as _json
+    from pathlib import Path
+
+    from app import engine as engine_module
+
+    ds_id, tok_id, model_id = _prepare(api_client, "m59tie")
+    # three short runs: run A steps 1..4 (chronological == canonical),
+    # run B and C later created_at but SMALLER steps
+    for seed, steps in ((1, 4), (2, 2), (3, 2)):
+        assert api_client.post(TRAIN_RUN, json=_run_cfg(
+            model_id, ds_id, tok_id, steps=steps, eval_every_steps=1,
+            seed=seed)).status_code == 200
+    listing = api_client.get(f"{MODELS}/{model_id}/checkpoints").json()
+    assert len(listing) == 8
+    hist_url = f"{MODELS}/{model_id}/checkpoints/best/history"
+
+    def set_loss(ckpt_id, loss):
+        d = (Path(engine_module._forge.storage.model_dir(model_id))
+             / "checkpoints" / ckpt_id)
+        man = _json.loads((d / "manifest.json").read_text())
+        man["validation_loss"] = loss
+        (d / "manifest.json").write_text(_json.dumps(man))
+
+    chron = sorted(listing,
+                   key=lambda c: (c["created_at"], c["checkpoint_id"]))
+    L1, L2, L3, L4, L5, L6, L7, L8 = chron
+    # landscape: L1 first best; L2 worse; L3 wins; L4 an EXACT tie with a
+    # LATER canonical key -> NO movement (M52 keeps the first among
+    # equals); L5 an EXACT tie with an EARLIER canonical key (smaller
+    # step from a later run) -> the selector SWITCHES (movement, delta
+    # 0.0); L6 NaN -> never a candidate; L7 wins; L8 worse
+    for ck, loss in ((L1, 6.5), (L2, 6.7), (L3, 6.4), (L4, 6.4), (L5, 6.4),
+                     (L6, float("inf")), (L7, 6.2), (L8, 6.9)):
+        set_loss(ck["checkpoint_id"], loss)
+
+    hist = api_client.get(hist_url).json()
+    assert [e["checkpoint_id"] for e in hist["entries"]] == [
+        L1["checkpoint_id"], L3["checkpoint_id"], L5["checkpoint_id"],
+        L7["checkpoint_id"]]
+    assert [e["validation_loss"] for e in hist["entries"]] == \
+        [6.5, 6.4, 6.4, 6.2]
+    assert hist["candidate_count"] == 7                  # inf excluded
+    assert hist["entries"][2]["delta_loss_nats"] == 0.0  # tie switch
+    # the M52 selection agrees with the final entry AND the tie story
+    sel = api_client.get(f"{MODELS}/{model_id}/checkpoints/best").json()
+    assert sel["checkpoint"]["checkpoint_id"] == L7["checkpoint_id"]
+    assert sel["tied"] is False
+
+    # live computation: a better checkpoint appears -> the FINAL entry
+    # changes immediately; the old best REMAINS in the sequence
+    set_loss(L8["checkpoint_id"], 6.1)
+    hist2 = api_client.get(hist_url).json()
+    assert hist2["entries"][-1]["checkpoint_id"] == L8["checkpoint_id"]
+    assert hist2["entries"][-1]["validation_loss"] == 6.1
+    assert hist2["entries"][-2]["checkpoint_id"] == L7["checkpoint_id"]
+    assert [e["checkpoint_id"] for e in hist2["entries"]][:4] == \
+        [e["checkpoint_id"] for e in hist["entries"]]
+
+    # non-finite NaN is excluded exactly like inf (M52 semantics)
+    set_loss(L8["checkpoint_id"], float("nan"))
+    hist3 = api_client.get(hist_url).json()
+    assert hist3["candidate_count"] == 6
+    assert hist3["entries"][-1]["checkpoint_id"] == L7["checkpoint_id"]
+
+    # corruption (established M46/M52 semantics): unreadable manifests
+    # are skipped by the listing; with NO usable checkpoints the history
+    # is EMPTY (the collection convention), the selection 404
+    for c in api_client.get(f"{MODELS}/{model_id}/checkpoints").json():
+        d = (Path(engine_module._forge.storage.model_dir(model_id))
+             / "checkpoints" / c["checkpoint_id"])
+        (d / "manifest.json").write_text("{ not json")
+    assert api_client.get(f"{MODELS}/{model_id}/checkpoints").json() == []
+    gone = api_client.get(hist_url)
+    assert gone.status_code == 200 and gone.json()["entries"] == []
+    assert api_client.get(
+        f"{MODELS}/{model_id}/checkpoints/best").status_code == 404
+
+
+def test_m59_history_openapi(api_client):
+    ds_id, tok_id, model_id = _prepare(api_client, "m59spec")
+    assert api_client.post(TRAIN_RUN, json=_run_cfg(
+        model_id, ds_id, tok_id, steps=4, eval_every_steps=2)).status_code == 200
+    path = "/api/v1/models/{model_id}/checkpoints/best/history"
+
+    spec = api_client.get("/openapi.json").json()
+    # 84 (M52 cumulative) + 1 (M59 best history) = 85
+    assert len(spec["paths"]) == 85
+    keys = list(spec["paths"])
+    assert keys.count(path) == 1
+    item = spec["paths"][path]
+    assert list(item.keys()) == ["get"]
+    assert item["get"]["tags"] == ["training"]
+    assert [p["name"] for p in item["get"]["parameters"]] == ["model_id"]
+    assert item["get"]["responses"]["200"]["content"][
+        "application/json"]["schema"] == {
+        "$ref": "#/components/schemas/BestCheckpointHistory"}
+    assert "BestCheckpointHistory" in spec["components"]["schemas"]
+    assert "BestCheckpointHistoryEntry" in spec["components"]["schemas"]
+    # display order: listing < by-run < best < history < generic detail
+    # (neither "best" nor "best/history" can be captured as {checkpoint_id})
+    assert keys.index("/api/v1/models/{model_id}/checkpoints") < \
+        keys.index(path)
+    assert keys.index("/api/v1/models/{model_id}/checkpoints/by-run/"
+                      "{run_id}") < keys.index(path)
+    assert keys.index("/api/v1/models/{model_id}/checkpoints/best") < \
+        keys.index(path)
+    assert keys.index(path) < keys.index(
+        "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}")

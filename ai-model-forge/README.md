@@ -2061,6 +2061,39 @@ generation never trains, evaluates, scores, ranks or judges output.
   evidence reuse) and the M18–M50 history surfaces are byte-identical
   before and after
 
+### Milestone 59 — best-checkpoint improvement HISTORY
+  (`GET /models/{model_id}/checkpoints/best/history`)
+- **concept**: a read-only, model-scoped view of HOW the best-checkpoint
+  selection evolved — the chronological sequence of checkpoints that
+  BECAME the M52-selected best as the model's checkpoint registry grew.
+  Only winners appear (non-winning checkpoints are excluded); each entry
+  carries the authoritative persisted fields (checkpoint id, producing
+  `run_id`, `step`, `created_at`, `validation_loss`, `perplexity`) plus
+  `delta_loss_nats` — the improvement vs the PREVIOUS best under the
+  established sign convention (current - previous; negative means
+  improvement; None on the first entry; 0.0 only when the canonical
+  tie-break actually moved the selection to an equally-good checkpoint)
+- **one selection semantics**: the timeline replays the ONE shared M52
+  winner rule (minimum persisted `validation_loss`; ties by the
+  canonical (step, created_at) ASCENDING order — first among equals;
+  non-finite values never candidates) over the authoritative M3 listing
+  in chronological (created_at, checkpoint_id) order. No second
+  selector, no second comparator; the FINAL entry is always the live
+  `GET .../checkpoints/best` answer; losses are monotonically
+  non-increasing
+- **computed live, zero storage**: derived from persisted manifests on
+  every call — never a record, never a cache, no best pointer, no
+  history database. A new checkpoint is reflected immediately;
+  repeated calls over unchanged storage are byte-identical. Unreadable
+  manifests are skipped by the listing (the established corruption
+  semantics); unknown model -> 404; a valid model with no selectable
+  checkpoints -> an EMPTY history (consistent with the collection
+  endpoints)
+- **purpose**: observability of the improvement trajectory (e.g. the
+  successive advances of an M58 repeated run) — it decides NOTHING: no
+  automatic stopping, no convergence detection, no repetition selection
+- OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
+
 ### Milestone 58 — bounded finite recipe REPETITIONS
   (`WorkflowRecipeRunRequest.repetitions`)
 - **concept**: the recipe-run request may declare `repetitions: N`
@@ -2323,7 +2356,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 596 tests
+pytest                       # 599 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -2832,7 +2865,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 596 tests across 20 suites
+  tests/               # 599 tests across 20 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

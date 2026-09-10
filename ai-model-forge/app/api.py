@@ -44,6 +44,7 @@ from .schemas import (
     SampleEvaluationRecord,
     SampleRecord,
     SampleStrategy,
+    BestCheckpointHistory,
     CheckpointSelection,
     RollbackRequest,
     TokenizerConfig,
@@ -819,6 +820,23 @@ def index() -> HTMLResponse:
         rollback. Bounded and explicit only: no unbounded, no
         while-improving, no convergence detection.</li>
 
+      <li><b>M59 best-checkpoint improvement history</b> —
+        <code>GET /models/&#123;id&#125;/checkpoints/best/history</code>
+        shows the chronological sequence of checkpoints that BECAME the
+        M52-selected best (only winners; non-winning checkpoints are
+        excluded), each with its persisted validation loss, producing
+        run, step, timestamp and the improvement delta vs the previous
+        best (negative = improvement; the M5/M6 sign convention). The
+        selection semantics are EXACTLY M52's one shared winner rule;
+        the FINAL entry always equals the live
+        <code>GET .../checkpoints/best</code> answer; losses are
+        monotonically non-increasing. A pure computed view over
+        persisted manifests — read-only, derived live on every call,
+        ZERO storage (no cache, no pointer, no history database). It
+        makes the improvement trajectory observable (e.g. an M58
+        repeated run's successive advances); it decides nothing — no
+        automatic stopping, no convergence detection.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -869,6 +887,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints</code> — immutable checkpoint store</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/by-run/&#123;run&#125;</code> — checkpoints of one training run (provenance-validated, M46)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best</code> — deterministic selection by MINIMUM persisted validation loss (read-only, criterion explicit, M52)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best/history</code> — chronological history of the best-checkpoint selection movements, final entry always the M52 answer (read-only, computed live, zero storage, M59)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/&#123;ckpt&#125;</code> — one checkpoint</li>
       <li><code>POST  {prefix}/models/&#123;id&#125;/rollback</code> — verified restore of a checkpoint</li>
       <li><code>POST  {prefix}/evaluations/run</code> — read-only evaluation (current state or checkpoint)</li>
@@ -1288,6 +1307,36 @@ def select_best_checkpoint(model_id: str) -> CheckpointSelection:
     """
     try:
         return _forge().select_best_checkpoint(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/checkpoints/best/history",
+         response_model=BestCheckpointHistory, tags=["training"])
+def best_checkpoint_history(model_id: str) -> BestCheckpointHistory:
+    """Chronological history of the M52 best-checkpoint selection
+    movements (M59, read-only computed view).
+
+    Replays the ONE M52 winner rule (minimum persisted validation_loss,
+    ties by the canonical (step, created_at) ASCENDING order — first
+    among equals; non-finite values never candidates) over the
+    authoritative M3 listing in chronological order: an entry appears
+    exactly when a checkpoint DISPLACED the running best as the
+    registry grew, so the sequence shows the model's real improvement
+    trajectory (only winners — non-winning checkpoints are excluded).
+    The FINAL entry is always the live M52 answer
+    (GET /models/{id}/checkpoints/best); losses are monotonically
+    non-increasing; ``delta_loss_nats`` (current - previous; negative
+    means improvement) is None on the first entry. Computed live from
+    persisted manifests on every call: never writes, never caches,
+    never persists a pointer — zero storage. Unknown model -> 404; a
+    valid model with no selectable checkpoints -> an EMPTY history
+    (consistent with the collection endpoints). Declared before the
+    generic {checkpoint_id} detail route so "best" can never be
+    captured as a checkpoint id.
+    """
+    try:
+        return _forge().best_checkpoint_history(model_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

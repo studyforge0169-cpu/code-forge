@@ -651,6 +651,62 @@ class CheckpointSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class BestCheckpointHistoryEntry(BaseModel):
+    """One MOVEMENT of the M52 best-checkpoint selection (M59 read-only
+    view): a checkpoint that BECAME the selected best as the model's
+    checkpoint history grew.
+
+    Every field is authoritative persisted ``CheckpointRecord`` data —
+    nothing recomputed, nothing invented. ``delta_loss_nats`` is the
+    improvement relative to the PREVIOUS best entry under the
+    established delta convention (current - previous, so NEGATIVE means
+    improvement; exactly the M5/M6 gate/comparison sign convention);
+    the FIRST entry has no previous best and carries None. A delta of
+    0.0 can only occur when the canonical M52 tie-break (step,
+    created_at) ASCENDING — first among equals — actually moved the
+    selection to an equally-good checkpoint.
+    """
+
+    checkpoint_id: str
+    run_id: str                       # the producing training run
+    step: int
+    created_at: datetime
+    validation_loss: float            # persisted verbatim
+    perplexity: float                 # persisted verbatim
+    delta_loss_nats: Optional[float] = None   # vs the previous best
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class BestCheckpointHistory(BaseModel):
+    """Read-only chronological history of the M52 best-checkpoint
+    selection movements (M59) — a computed view, never a record.
+
+    Derived LIVE from the authoritative M3 checkpoint listing every
+    time (zero persistence, no cache, no pointer): only checkpoints
+    that actually BECAME the selected best appear — non-winners are
+    excluded by construction. The selection semantics are EXACTLY
+    M52's one definition (minimum persisted ``validation_loss``,
+    non-finite values never candidates, ties resolved by the canonical
+    (step, created_at) ASCENDING order — first among equals), replayed
+    over the registry in chronological (created_at, checkpoint_id)
+    order: each entry is a checkpoint that displaced the running best
+    under that one rule. The FINAL entry is therefore always the live
+    M52 answer for the current registry. ``candidate_count`` counts
+    the finite-loss candidates considered (mirrors
+    ``CheckpointSelection``). A valid model with no selectable
+    checkpoints has an EMPTY history (consistent with the collection
+    endpoints); an unknown model raises FileNotFoundError (404).
+    """
+
+    model_id: str
+    criterion: Literal["minimum_persisted_validation_loss"]
+    candidate_count: int = Field(ge=0)
+    entries: list[BestCheckpointHistoryEntry]
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class RollbackRequest(BaseModel):
     checkpoint_id: str = Field(..., min_length=1)
 

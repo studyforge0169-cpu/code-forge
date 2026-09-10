@@ -47,6 +47,8 @@ from .dataset import DatasetEngine
 from .hardware import detect_hardware
 from .model_builder import build_transformer, content_hash, restore_state
 from .schemas import (
+    BestCheckpointHistory,
+    BestCheckpointHistoryEntry,
     CheckpointDecision,
     CheckpointRecord,
     CheckpointSelection,
@@ -211,6 +213,23 @@ class TrainingEngine:
         return [c for c in self.list_checkpoints(model_id)
                 if c.run_id == run_id]
 
+    @staticmethod
+    def _displaces_best(candidate: CheckpointRecord,
+                        best: CheckpointRecord) -> bool:
+        """ONE definition of the M52 winner rule (shared by
+        ``select_best_checkpoint`` and the M59 best-history replay):
+        ``candidate`` displaces ``best`` iff its persisted
+        ``validation_loss`` is strictly lower, OR equal AND its
+        canonical (step, created_at) key is strictly earlier (the
+        listing's first-among-equals tie-break). This is the ONLY
+        best-selection comparison in the codebase — never duplicated.
+        """
+        if candidate.validation_loss < best.validation_loss:
+            return True
+        return (candidate.validation_loss == best.validation_loss
+                and (candidate.step, candidate.created_at)
+                < (best.step, best.created_at))
+
     def select_best_checkpoint(self, model_id: str) -> CheckpointSelection:
         """Deterministic best-checkpoint selection under the persisted
         validation-loss criterion (M52 read-only selection primitive).
@@ -239,7 +258,14 @@ class TrainingEngine:
             raise FileNotFoundError(
                 f"model '{model_id}' has no selectable checkpoints "
                 "(minimum persisted validation-loss criterion)")
-        best = min(candidates, key=lambda c: c.validation_loss)
+        # the ONE winner rule (shared with the M59 history replay):
+        # strictly lower loss, or an equal loss with a strictly earlier
+        # canonical (step, created_at) key — over the canonically
+        # ordered listing this is exactly "first among equals"
+        best = candidates[0]
+        for c in candidates[1:]:
+            if self._displaces_best(c, best):
+                best = c
         min_loss = best.validation_loss
         tied = sum(1 for c in candidates
                    if c.validation_loss == min_loss) > 1
@@ -248,6 +274,59 @@ class TrainingEngine:
             criterion="minimum_persisted_validation_loss",
             candidate_count=len(candidates),
             tied=tied, checkpoint=best)
+
+    def best_checkpoint_history(self, model_id: str) -> BestCheckpointHistory:
+        """Chronological history of the M52 best-checkpoint selection
+        MOVEMENTS (M59 read-only computed view — never a record).
+
+        Replays the ONE M52 winner rule (``_displaces_best`` — the same
+        definition ``select_best_checkpoint`` uses; no second selector,
+        no second comparator) over the model's authoritative M3 listing
+        in CHRONOLOGICAL (created_at, checkpoint_id) order: an entry
+        appears exactly when a checkpoint DISPLACED the running best as
+        the registry grew — strictly lower persisted validation_loss,
+        or an equal loss with a strictly earlier canonical (step,
+        created_at) key (the tie-break that actually moves M52's
+        selection). Non-winning checkpoints never appear; non-finite
+        persisted losses are never candidates (M52's exclusion,
+        unchanged); unreadable manifests are already skipped by the
+        listing (the established corruption semantics). By construction
+        the FINAL entry is always the live M52 answer over the current
+        registry, losses are monotonically non-increasing, and every
+        ``delta_loss_nats`` (current - previous; negative = improvement,
+        the established M5/M6 sign convention) is <= 0. Derived live on
+        every call from persisted manifests — zero writes, no cache, no
+        pointer, no storage of any kind. Unknown model ->
+        FileNotFoundError (404 at the API); a valid model with no
+        selectable checkpoints has an EMPTY history (consistent with
+        the collection endpoints — nothing is manufactured).
+        """
+        checkpoints = self.list_checkpoints(model_id)
+        candidates = [c for c in checkpoints
+                      if math.isfinite(c.validation_loss)]
+        chronological = sorted(
+            candidates, key=lambda c: (c.created_at, c.checkpoint_id))
+        entries: list[BestCheckpointHistoryEntry] = []
+        best: Optional[CheckpointRecord] = None
+        for c in chronological:
+            if best is not None and not self._displaces_best(c, best):
+                continue
+            delta = (None if best is None
+                     else c.validation_loss - best.validation_loss)
+            entries.append(BestCheckpointHistoryEntry(
+                checkpoint_id=c.checkpoint_id,
+                run_id=c.run_id,
+                step=c.step,
+                created_at=c.created_at,
+                validation_loss=c.validation_loss,
+                perplexity=c.perplexity,
+                delta_loss_nats=delta))
+            best = c
+        return BestCheckpointHistory(
+            model_id=model_id,
+            criterion="minimum_persisted_validation_loss",
+            candidate_count=len(candidates),
+            entries=entries)
 
     # ------------------------------------------------------------------ #
     # Preflight
