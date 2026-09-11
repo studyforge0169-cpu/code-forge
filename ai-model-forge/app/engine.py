@@ -14,7 +14,7 @@ from typing import Any, Optional
 from . import config as forge_cfg
 from .comparison import COMPARISONS_DIR, ComparisonEngine
 from .dashboards import DashboardEngine
-from .dataset import DatasetEngine
+from .dataset import TOKENIZED_DIR, DatasetEngine, _referencing_tokenizers
 from .evaluation import EVALUATIONS_DIR, EvaluationEngine
 from .gates import GATES_DIR, GateEngine
 from .hardware import HardwareSpec, detect_hardware
@@ -26,6 +26,7 @@ from .sample_quality import SAMPLE_EVALUATIONS_DIR, SampleQualityEngine
 from .schemas import (
     CheckpointDeletionBlocker,
     CheckpointDeletionResult,
+    ArtifactUsageCategory,
     CheckpointRetentionEntry,
     CheckpointRetentionOverview,
     ComparisonRecord,
@@ -44,6 +45,8 @@ from .schemas import (
     ProjectModelStorageSummary,
     ProjectStorageCategory,
     ProjectStorageOverview,
+    DatasetUsageOverview,
+    TokenizerUsageOverview,
     SuiteRunRecord,
     SuiteRunRequest,
     SuiteRunSummary,
@@ -749,6 +752,205 @@ class ModelForge:
                                                bytes=cat_bytes[name])
                         for name in self.PROJECT_STORAGE_CATEGORIES],
             models=rows)
+
+    # Canonical M64 usage-category orders (fixed and deterministic; the
+    # shared evidence categories follow the M61 blocker order, the
+    # provenance category leads, artifact-specific categories trail).
+    DATASET_USAGE_CATEGORIES = (
+        "training_run",       # model manifests' RunProvenance (dataset_id)
+        "workflow",           # workflow records' embedded plans (stage configs)
+        "evaluation",         # M4 evaluation records (the ONE for-dataset filter)
+        "comparison",         # M5 comparison records (the ONE for-dataset filter)
+        "suite_run",          # M10 suite-run records (executed probes)
+        "tokenizer_training", # tokenizers trained on it (the ONE guard scan)
+        "tokenized_version",  # tokenized artifacts under its own versions
+    )
+    TOKENIZER_USAGE_CATEGORIES = (
+        "training_run",       # model manifests' RunProvenance (tokenizer_id)
+        "workflow",           # workflow records' embedded plans (stage configs)
+        "evaluation",         # M4 evaluation records (the ONE for-tokenizer filter)
+        "comparison",         # M5 comparison records (the ONE for-tokenizer filter)
+        "suite_run",          # M10 suite-run records (executed probes)
+        "sample",             # M15 sample records (the ONE for-tokenizer filter)
+        "sample_quality",     # M16 sample-quality records (the ONE filter)
+        "tokenized_dataset",  # dataset versions this tokenizer tokenized
+    )
+
+    @staticmethod
+    def _workflow_data_refs(plan) -> set[tuple[str, str]]:
+        """(dataset_id, tokenizer_id) pairs DIRECTLY named by a workflow
+        plan's stage configs — train (TrainingConfig), evaluate
+        (EvaluationConfig) and compare (WorkflowComparisonStage) stages.
+        Suite-run stages reference a suite id (the shared M9 registry),
+        never a dataset/tokenizer directly — that indirection is
+        deliberately NOT followed here (the suite registry is a
+        definition, not per-model evidence). Read-only plan walk, the
+        M61 blocker-analysis style."""
+        refs: set[tuple[str, str]] = set()
+        for stage in plan.stages:
+            if stage.training is not None:
+                refs.add((stage.training.dataset_id,
+                          stage.training.tokenizer_id))
+            if stage.evaluation is not None:
+                cfg = stage.evaluation.config
+                refs.add((cfg.dataset_id, cfg.tokenizer_id))
+            if stage.comparison is not None:
+                refs.add((stage.comparison.dataset_id,
+                          stage.comparison.tokenizer_id))
+        return refs
+
+    def _tokenized_tokenizers(self, dataset_id: str, version: int) -> list[str]:
+        """Tokenizer ids with a persisted tokenized artifact under ONE
+        dataset version — the SAME M2 layout ``DatasetEngine.get``
+        exposes (``datasets/<id>/v<N>/tokenized/<tokenizer_id>/``),
+        walked read-only."""
+        troot = (self.storage.dataset_dir(dataset_id) / f"v{version}"
+                 / TOKENIZED_DIR)
+        if not troot.exists():
+            return []
+        return sorted(d.name for d in troot.iterdir()
+                      if d.is_dir() and not d.name.startswith("."))
+
+    def dataset_usage_overview(self, dataset_id: str) -> DatasetUsageOverview:
+        """Read-only live-computed usage overview of ONE dataset (M64):
+        every persisted record that references it, by category. REUSES
+        the ONE cross-reference filters (``list_evaluations_for_dataset``,
+        ``list_comparisons_for_dataset``), the ONE tokenizer-training
+        scan the deletion guard refuses on
+        (``_referencing_tokenizers``), the authoritative registries
+        (``list_models`` — corrupt manifests skipped, the registry
+        convention) and the ONE M2 tokenized layout. Per-record
+        references (a workflow/suite-run/training run counts ONCE even
+        when several of its stages/probes name the dataset); every
+        category appears in the canonical order with its deterministic
+        sorted id list. Zero storage, zero mutation, byte-identical
+        over unchanged state; unknown dataset -> FileNotFoundError."""
+        meta = self.datasets.load_meta(dataset_id)   # the registry getter
+        training_runs: list[str] = []
+        workflows: list[str] = []
+        evaluations: list[str] = []
+        comparisons: list[str] = []
+        suite_runs: list[str] = []
+        for record in self.list_models():
+            mid = record.id
+            for prov in record.training_provenance:
+                if prov.dataset_id == dataset_id:
+                    training_runs.append(f"{mid}/{prov.run_id}")
+            for wf in self.list_workflows(mid):
+                if any(ds == dataset_id
+                       for ds, _tok in self._workflow_data_refs(wf.plan)):
+                    workflows.append(f"{mid}/{wf.workflow_id}")
+            for ev in self.list_evaluations_for_dataset(mid, dataset_id):
+                evaluations.append(f"{mid}/{ev.eval_id}")
+            for comp in self.list_comparisons_for_dataset(mid, dataset_id):
+                comparisons.append(f"{mid}/{comp.comparison_id}")
+            for run in self.list_suite_runs(mid):
+                if any(r.probe.dataset_id == dataset_id
+                       for r in run.results):
+                    suite_runs.append(f"{mid}/{run.suite_run_id}")
+        tokenizer_training = _referencing_tokenizers(self.storage, dataset_id)
+        tokenized_versions = [
+            f"v{version}/{tokenizer_id}"
+            for version in meta.versions
+            for tokenizer_id in self._tokenized_tokenizers(dataset_id,
+                                                            version)
+        ]
+        categories = [
+            ("training_run", sorted(training_runs)),
+            ("workflow", sorted(workflows)),
+            ("evaluation", sorted(evaluations)),
+            ("comparison", sorted(comparisons)),
+            ("suite_run", sorted(suite_runs)),
+            ("tokenizer_training", sorted(tokenizer_training)),
+            ("tokenized_version", sorted(tokenized_versions)),
+        ]
+        total = sum(len(refs) for _, refs in categories)
+        return DatasetUsageOverview(
+            dataset_id=dataset_id,
+            name=meta.name,
+            created_at=meta.created_at,
+            version_count=len(meta.versions),
+            latest_version=meta.latest_version,
+            referenced=total > 0,
+            total_references=total,
+            categories=[ArtifactUsageCategory(category=c, references=r)
+                        for c, r in categories])
+
+    def tokenizer_usage_overview(
+            self, tokenizer_id: str) -> TokenizerUsageOverview:
+        """Read-only live-computed usage overview of ONE tokenizer
+        (M64): every persisted record that references it, by category.
+        REUSES the ONE cross-reference filters
+        (``list_evaluations_for_tokenizer``,
+        ``list_comparisons_for_tokenizer``,
+        ``list_samples_for_tokenizer``,
+        ``list_sample_evaluations_for_tokenizer``), the authoritative
+        registries and the ONE M2 tokenized layout (reversed: which
+        dataset versions this tokenizer tokenized). The tokenizer's own
+        ``trained_on_dataset_id`` travels as identity (provenance).
+        Per-record references; every category appears in the canonical
+        order with its deterministic sorted id list. Zero storage, zero
+        mutation, byte-identical over unchanged state; unknown
+        tokenizer -> FileNotFoundError."""
+        record = self.tokenizers.load(tokenizer_id)  # the registry getter
+        training_runs: list[str] = []
+        workflows: list[str] = []
+        evaluations: list[str] = []
+        comparisons: list[str] = []
+        suite_runs: list[str] = []
+        samples: list[str] = []
+        sample_quality: list[str] = []
+        for model in self.list_models():
+            mid = model.id
+            for prov in model.training_provenance:
+                if prov.tokenizer_id == tokenizer_id:
+                    training_runs.append(f"{mid}/{prov.run_id}")
+            for wf in self.list_workflows(mid):
+                if any(tok == tokenizer_id
+                       for _ds, tok in self._workflow_data_refs(wf.plan)):
+                    workflows.append(f"{mid}/{wf.workflow_id}")
+            for ev in self.list_evaluations_for_tokenizer(mid, tokenizer_id):
+                evaluations.append(f"{mid}/{ev.eval_id}")
+            for comp in self.list_comparisons_for_tokenizer(mid,
+                                                            tokenizer_id):
+                comparisons.append(f"{mid}/{comp.comparison_id}")
+            for run in self.list_suite_runs(mid):
+                if any(r.probe.tokenizer_id == tokenizer_id
+                       for r in run.results):
+                    suite_runs.append(f"{mid}/{run.suite_run_id}")
+            for sample in self.list_samples_for_tokenizer(mid, tokenizer_id):
+                samples.append(f"{mid}/{sample.sample_id}")
+            for sq in self.list_sample_evaluations_for_tokenizer(
+                    mid, tokenizer_id):
+                sample_quality.append(f"{mid}/{sq.evaluation_id}")
+        tokenized_datasets = [
+            f"{info.id}/v{version}"
+            for info in self.datasets.list()
+            for version in info.versions
+            if tokenizer_id in self._tokenized_tokenizers(info.id, version)
+        ]
+        categories = [
+            ("training_run", sorted(training_runs)),
+            ("workflow", sorted(workflows)),
+            ("evaluation", sorted(evaluations)),
+            ("comparison", sorted(comparisons)),
+            ("suite_run", sorted(suite_runs)),
+            ("sample", sorted(samples)),
+            ("sample_quality", sorted(sample_quality)),
+            ("tokenized_dataset", sorted(tokenized_datasets)),
+        ]
+        total = sum(len(refs) for _, refs in categories)
+        return TokenizerUsageOverview(
+            tokenizer_id=tokenizer_id,
+            name=record.name,
+            created_at=record.created_at,
+            requested_vocab_size=record.requested_vocab_size,
+            actual_vocab_size=record.actual_vocab_size,
+            trained_on_dataset_id=record.trained_on_dataset_id,
+            referenced=total > 0,
+            total_references=total,
+            categories=[ArtifactUsageCategory(category=c, references=r)
+                        for c, r in categories])
 
     # ------------------------------------------------------------------ #
     # Evaluation (thin delegation to the evaluation engine; read-only)

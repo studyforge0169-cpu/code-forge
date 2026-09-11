@@ -2094,6 +2094,41 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 64 — read-only DATASET & TOKENIZER USAGE OVERVIEW
+  (`GET /datasets/{dataset_id}/usage`, `GET /tokenizers/{tokenizer_id}/usage`)
+- **concept**: visibility one family over — datasets and tokenizers are
+  deletable, but nothing showed what still REFERENCES them. M64 answers
+  "what would I orphan if I deleted this dataset/tokenizer?" BEFORE any
+  deletion decision: every persisted referencing record, by category
+- **categories (canonical order, M61-blocker style)**: training_run
+  (model manifests' persisted run provenance), workflow (embedded plan
+  stage configs — train/evaluate/compare), evaluation (M4), comparison
+  (M5), suite_run (M10 executed probes), plus tokenizer-only sample
+  (M15) and sample_quality (M16) — and the artifact-specific ones:
+  tokenizer_training (datasets: the ONE reference category the
+  EXISTING deletion guard refuses on — the usage view explains the
+  guard exactly) and the tokenized-version derivations (dataset ->
+  tokenizer ids per version; tokenizer -> dataset versions)
+- **one analysis, never a second**: every category is computed through
+  the ONE existing cross-reference filters
+  (`..._for_dataset`/`..._for_tokenizer`), the ONE tokenizer-training
+  scan the guard uses, the authoritative registries and the ONE M2
+  tokenized layout — read-only traversals in the M61 blocker-analysis
+  style. Suite-run stages reference a suite id (the shared M9
+  registry), never a dataset/tokenizer directly — that indirection is
+  deliberately not followed (definitions are not per-model evidence)
+- **semantics**: per-record references (a workflow/suite run/training
+  run counts ONCE however many of its stages/probes name the
+  artifact), deterministic sorted ids, `referenced` flag + total
+  count; unknown ids -> the family's 404; unreferenced -> 200 with
+  empty categories. Read-only, zero storage, zero mutation,
+  byte-identical over unchanged state, recomputed live
+- **visibility only**: no deletion guards are added or changed (the
+  existing dataset guard stays exactly as it is), no policies, no
+  automation, no bulk operations — the M62 pattern applied to the
+  data families
+- OpenAPI: path count 87 -> 89 (exactly the two new read-only routes)
+
 ### Milestone 63 — read-only PROJECT STORAGE OVERVIEW
   (`GET /project/storage`)
 - **concept**: storage visibility one level up — checkpoint (M62) ->
@@ -2546,7 +2581,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 623 tests
+pytest                       # 626 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3055,7 +3090,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 623 tests across 21 suites
+  tests/               # 626 tests across 22 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

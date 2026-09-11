@@ -861,6 +861,69 @@ class ProjectStorageOverview(BaseModel):
     models: list[ProjectModelStorageSummary] = Field(default_factory=list)
 
 
+class ArtifactUsageCategory(BaseModel):
+    """ONE reference category of the M64 read-only usage overview.
+
+    ``category`` is a stable name from the artifact kind's canonical
+    category order; ``references`` lists every persisted record of that
+    family that references the artifact, as deterministic sorted id
+    strings (``<model_id>/<record_id>`` for model-scoped records, bare
+    ids / ``v<N>/<tokenizer_id>`` / ``<dataset_id>/v<N>`` for
+    project-level references). Computed live from the authoritative
+    listings — never stored, never a second registry."""
+
+    category: str
+    references: list[str] = Field(default_factory=list)
+
+
+class DatasetUsageOverview(BaseModel):
+    """Read-only live-computed usage overview of ONE dataset (M64):
+    every persisted record that references it, by category — the
+    training runs whose provenance names it (model manifests), the
+    workflow records whose embedded plans name it (train/evaluate/
+    compare stage configs), the M4 evaluations and M5 comparisons that
+    measured it, the M10 suite-run records whose executed probes used
+    it, the tokenizers trained on it (the ONE reference category the
+    existing dataset deletion guard refuses on) and the tokenized
+    artifact versions derived from it. ``referenced`` is True iff any
+    category is non-empty. Zero storage, zero mutation, byte-identical
+    over unchanged state; unknown dataset -> FileNotFoundError (404 at
+    the API)."""
+
+    dataset_id: str
+    name: str
+    created_at: datetime
+    version_count: int
+    latest_version: int
+    referenced: bool
+    total_references: int
+    categories: list[ArtifactUsageCategory] = Field(default_factory=list)
+
+
+class TokenizerUsageOverview(BaseModel):
+    """Read-only live-computed usage overview of ONE tokenizer (M64):
+    every persisted record that references it, by category — the
+    training runs whose provenance names it, the workflow records whose
+    embedded plans name it, the M4 evaluations, M5 comparisons, M15
+    samples and M16 sample-quality measurements that used it, the M10
+    suite-run records whose executed probes used it, and the dataset
+    versions it tokenized. The tokenizer's own ``trained_on_dataset_id``
+    is identity (provenance), not a reference to it. ``referenced`` is
+    True iff any category is non-empty. Zero storage, zero mutation,
+    byte-identical over unchanged state; unknown tokenizer ->
+    FileNotFoundError (404 at the API)."""
+
+    tokenizer_id: str
+    name: str
+    created_at: datetime
+    requested_vocab_size: int
+    actual_vocab_size: int
+    trained_on_dataset_id: Optional[str] = None
+    referenced: bool
+    total_references: int
+    categories: list[ArtifactUsageCategory] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Evaluation (read-only measurement of an existing model state)
 # --------------------------------------------------------------------------- #

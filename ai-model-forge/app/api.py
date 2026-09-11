@@ -49,8 +49,10 @@ from .schemas import (
     CheckpointDeletionResult,
     CheckpointRetentionOverview,
     CheckpointSelection,
+    DatasetUsageOverview,
     RollbackRequest,
     TokenizerConfig,
+    TokenizerUsageOverview,
     TrainingConfig,
     TrainingReport,
     TransformerConfig,
@@ -924,6 +926,23 @@ def index() -> HTMLResponse:
         policies, no quotas, no garbage collection. Zero storage, zero
         mutation, byte-identical over unchanged state.</li>
 
+      <li><b>M64 read-only dataset &amp; tokenizer usage overview</b> —
+        <code>GET /datasets/&#123;id&#125;/usage</code> and
+        <code>GET /tokenizers/&#123;id&#125;/usage</code> answer "what
+        still references this dataset/tokenizer?" before any deletion
+        decision: every persisted referencing record by category —
+        training-run provenance (model manifests), workflow plans
+        (train/evaluate/compare stage configs), M4 evaluations, M5
+        comparisons, M10 suite-run probes, M15 samples + M16
+        sample-quality measurements (tokenizers), the tokenizers
+        trained on a dataset (the ONE reference category its deletion
+        guard refuses on) and the tokenized-version derivations — each
+        category in a canonical order with deterministic sorted ids,
+        plus a <code>referenced</code> flag and total count. Computed
+        live through the ONE existing cross-reference filters and
+        registries (never a second scanner). Visibility only: no
+        deletion guards are added or changed here.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -966,6 +985,8 @@ def index() -> HTMLResponse:
     <ul>
       <li><code>GET   {prefix}/project</code> — project info &amp; artifact counts</li>
       <li><code>GET   {prefix}/project/storage</code> — read-only PHYSICAL storage overview of the whole project: totals, category partition (no double counting) and per-model rows with the M62 retention aggregates (M63)</li>
+      <li><code>GET   {prefix}/datasets/&#123;id&#125;/usage</code> — read-only usage overview of one dataset: every referencing record by category (training runs, workflows, evaluations, comparisons, suite runs, tokenizer training, tokenized versions; M64)</li>
+      <li><code>GET   {prefix}/tokenizers/&#123;id&#125;/usage</code> — read-only usage overview of one tokenizer: every referencing record by category (training runs, workflows, evaluations, comparisons, suite runs, samples, sample quality, tokenized datasets; M64)</li>
       <li><code>POST  {prefix}/models</code> — create a model (validated config)</li>
       <li><code>POST  {prefix}/datasets/upload</code> — ingest txt/md/csv/json → versioned dataset</li>
       <li><code>GET   {prefix}/datasets/&#123;id&#125;/verify</code> — integrity check (tamper detection)</li>
@@ -1225,6 +1246,23 @@ def verify_dataset(dataset_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.get("/datasets/{dataset_id}/usage",
+         response_model=DatasetUsageOverview, tags=["datasets"])
+def dataset_usage(dataset_id: str) -> DatasetUsageOverview:
+    """Read-only usage overview of ONE dataset (M64): every persisted
+    record that references it, by category — training-run provenance,
+    workflow plans, evaluations, comparisons, suite-run probes, the
+    tokenizers trained on it (the ONE reference category the deletion
+    guard refuses on) and the tokenized versions derived from it.
+    Computed live: zero storage, zero mutation, byte-identical over
+    unchanged state. Visibility only — it deletes nothing and changes
+    no deletion semantics."""
+    try:
+        return _forge().dataset_usage_overview(dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.post("/datasets/{dataset_id}/tokenize", response_model=dict, tags=["datasets"])
 def tokenize_dataset(dataset_id: str, payload: dict) -> dict[str, Any]:
     """Tokenize one version: JSON body {tokenizer_id: str, version?: int}."""
@@ -1293,6 +1331,22 @@ def list_tokenizers() -> list[dict[str, Any]]:
 def get_tokenizer(tokenizer_id: str) -> dict[str, Any]:
     try:
         return _forge().get_tokenizer(tokenizer_id).model_dump(mode="json")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/tokenizers/{tokenizer_id}/usage",
+         response_model=TokenizerUsageOverview, tags=["tokenizers"])
+def tokenizer_usage(tokenizer_id: str) -> TokenizerUsageOverview:
+    """Read-only usage overview of ONE tokenizer (M64): every persisted
+    record that references it, by category — training-run provenance,
+    workflow plans, evaluations, comparisons, suite-run probes, samples,
+    sample-quality measurements and the dataset versions it tokenized.
+    Computed live: zero storage, zero mutation, byte-identical over
+    unchanged state. Visibility only — it deletes nothing and changes
+    no deletion semantics."""
+    try:
+        return _forge().tokenizer_usage_overview(tokenizer_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

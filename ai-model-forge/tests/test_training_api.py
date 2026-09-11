@@ -330,7 +330,7 @@ def test_m46_by_run_errors_empty_isolation_regressions_openapi(api_client):
     # + 1 (M34) + 1 (M35) + 1 (M36) + 1 (M37) + 1 (M38) + 1 (M39)
     # + 1 (M40) + 1 (M41) + 1 (M42) + 1 (M43) + 1 (M44)
     # + 1 (M45) + 1 (M46 checkpoints by-run) = 78
-    assert len(spec["paths"]) == 87
+    assert len(spec["paths"]) == 89
     path = "/api/v1/models/{model_id}/checkpoints/by-run/{run_id}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -484,7 +484,7 @@ def test_m52_best_checkpoint_tie_corruption_openapi(api_client):
     # 78 (M46 cumulative) + 1 (M47) + 1 (M48) + 1 (M49) + 1 (M50)
     # + 1 (M51 recipe plan) + 1 (M52 checkpoints best)
     # + 1 (M59 checkpoints best history) = 85
-    assert len(spec["paths"]) == 87
+    assert len(spec["paths"]) == 89
     path = "/api/v1/models/{model_id}/checkpoints/best"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -569,7 +569,7 @@ def test_m54_api_resume_point_errors_and_openapi(api_client):
     # OpenAPI: the M54 field is part of the existing TrainingConfig
     # schema (path count moved 84 -> 85 with the M59 history route)
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 87
+    assert len(spec["paths"]) == 89
     assert "resume_from_checkpoint_id" in spec["components"]["schemas"][
         "TrainingConfig"]["properties"]
 
@@ -791,7 +791,7 @@ def test_m59_history_openapi(api_client):
 
     spec = api_client.get("/openapi.json").json()
     # 84 (M52 cumulative) + 1 (M59 best history) = 85
-    assert len(spec["paths"]) == 87
+    assert len(spec["paths"]) == 89
     keys = list(spec["paths"])
     assert keys.count(path) == 1
     item = spec["paths"][path]
@@ -887,7 +887,7 @@ def test_m61_api_explicit_checkpoint_retention(api_client):
     # OpenAPI: NO new path (the DELETE rides the existing checkpoint
     # detail path); the new operation + response schema are exposed
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 87
+    assert len(spec["paths"]) == 89
     path = "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}"
     assert "delete" in spec["paths"][path]
     assert "get" in spec["paths"][path]      # the existing detail stays
@@ -997,7 +997,7 @@ def test_m62_api_retention_overview(api_client):
 
     # OpenAPI: exactly one new path (85 -> 86), response schemas exposed
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 87
+    assert len(spec["paths"]) == 89
     RET_PATH = "/api/v1/models/{model_id}/checkpoints/retention"
     assert set(spec["paths"][RET_PATH].keys()) == {"get"}
     assert "CheckpointRetentionOverview" in spec["components"]["schemas"]
