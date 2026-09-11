@@ -1805,7 +1805,7 @@ def test_m35_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M31 comparisons by-tokenizer) + 1 (M32 samples by-tokenizer)
     # + 1 (M33 sample-quality by-tokenizer) + 1 (M34 gate decisions
     # by-comparison) + 1 (M35 workflows by-recipe) = 67
-    assert len(spec["paths"]) == 89
+    assert len(spec["paths"]) == 91
     path = "/api/v1/models/{model_id}/workflows/by-recipe/{recipe_id}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -2185,7 +2185,7 @@ def test_m42_api_by_status_404_422s_isolation_regressions_openapi(
     # + 1 (M48 evaluations by-seed)
     # + 1 (M49 comparisons by-seed)
     # + 1 (M50 suite-runs by-reused) = 82
-    assert len(spec["paths"]) == 89
+    assert len(spec["paths"]) == 91
     path = "/api/v1/models/{model_id}/workflows/by-status/{status}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
@@ -2368,7 +2368,7 @@ def test_m51_api_plan_composite_errors_and_openapi(api_client):
            "{recipe_id}/plan"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
-    assert len(keys) == 89
+    assert len(keys) == 91
     item = spec["paths"][path]
     assert list(item) == ["get"] and "post" not in item
     assert item["get"]["tags"] == ["workflows"]
@@ -2631,7 +2631,7 @@ def test_m53_api_best_reference_registration_to_execution(api_client):
     # OpenAPI: path count UNCHANGED (no new route); the schema carries
     # the new enum member + the pinned-id field
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 89
+    assert len(spec["paths"]) == 91
     assert "best" in spec["components"]["schemas"]["EvalStateKind"]["enum"]
     ssr = spec["components"]["schemas"]["StageStateRef"]
     assert "resolved_checkpoint_id" in ssr["properties"]
@@ -2907,7 +2907,7 @@ def test_m55_api_registration_to_execution(api_client):
 
     # OpenAPI: path count UNCHANGED; both fields in TrainingConfig
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 89
+    assert len(spec["paths"]) == 91
     props = spec["components"]["schemas"]["TrainingConfig"]["properties"]
     assert "resume_from_best" in props
     assert "resolved_resume_checkpoint_id" in props
@@ -3268,7 +3268,7 @@ def test_m56_api_registration_to_execution(api_client):
 
     # OpenAPI: path count UNCHANGED; both fields on the stage schema
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 89
+    assert len(spec["paths"]) == 91
     props = spec["components"]["schemas"]["WorkflowEvaluationStage"][
         "properties"]
     assert "checkpoint_from_best" in props
@@ -3728,7 +3728,7 @@ def test_m57_api_registration_to_execution(api_client):
 
     # OpenAPI: path count UNCHANGED; both fields in GatePolicy
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 89
+    assert len(spec["paths"]) == 91
     props = spec["components"]["schemas"]["GatePolicy"]["properties"]
     assert "baseline_from_best" in props
     assert "resolved_baseline_checkpoint_id" in props
@@ -4061,7 +4061,7 @@ def test_m58_api_batch_response_and_history(api_client):
     # OpenAPI: path count UNCHANGED; the request gained the bounded
     # field; the batch response component exists
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 89
+    assert len(spec["paths"]) == 91
     props = spec["components"]["schemas"]["WorkflowRecipeRunRequest"][
         "properties"]
     assert props["repetitions"]["default"] == 1
@@ -4575,7 +4575,7 @@ def test_m60_api_surface_openapi(api_client):
 
     # OpenAPI: NO new route (the stage rides existing schemas)
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 89
+    assert len(spec["paths"]) == 91
     assert "WorkflowPublishStage" in spec["components"]["schemas"]
     props = spec["components"]["schemas"]["WorkflowPublishStage"][
         "properties"]

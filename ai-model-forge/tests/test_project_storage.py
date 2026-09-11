@@ -578,7 +578,7 @@ def test_m63_api_project_storage(api_client):
 
     # OpenAPI: exactly one new path (86 -> 87), only GET, schemas exposed
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 89
+    assert len(spec["paths"]) == 91
     NEW = "/api/v1/project/storage"
     assert set(spec["paths"][NEW].keys()) == {"get"}
     assert spec["paths"][NEW]["get"]["tags"] == ["meta"]

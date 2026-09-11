@@ -47,8 +47,10 @@ from .schemas import (
     ProjectStorageCategory,
     ProjectStorageOverview,
     DatasetDeletionResult,
+    DatasetRetentionOverview,
     DatasetUsageOverview,
     TokenizerDeletionResult,
+    TokenizerRetentionOverview,
     TokenizerUsageOverview,
     SuiteRunRecord,
     SuiteRunRequest,
@@ -951,6 +953,107 @@ class ModelForge:
             categories=[ArtifactUsageCategory(category=c, references=r)
                         for c, r in categories])
 
+    def _scope_data_artifact(self, loader, artifact_id: str, kind: str):
+        """Resolve ONE data artifact through its registry loader with
+        the M61 scope convention: missing -> FileNotFoundError (404);
+        unparseable manifest (registry-invisible — the registry
+        listings skip it) -> FileNotFoundError with an explicit
+        unreadable-manifest message (404, nothing deleted), never a
+        500."""
+        try:
+            return loader(artifact_id)
+        except FileNotFoundError:
+            raise
+        except ValueError as exc:
+            raise FileNotFoundError(
+                f"{kind} '{artifact_id}' not found (manifest unreadable"
+                f" — registry-invisible)") from exc
+
+    @staticmethod
+    def _artifact_files(directory) -> tuple[list[str], int]:
+        """Ordered (sorted relative posix paths, hidden crash-residue
+        entries excluded) file list + total byte size of ONE artifact
+        directory — the M63-boundary walk, read-only."""
+        files: list[str] = []
+        total = 0
+        if directory.exists():
+            for p in sorted(directory.rglob("*")):
+                rel = p.relative_to(directory)
+                if any(part.startswith(".") for part in rel.parts):
+                    continue
+                if p.is_file():
+                    files.append(rel.as_posix())
+                    total += p.stat().st_size
+        return files, total
+
+    def dataset_retention_overview(
+            self, dataset_id: str) -> DatasetRetentionOverview:
+        """Read-only live-computed retention overview of ONE dataset
+        (M65): the deletion-readiness view — identity, the ordered
+        artifact files + total bytes of the dataset's OWN directory,
+        the M2 integrity-verification outcome, ``deletable`` (True iff
+        integrity passes AND the ONE M64 reference analysis finds
+        nothing) and the ordered blockers (the SAME list the DELETE
+        guard refuses on). A corrupt dataset is never deletable; an
+        unknown or registry-invisible dataset -> FileNotFoundError
+        (404 at the API). Zero storage, zero mutation, byte-identical
+        over unchanged state."""
+        meta = self._scope_data_artifact(self.datasets.load_meta,
+                                         dataset_id, "dataset")
+        files, nbytes = self._artifact_files(
+            self.storage.dataset_dir(dataset_id))
+        try:
+            integrity_verified = (
+                self.datasets.verify(dataset_id).get("status") == "ok")
+        except Exception:
+            integrity_verified = False
+        blockers = self.dataset_deletion_blockers(dataset_id)
+        return DatasetRetentionOverview(
+            dataset_id=dataset_id,
+            name=meta.name,
+            created_at=meta.created_at,
+            version_count=len(meta.versions),
+            latest_version=meta.latest_version,
+            files=files,
+            size_bytes=nbytes,
+            integrity_verified=integrity_verified,
+            deletable=integrity_verified and not blockers,
+            blockers=blockers)
+
+    def tokenizer_retention_overview(
+            self, tokenizer_id: str) -> TokenizerRetentionOverview:
+        """Read-only live-computed retention overview of ONE tokenizer
+        (M65): the deletion-readiness view — identity, the ordered
+        artifact files + total bytes, the content-hash
+        integrity-verification outcome, ``deletable`` and the ordered
+        blockers (the SAME list the DELETE guard refuses on). A
+        corrupt tokenizer is never deletable; an unknown or
+        registry-invisible tokenizer -> FileNotFoundError (404 at the
+        API). Zero storage, zero mutation, byte-identical over
+        unchanged state."""
+        record = self._scope_data_artifact(self.tokenizers.load,
+                                           tokenizer_id, "tokenizer")
+        files, nbytes = self._artifact_files(
+            self.storage.tokenizer_dir(tokenizer_id))
+        try:
+            integrity_verified = (
+                self.tokenizers.verify(tokenizer_id).get("status") == "ok")
+        except Exception:
+            integrity_verified = False
+        blockers = self.tokenizer_deletion_blockers(tokenizer_id)
+        return TokenizerRetentionOverview(
+            tokenizer_id=tokenizer_id,
+            name=record.name,
+            created_at=record.created_at,
+            requested_vocab_size=record.requested_vocab_size,
+            actual_vocab_size=record.actual_vocab_size,
+            trained_on_dataset_id=record.trained_on_dataset_id,
+            files=files,
+            size_bytes=nbytes,
+            integrity_verified=integrity_verified,
+            deletable=integrity_verified and not blockers,
+            blockers=blockers)
+
     def dataset_deletion_blockers(
             self, dataset_id: str) -> list[ArtifactDeletionBlocker]:
         """The reference-safety analysis for dataset deletion (M65),
@@ -1000,7 +1103,26 @@ class ModelForge:
         cascade, no force, no bulk mode, no policies — exactly the one
         explicitly requested dataset. Never touches tokenizers,
         models, checkpoints or any other family's records (they are
-        protected BY the guard)."""
+        protected BY the guard).
+        INTEGRITY FIRST (the M61 ordering): between scope and the
+        reference analysis the existing M2 verifier
+        (``DatasetEngine.verify`` — records, splits, tokenized
+        artifacts) must pass; a corrupt dataset is REFUSED with
+        RuntimeError (409) — deletion never bypasses integrity
+        validation, and a manifest that cannot be parsed at all is
+        registry-invisible (scope -> 404, nothing deleted)."""
+        self._scope_data_artifact(self.datasets.load_meta, dataset_id,
+                                  "dataset")
+        try:
+            report = self.datasets.verify(dataset_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"dataset '{dataset_id}' could not be verified: "
+                f"{exc}") from exc
+        if report.get("status") != "ok":
+            raise RuntimeError(
+                f"dataset '{dataset_id}' failed integrity verification"
+                f" — refusing to delete corrupted storage")
         blockers = self.dataset_deletion_blockers(dataset_id)
         if blockers:
             summary = "; ".join(f"{b.reason}: {b.detail}" for b in blockers)
@@ -1031,7 +1153,27 @@ class ModelForge:
         referenced tokenizer's tokenized artifacts under a dataset
         appear in this analysis as ``tokenized_dataset`` and therefore
         block deletion), models, checkpoints or any other family's
-        records."""
+        records.
+        INTEGRITY FIRST (the M61 ordering): between scope and the
+        reference analysis the tokenizer verifier
+        (``TokenizerEngine.verify`` — manifest resolution + the
+        tokenizer.json content hash vs the persisted
+        ``tokenizer_hash``) must pass; a corrupt tokenizer is REFUSED
+        with RuntimeError (409) — deletion never bypasses integrity
+        validation, and a manifest that cannot be parsed at all is
+        registry-invisible (scope -> 404, nothing deleted)."""
+        self._scope_data_artifact(self.tokenizers.load, tokenizer_id,
+                                  "tokenizer")
+        try:
+            report = self.tokenizers.verify(tokenizer_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"tokenizer '{tokenizer_id}' could not be verified: "
+                f"{exc}") from exc
+        if report.get("status") != "ok":
+            raise RuntimeError(
+                f"tokenizer '{tokenizer_id}' failed integrity "
+                f"verification — refusing to delete corrupted storage")
         blockers = self.tokenizer_deletion_blockers(tokenizer_id)
         if blockers:
             summary = "; ".join(f"{b.reason}: {b.detail}" for b in blockers)

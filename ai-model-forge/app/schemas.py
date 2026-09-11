@@ -987,6 +987,57 @@ class TokenizerDeletionBlocked(BaseModel):
     blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
 
 
+class DatasetRetentionOverview(BaseModel):
+    """Read-only live-computed retention overview of ONE dataset
+    (M65): the deletion-readiness view. Identity, the ordered artifact
+    file list (sorted relative paths of the dataset's OWN directory,
+    tokenized artifacts included) and its total bytes, the M2
+    integrity-verification outcome, ``deletable`` — True iff integrity
+    passes AND the ONE M64 reference analysis finds nothing — and the
+    ordered blockers (the SAME categories and reference ids the usage
+    overview and the DELETE guard report). A corrupt dataset is never
+    deletable (the M61/M62 semantics: deletion never bypasses
+    integrity validation). Zero storage, zero mutation, byte-identical
+    over unchanged state; unknown or registry-invisible (unparseable
+    manifest) dataset -> FileNotFoundError (404 at the API)."""
+
+    dataset_id: str
+    name: str
+    created_at: datetime
+    version_count: int
+    latest_version: int
+    files: list[str] = Field(default_factory=list)   # ordered artifact files
+    size_bytes: int                                   # total artifact bytes
+    integrity_verified: bool
+    deletable: bool
+    blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
+
+
+class TokenizerRetentionOverview(BaseModel):
+    """Read-only live-computed retention overview of ONE tokenizer
+    (M65): the deletion-readiness view. Identity (incl.
+    ``trained_on_dataset_id`` provenance), the ordered artifact file
+    list (manifest + tokenizer.json) and total bytes, the content-hash
+    integrity-verification outcome, ``deletable`` and the ordered
+    blockers — the SAME categories and reference ids the usage
+    overview and the DELETE guard report. A corrupt tokenizer is never
+    deletable. Zero storage, zero mutation, byte-identical over
+    unchanged state; unknown or registry-invisible tokenizer ->
+    FileNotFoundError (404 at the API)."""
+
+    tokenizer_id: str
+    name: str
+    created_at: datetime
+    requested_vocab_size: int
+    actual_vocab_size: int
+    trained_on_dataset_id: Optional[str] = None
+    files: list[str] = Field(default_factory=list)   # ordered artifact files
+    size_bytes: int                                   # total artifact bytes
+    integrity_verified: bool
+    deletable: bool
+    blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Evaluation (read-only measurement of an existing model state)
 # --------------------------------------------------------------------------- #

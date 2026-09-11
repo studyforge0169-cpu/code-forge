@@ -424,7 +424,7 @@ def test_m65_api_retention(api_client):
 
     # ---- OpenAPI: NO new paths; schemas exposed --------------------- #
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 89
+    assert len(spec["paths"]) == 91
     d = spec["paths"]["/api/v1/datasets/{dataset_id}"]
     assert set(d.keys()) == {"get", "delete"}
     t = spec["paths"]["/api/v1/tokenizers/{tokenizer_id}"]
@@ -433,3 +433,257 @@ def test_m65_api_retention(api_client):
               "ArtifactDeletionBlocker", "DatasetDeletionBlocked",
               "TokenizerDeletionBlocked"):
         assert s in spec["components"]["schemas"], s
+
+
+# --------------------------------------------------------------------------- #
+# M65 spec compliance: retention views + integrity-first guards
+# --------------------------------------------------------------------------- #
+
+def _walk_artifact(directory: Path) -> tuple[list[str], int]:
+    """INDEPENDENT ordered walk of one artifact directory."""
+    files, total = [], 0
+    for q in sorted(directory.rglob("*")):
+        rel = q.relative_to(directory)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        if q.is_file():
+            files.append(rel.as_posix())
+            total += q.stat().st_size
+    return files, total
+
+
+def test_m65_retention_views_and_integrity(env):
+    forge, root = env.forge, env.root
+
+    # ---- healthy unreferenced artifacts: deletable, exact stats ------ #
+    # rv_free: NOTHING references it (no tokenizer trained on it)
+    up = forge.upload_dataset([("m65free.txt", _corpus(50, "m65free"))],
+                              name="m65-rv-free-ds")
+    rv_free = up["dataset_id"]
+    ov = forge.dataset_retention_overview(rv_free)
+    ov2 = forge.dataset_retention_overview(rv_free)
+    files, nbytes = _walk_artifact(root / "datasets" / rv_free)
+    assert ov.model_dump(mode="json") == ov2.model_dump(mode="json")
+    assert ov.dataset_id == rv_free and ov.version_count == 1
+    assert ov.files == files and ov.size_bytes == nbytes
+    assert ov.integrity_verified is True
+    assert ov.deletable is True and ov.blockers == []
+
+    # the pair: rv_tok is trained on rv_ds (unreferenced itself), so
+    # rv_ds carries exactly ONE blocker and rv_tok none
+    up = forge.upload_dataset([("m65rv.txt", _corpus(50, "m65rv"))],
+                              name="m65-rv-ds")
+    rv_ds = up["dataset_id"]
+    rv_tok = forge.train_tokenizer(
+        TokenizerConfig(name="m65-rv-tok", vocab_size=300),
+        dataset_id=rv_ds).id
+    dov = forge.dataset_retention_overview(rv_ds)
+    assert [b.reason for b in dov.blockers] == ["tokenizer_training"]
+    assert dov.deletable is False and dov.integrity_verified is True
+
+    tv = forge.tokenizer_retention_overview(rv_tok)
+    tfiles, tbytes = _walk_artifact(root / "tokenizers" / rv_tok)
+    assert tv.files == tfiles == ["manifest.json", "tokenizer.json"]
+    assert tv.size_bytes == tbytes
+    assert tv.integrity_verified is True
+    assert tv.deletable is True and tv.blockers == []
+    assert tv.trained_on_dataset_id == rv_ds
+
+    # ---- referenced artifacts: the view is the guard (both directions) #
+    dref = forge.dataset_retention_overview(env.ds_a)
+    usage = forge.dataset_usage_overview(env.ds_a)
+    guard = forge.dataset_deletion_blockers(env.ds_a)
+    ret_reasons = [b.reason for b in dref.blockers]
+    usage_nonempty = [c.category for c in usage.categories if c.references]
+    assert ret_reasons == usage_nonempty == [b.reason for b in guard]
+    assert dref.integrity_verified is True and dref.deletable is False
+    # THE §10 invariant, per category, both directions
+    for c in usage.categories:
+        if c.references:
+            assert c.category in ret_reasons
+        else:
+            assert c.category not in ret_reasons
+    # the dataset's own files include the tokenized artifacts
+    assert any(f.startswith("v1/tokenized/") for f in dref.files)
+
+    tref = forge.tokenizer_retention_overview(env.tok_a)
+    tusage = forge.tokenizer_usage_overview(env.tok_a)
+    tguard = forge.tokenizer_deletion_blockers(env.tok_a)
+    assert [b.reason for b in tref.blockers] == \
+        [c.category for c in tusage.categories if c.references] == \
+        [b.reason for b in tguard]
+    assert tref.deletable is False and tref.integrity_verified is True
+
+    # ---- corrupt dataset: never deletable, deletion refused ---------- #
+    rec = root / "datasets" / rv_ds / "v1" / "records.jsonl.gz"
+    original = rec.read_bytes()
+    rec.write_bytes(original + b"x")            # tamper (hash mismatch)
+    cov = forge.dataset_retention_overview(rv_ds)
+    assert cov.integrity_verified is False and cov.deletable is False
+    before = _inventory(root)
+    # INTEGRITY FIRST: rv_ds is also reference-protected, but the M61
+    # ordering refuses on the integrity failure (RuntimeError), never
+    # on the blockers — deletion never bypasses integrity validation
+    with pytest.raises(RuntimeError):
+        forge.delete_dataset(rv_ds)
+    assert _inventory(root) == before           # the refusal wrote nothing
+    rec.write_bytes(original)                   # restore -> integrity flips
+    restored = forge.dataset_retention_overview(rv_ds)
+    assert restored.integrity_verified is True
+    assert [b.reason for b in restored.blockers] == ["tokenizer_training"]
+    assert restored.deletable is False         # still pair-protected
+
+    # ---- corrupt tokenizer: content-hash mismatch, refused ----------- #
+    tj = root / "tokenizers" / rv_tok / "tokenizer.json"
+    torig = tj.read_bytes()
+    flipped = bytearray(torig)
+    flipped[len(flipped) // 2] ^= 0xFF
+    tj.write_bytes(bytes(flipped))
+    ctv = forge.tokenizer_retention_overview(rv_tok)
+    assert ctv.integrity_verified is False and ctv.deletable is False
+    before = _inventory(root)
+    with pytest.raises(RuntimeError):
+        forge.delete_tokenizer(rv_tok)
+    assert _inventory(root) == before
+    tj.write_bytes(torig)
+    assert forge.tokenizer_retention_overview(rv_tok).deletable is True
+
+    # ---- malformed manifests: registry-invisible (the M61 404) ------- #
+    dmeta = root / "datasets" / rv_ds / "dataset.json"
+    dorig = dmeta.read_bytes()
+    dmeta.write_bytes(b"not json at all")
+    with pytest.raises(FileNotFoundError):
+        forge.dataset_retention_overview(rv_ds)
+    with pytest.raises(FileNotFoundError):
+        forge.delete_dataset(rv_ds)             # refused, nothing deleted
+    dmeta.write_bytes(dorig)
+
+    tmeta = root / "tokenizers" / rv_tok / "manifest.json"
+    tmeta_orig = tmeta.read_bytes()
+    tmeta.write_bytes(b"not json at all")
+    with pytest.raises(FileNotFoundError):
+        forge.tokenizer_retention_overview(rv_tok)
+    with pytest.raises(FileNotFoundError):
+        forge.delete_tokenizer(rv_tok)
+    tmeta.write_bytes(tmeta_orig)
+    assert forge.tokenizer_retention_overview(rv_tok).deletable is True
+
+    # cleanup: rv_tok is unreferenced -> safe deletion; rv_ds + rv_free
+    assert forge.delete_tokenizer(rv_tok).files_removed == 2
+    assert forge.delete_dataset(rv_ds).files_removed == len(dov.files)
+    assert forge.delete_dataset(rv_free).files_removed == len(files)
+
+
+def test_m65_api_retention_views(api_client):
+    import json as _json
+
+    # a referenced dataset/tokenizer pair through the public routes
+    up = api_client.post(
+        "/api/v1/datasets/upload",
+        files=[("files", ("m65rv.txt", _corpus(170, "m65rvapi"), "text/plain"))],
+        data={"name": "m65rvapi-ds"})
+    assert up.status_code == 201, up.text
+    ds = up.json()["dataset_id"]
+    tr = api_client.post("/api/v1/tokenizers/train",
+                         data={"config": _json.dumps(
+                             {"name": "m65rvapi-tok", "vocab_size": 320}),
+                             "dataset_id": ds})
+    assert tr.status_code == 201, tr.text
+    tok = tr.json()["tokenizer"]["id"]
+    assert api_client.post(f"/api/v1/datasets/{ds}/tokenize",
+                           json={"tokenizer_id": tok}).status_code == 200
+
+    storage_root = Path(api_client.get("/api/v1/project").json()["storage_root"])
+
+    def inv(root):
+        return {p.relative_to(root).as_posix():
+                hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in root.rglob("*")
+                if p.is_file() and p.relative_to(root).parts[0] != "tmp"}
+
+    # ---- the retention views over HTTP -------------------------------- #
+    r = api_client.get(f"/api/v1/datasets/{ds}/retention")
+    assert r.status_code == 200, r.text
+    body_ds = r.content
+    ov = r.json()
+    assert set(ov) == {"dataset_id", "name", "created_at", "version_count",
+                       "latest_version", "files", "size_bytes",
+                       "integrity_verified", "deletable", "blockers"}
+    files, nbytes = _walk_artifact(storage_root / "datasets" / ds)
+    assert ov["files"] == files and ov["size_bytes"] == nbytes
+    assert ov["integrity_verified"] is True and ov["deletable"] is False
+    usage = api_client.get(f"/api/v1/datasets/{ds}/usage").json()
+    usage_blockers = [{"reason": c["category"],
+                       "detail": ", ".join(c["references"])}
+                      for c in usage["categories"] if c["references"]]
+    assert ov["blockers"] == usage_blockers        # the view is the guard
+
+    r = api_client.get(f"/api/v1/tokenizers/{tok}/retention")
+    assert r.status_code == 200, r.text
+    body_tok = r.content
+    tv = r.json()
+    assert set(tv) == {"tokenizer_id", "name", "created_at",
+                       "requested_vocab_size", "actual_vocab_size",
+                       "trained_on_dataset_id", "files", "size_bytes",
+                       "integrity_verified", "deletable", "blockers"}
+    assert tv["files"] == ["manifest.json", "tokenizer.json"]
+    assert tv["integrity_verified"] is True and tv["deletable"] is False
+    tusage = api_client.get(f"/api/v1/tokenizers/{tok}/usage").json()
+    assert tv["blockers"] == [{"reason": c["category"],
+                               "detail": ", ".join(c["references"])}
+                              for c in tusage["categories"]
+                              if c["references"]]
+
+    # ---- integrity refusals over HTTP --------------------------------- #
+    before = inv(storage_root)
+    rec = storage_root / "datasets" / ds / "v1" / "records.jsonl.gz"
+    original = rec.read_bytes()
+    rec.write_bytes(original + b"x")
+    r = api_client.get(f"/api/v1/datasets/{ds}/retention")
+    assert r.status_code == 200, r.text
+    assert r.json()["integrity_verified"] is False
+    assert r.json()["deletable"] is False         # corrupt: never deletable
+    r = api_client.delete(f"/api/v1/datasets/{ds}")
+    assert r.status_code == 409, r.text           # integrity refusal (409)
+    assert "integrity" in r.json()["detail"]
+    rec.write_bytes(original)
+    assert api_client.get(
+        f"/api/v1/datasets/{ds}/retention").json()["deletable"] is False
+    # (still protected by references — integrity passed again)
+
+    # malformed manifest -> registry-invisible -> 404 (view AND delete)
+    dmeta = storage_root / "datasets" / ds / "dataset.json"
+    dorig = dmeta.read_bytes()
+    dmeta.write_bytes(b"not json")
+    assert api_client.get(
+        f"/api/v1/datasets/{ds}/retention").status_code == 404
+    r = api_client.delete(f"/api/v1/datasets/{ds}")
+    assert r.status_code == 404
+    dmeta.write_bytes(dorig)
+    assert api_client.get(
+        f"/api/v1/datasets/{ds}/retention").status_code == 200
+
+    # unknown ids -> 404
+    assert api_client.get("/api/v1/datasets/no-m65/retention").status_code == 404
+    assert api_client.get(
+        "/api/v1/tokenizers/no-m65/retention").status_code == 404
+
+    # ---- determinism + zero mutation ---------------------------------- #
+    assert api_client.get(
+        f"/api/v1/datasets/{ds}/retention").content == body_ds
+    assert api_client.get(
+        f"/api/v1/tokenizers/{tok}/retention").content == body_tok
+    assert inv(storage_root) == before
+
+    # ---- OpenAPI: exactly two new paths (89 -> 91) -------------------- #
+    spec = api_client.get("/openapi.json").json()
+    assert len(spec["paths"]) == 91
+    for pth in ("/api/v1/datasets/{dataset_id}/retention",
+                "/api/v1/tokenizers/{tokenizer_id}/retention"):
+        assert set(spec["paths"][pth].keys()) == {"get"}
+    for s in ("DatasetRetentionOverview", "TokenizerRetentionOverview"):
+        assert s in spec["components"]["schemas"], s
+    assert set(spec["paths"]["/api/v1/datasets/{dataset_id}"].keys()) == \
+        {"get", "delete"}
+    assert set(spec["paths"]["/api/v1/tokenizers/{tokenizer_id}"].keys()) == \
+        {"get", "delete"}

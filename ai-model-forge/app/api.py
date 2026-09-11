@@ -51,11 +51,13 @@ from .schemas import (
     CheckpointSelection,
     DatasetDeletionBlocked,
     DatasetDeletionResult,
+    DatasetRetentionOverview,
     DatasetUsageOverview,
     RollbackRequest,
     TokenizerConfig,
     TokenizerDeletionBlocked,
     TokenizerDeletionResult,
+    TokenizerRetentionOverview,
     TokenizerUsageOverview,
     TrainingConfig,
     TrainingReport,
@@ -961,7 +963,17 @@ def index() -> HTMLResponse:
         the deterministic files/bytes result. The tokenizer family's
         pre-M65 gap (an unguarded rmtree) is closed; the dataset
         family's single-category guard becomes the full ordered list.
-        No cascade, no force, no bulk, no policies.</li>
+        The M61 guard ORDER is preserved exactly — scope, INTEGRITY
+        VERIFICATION (the existing M2 dataset verifier; a new tokenizer
+        content-hash verifier), then references, then ONE atomic
+        removal — so a corrupt artifact is never deletable (409) and
+        an unparseable manifest is registry-invisible (404, nothing
+        deleted). Read-only retention views
+        (<code>GET /datasets/&#123;id&#125;/retention</code>,
+        <code>GET /tokenizers/&#123;id&#125;/retention</code>) expose
+        the same decision: ordered artifact files, total bytes,
+        integrity outcome, <code>deletable</code> and the ordered
+        blockers. No cascade, no force, no bulk, no policies.</li>
 
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
@@ -1007,7 +1019,9 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/project/storage</code> — read-only PHYSICAL storage overview of the whole project: totals, category partition (no double counting) and per-model rows with the M62 retention aggregates (M63)</li>
       <li><code>GET   {prefix}/datasets/&#123;id&#125;/usage</code> — read-only usage overview of one dataset: every referencing record by category (training runs, workflows, evaluations, comparisons, suite runs, tokenizer training, tokenized versions; M64)</li>
       <li><code>GET   {prefix}/tokenizers/&#123;id&#125;/usage</code> — read-only usage overview of one tokenizer: every referencing record by category (training runs, workflows, evaluations, comparisons, suite runs, samples, sample quality, tokenized datasets; M64)</li>
+      <li><code>GET   {prefix}/datasets/&#123;id&#125;/retention</code> — read-only deletion-readiness view of one dataset: artifact files/bytes, integrity outcome, deletable + ordered blockers (M65)</li>
       <li><code>DELETE {prefix}/datasets/&#123;id&#125;</code> — explicit VERIFIED dataset retention: one dataset, only with zero M64-visible references (ordered blockers on 409), atomic removal, deterministic files/bytes result (M65)</li>
+      <li><code>GET   {prefix}/tokenizers/&#123;id&#125;/retention</code> — read-only deletion-readiness view of one tokenizer: artifact files/bytes, integrity outcome, deletable + ordered blockers (M65)</li>
       <li><code>DELETE {prefix}/tokenizers/&#123;id&#125;</code> — explicit VERIFIED tokenizer retention: one tokenizer, only with zero M64-visible references (ordered blockers on 409), atomic removal, deterministic files/bytes result (M65)</li>
       <li><code>POST  {prefix}/models</code> — create a model (validated config)</li>
       <li><code>POST  {prefix}/datasets/upload</code> — ingest txt/md/csv/json → versioned dataset</li>
@@ -1283,6 +1297,24 @@ def dataset_usage(dataset_id: str) -> DatasetUsageOverview:
         return _forge().dataset_usage_overview(dataset_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:  # malformed manifest -> registry-invisible
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/datasets/{dataset_id}/retention",
+         response_model=DatasetRetentionOverview, tags=["datasets"])
+def dataset_retention(dataset_id: str) -> DatasetRetentionOverview:
+    """Read-only retention overview of ONE dataset (M65): the
+    deletion-readiness view — identity, ordered artifact files + total
+    bytes, the M2 integrity-verification outcome, ``deletable`` and
+    the ordered blockers (the SAME categories/ids the usage overview
+    reports and the DELETE guard refuses on). A corrupt dataset is
+    never deletable. Zero storage, zero mutation, byte-identical over
+    unchanged state."""
+    try:
+        return _forge().dataset_retention_overview(dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @api.post("/datasets/{dataset_id}/tokenize", response_model=dict, tags=["datasets"])
@@ -1324,6 +1356,8 @@ def delete_dataset(dataset_id: str) -> DatasetDeletionResult:
         return _forge().delete_dataset(dataset_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (M61: 409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         # protection rejection: re-derive the ordered blocker list for a
         # structured 409 detail (the M61 pattern; the list is diagnostic)
@@ -1396,6 +1430,24 @@ def tokenizer_usage(tokenizer_id: str) -> TokenizerUsageOverview:
         return _forge().tokenizer_usage_overview(tokenizer_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:  # malformed manifest -> registry-invisible
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/tokenizers/{tokenizer_id}/retention",
+         response_model=TokenizerRetentionOverview, tags=["tokenizers"])
+def tokenizer_retention(tokenizer_id: str) -> TokenizerRetentionOverview:
+    """Read-only retention overview of ONE tokenizer (M65): the
+    deletion-readiness view — identity, ordered artifact files + total
+    bytes, the content-hash integrity-verification outcome,
+    ``deletable`` and the ordered blockers (the SAME categories/ids
+    the usage overview reports and the DELETE guard refuses on). A
+    corrupt tokenizer is never deletable. Zero storage, zero mutation,
+    byte-identical over unchanged state."""
+    try:
+        return _forge().tokenizer_retention_overview(tokenizer_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @api.delete("/tokenizers/{tokenizer_id}",
@@ -1419,6 +1471,8 @@ def delete_tokenizer(tokenizer_id: str) -> TokenizerDeletionResult:
         return _forge().delete_tokenizer(tokenizer_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (M61: 409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         try:
             blockers = [b.model_dump() for b in

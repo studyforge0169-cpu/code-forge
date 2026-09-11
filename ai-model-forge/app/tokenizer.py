@@ -25,7 +25,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
@@ -81,6 +81,30 @@ class TokenizerEngine:
 
     def exists_id(self, tokenizer_id: str) -> bool:
         return (self.storage.tokenizer_dir(tokenizer_id) / MANIFEST_FILE).exists()
+
+    def verify(self, tokenizer_id: str) -> dict[str, Any]:
+        """Integrity check of ONE tokenizer (M65): the manifest must
+        resolve (missing/unparseable -> FileNotFoundError /
+        ValueError — registry-invisible, the established convention)
+        and the ``tokenizer.json`` content hash must equal the
+        persisted ``tokenizer_hash``. Read-only; never repairs: any
+        mismatch -> status "failed". This is the verifier the M65
+        deletion guard runs BEFORE the reference analysis — deletion
+        never bypasses integrity validation (the M61 ordering)."""
+        record = self.load(tokenizer_id)
+        errors: list[str] = []
+        tpath = self.storage.tokenizer_dir(tokenizer_id) / TOKENIZER_FILE
+        if not tpath.exists():
+            errors.append("tokenizer.json missing")
+        else:
+            digest = hash_file_sha256(tpath)
+            if digest != record.tokenizer_hash:
+                errors.append(
+                    f"tokenizer.json content hash mismatch: {digest} != "
+                    f"{record.tokenizer_hash}")
+        return {"tokenizer_id": tokenizer_id,
+                "status": "ok" if not errors else "failed",
+                "errors": errors}
 
     def get_hf(self, tokenizer_id: str) -> Tokenizer:
         """Load the HF tokenizer object for encoding (not cached: cheap mmap)."""

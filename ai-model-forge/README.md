@@ -2100,13 +2100,20 @@ generation never trains, evaluates, scores, ranks or judges output.
   becomes explicit, verified and reference-safe. M64 made every
   reference visible; M65 refuses on EXACTLY those references: a
   deletion can never orphan immutable evidence
-- **the guard (fixed order)**: (1) scope through the family registry
-  (unknown dataset/tokenizer -> 404, nothing deleted); (2) the LIVE
+- **the guard (fixed order, M61-precise)**: (1) scope through the
+  family registry (unknown dataset/tokenizer, or an unparseable
+  manifest (registry-invisible — the registries skip it) -> 404,
+  nothing deleted); (2) INTEGRITY VERIFICATION — datasets through the
+  existing M2 verifier (records, splits, tokenized artifacts),
+  tokenizers through a new content-hash verifier (tokenizer.json
+  sha256 vs the persisted `tokenizer_hash`); a corrupt artifact is
+  REFUSED with 409 — deletion never bypasses integrity validation,
+  even though the user explicitly requested it; (3) the LIVE
   reference-safety analysis — the ONE M64 usage overview, never a
   second scanner: ANY visible reference -> 409 with an ORDERED blocker
   list in the SAME canonical categories and reference ids the usage
   overview reports (nothing protected that is not shown, nothing shown
-  that is not protected); (3) ONE ATOMIC removal of the artifact's OWN
+  that is not protected); (4) ONE ATOMIC removal of the artifact's OWN
   directory only (the `remove_checkpoint` pattern: one rename to a
   hidden `.tmp-delete-*` sibling, then rmtree — no partial artifact
   can ever be observed)
@@ -2119,6 +2126,15 @@ generation never trains, evaluates, scores, ranks or judges output.
 - **results**: a successful deletion returns the deterministic
   files/bytes measurement of what was removed; every other family's
   records stay untouched (they were protected BY the guard)
+- **retention views** (`GET /datasets/{id}/retention`,
+  `GET /tokenizers/{id}/retention`): the read-only
+  deletion-readiness view — identity, the ordered artifact file list
+  + total bytes of the artifact's OWN directory, the
+  integrity-verification outcome, `deletable` (True iff integrity
+  passes AND the reference analysis finds nothing) and the ordered
+  blockers (the SAME list the DELETE guard refuses on; corrupt ->
+  never deletable, the M61/M62 semantics). Live-computed, zero
+  storage, byte-identical over unchanged state
 - **honest consequence**: a tokenized dataset/tokenizer pair is
   MUTUALLY protected (the tokenizer's derived artifacts live under the
   dataset: `tokenized_dataset` blocks the tokenizer;
@@ -2130,9 +2146,9 @@ generation never trains, evaluates, scores, ranks or judges output.
   the one explicitly requested artifact. The guard recomputes live
   (deleting a referencing artifact shrinks the blocker list; the M61
   checkpoint route and M62/M63/M64 views are untouched)
-- OpenAPI: path count UNCHANGED at 89 (both DELETEs ride the existing
-  detail routes; the typed 409 blocker detail + result schemas are
-  newly exposed)
+- OpenAPI: path count 89 -> 91 (exactly the two new read-only
+  retention routes; the DELETEs ride the existing detail routes; the
+  typed 409 blocker details + result schemas are exposed)
 
 ### Milestone 64 — read-only DATASET & TOKENIZER USAGE OVERVIEW
   (`GET /datasets/{dataset_id}/usage`, `GET /tokenizers/{tokenizer_id}/usage`)
@@ -2621,7 +2637,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 630 tests
+pytest                       # 632 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 

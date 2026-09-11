@@ -2,208 +2,234 @@
 
 **Date:** 2026-09-11 · **Branch:** `arena/01a071e9-code-forge` · **Status:** COMPLETE
 
-`DELETE /datasets/{id}` and `DELETE /tokenizers/{id}` become explicit,
-verified and reference-safe — the M61 pattern one family over. The
-guard refuses on EXACTLY what the M64 usage overview reports (ordered
-blockers, same categories, same ids); a successful deletion removes the
-artifact's own directory atomically and returns the deterministic
-files/bytes result. The tokenizer family's pre-M65 deletion was an
-UNGUARDED rmtree — now fully guarded. Live-certified: **18/18 checks,
-production byte-identical (deletions verified on a discarded copy)**.
+`DELETE /datasets/{id}` and `DELETE /tokenizers/{id}` are explicit,
+verified and reference-safe — dataset/tokenizer deletion is refused on
+EXACTLY the references the M64 usage overview reports, with integrity
+verified before any reference analysis (the M61 ordering) and ONE
+atomic removal. Read-only retention views expose the same decision.
+Both live certifications passed on their single first executions
+(18/18 initial + 21/21 spec-compliance delta), with production
+byte-identical.
 
-> Environment: stable since the M63 certification (verified before
-> work began: venv, production root, git at `4b6d9c4`; the production
-> root is byte-identical to the M64 state, `m65_pre.sha256 ==
-> m64_pre.sha256` 52/52).
+> **ENVIRONMENT EVENT (disclosed):** the sandbox was re-provisioned a
+> THIRD time between the initial M65 delivery and this spec-compliance
+> delta. The repository was fully recovered from the remote (`git
+> reset --mixed FETCH_HEAD` onto `ff741ce`; worktree byte-identical,
+> all 65 milestones safe), the Python environment rebuilt (same
+> versions; baseline re-verified **630 passed**), and the production
+> root reconstructed a third time via the committed
+> `m62_production_rebuild.py` — the certified structure reproduced
+> exactly (dataset `8a2af1e3d1fa` with 16 references 6/2/4/2/0/1/1,
+> tokenizer `02673690c5ff` with 15 references 6/2/4/2/0/0/0/1, model
+> `5939483e70ac`, M62 retention 13/10/3, 52 files / 8,926,407 B / 0
+> tmp; new content-derived ids). This delta's pre-inventory is
+> `m65_retention_pre.sha256` (52/52).
 
 ---
 
-## §1 — Baseline & inspection
+## 1. Inspection & Baseline
 
-**Baseline:** full suite **626 passed** (exit 0); HEAD `4b6d9c4` (M64,
-pushed); OpenAPI **89 paths**; production root **52 files / 8,926,421 B
-/ 0 tmp** (1 model, 1 dataset with 16 references, 1 tokenizer with 15).
+**Baseline (before the delta):** HEAD `ff741ce` (the initial M65
+delivery: `8c3d555` impl + `ff741ce` inventory), worktree clean, full
+suite **630 passed** (exit 0), OpenAPI **89 paths**, production root
+rebuilt as above. **Relevant M61 findings (reused, not reinvented):**
+the guard order scope → INTEGRITY VERIFICATION → reference analysis →
+atomic removal; unreadable manifests are listing/registry-invisible →
+404 (nothing deleted); corrupt-but-parseable artifacts → RuntimeError
+→ 409 (deletion never bypasses integrity validation); the API's
+structured 409 detail `{message, ids, protected, blockers}`;
+`remove_checkpoint`'s measure-then-`atomic_delete_dir` split.
+**Relevant M64 findings:** the ONE canonical usage analysis
+(`dataset_usage_overview` / `tokenizer_usage_overview` — 7 dataset /
+8 tokenizer categories, deterministic sorted reference ids); the
+existing verifiers (`DatasetEngine.verify` — records, splits,
+tokenized artifacts; NO tokenizer verifier existed); the registries
+skip unparseable manifests (registry-invisible). **Gap analysis
+against this spec:** the initial delivery lacked integrity
+verification before deletion, malformed/corrupt refusals, and a
+retention view exposing `deletable` — all delivered in this delta.
 
-**Inspected before any code:** the M61 guard pattern
-(`checkpoint_blockers` + `CHECKPOINT_BLOCKER_ORDER` → ValueError → the
-API's structured 409 detail `{message, ids, protected, blockers}`; the
-`remove_checkpoint` measure-then-`atomic_delete_dir` split; the
-rename-to-hidden-sibling primitive); the M64 analyses (the ONE usage
-overview per artifact + canonical category orders); the current
-`delete_dataset` (single-category guard: `_referencing_tokenizers` →
-ValueError → 409 string detail) and `delete_tokenizer` (**no guard at
-all** — plain `shutil.rmtree`); the family layouts (a dataset's own
-tree = meta + versions + records + tokenized artifacts; a tokenizer's =
-manifest + tokenizer.json); and every existing test touching the two
-deletions (response shapes `{"deleted": id}`, the "training source"
-match, the pipeline test's cleanup order).
+## 2. What Changed
 
-## §2 — Implementation
+**Initial delivery (commits `8c3d555` + `ff741ce`):** `ArtifactDeletionBlocker`,
+`DatasetDeletionResult`/`TokenizerDeletionResult`, the typed 409
+details; the low-level `DatasetEngine.delete`/`TokenizerEngine.delete`
+rewritten to the measure-then-`atomic_delete_dir` pattern;
+`dataset_deletion_blockers`/`tokenizer_deletion_blockers` (the guard
+analysis from the ONE M64 overview); the guarded facade deletes; both
+DELETE routes rewritten M61-style; README/landing; 4 new tests + 3
+honest updates to existing tests; `smoke_m65_live.py` (18/18).
 
-Six files changed + one new test file (+~700 lines incl. tests):
+**This spec-compliance delta:** `app/tokenizer.py` — the new
+`verify()` (manifest resolution + tokenizer.json sha256 vs the
+persisted `tokenizer_hash` → ok/failed report, read-only);
+`app/schemas.py` — `DatasetRetentionOverview` /
+`TokenizerRetentionOverview` (identity + ordered artifact files +
+total bytes + integrity_verified + deletable + ordered blockers);
+`app/engine.py` — `_scope_data_artifact` (the M61
+registry-invisible-404 scope convention), `_artifact_files` (the
+M63-boundary ordered walk), `dataset_retention_overview` /
+`tokenizer_retention_overview`, and BOTH deletes reordered to the
+M61-precise sequence (scope → integrity → blockers → atomic removal);
+`app/api.py` — the two new GET retention routes, `RuntimeError → 409`
+on both DELETEs, malformed-manifest → 404 hardening on the usage
+routes, landing updates; `README.md`; 2 new tests (retention views +
+integrity-first, engine and HTTP); OpenAPI bumps 89 → 91 (50
+assertions); evidence: `smoke_m65_retention_live.py` +
+`m65_retention_pre.sha256`.
 
-- **`app/schemas.py`** — `ArtifactDeletionBlocker` (reason = an M64
-  category, detail = the sorted reference ids), `DatasetDeletionResult`
-  / `TokenizerDeletionResult` (id + files_removed + bytes_reclaimed),
-  and the typed 409 details `DatasetDeletionBlocked` /
-  `TokenizerDeletionBlocked` (message + id + protected + blockers).
-- **`app/dataset.py` / `app/tokenizer.py`** — the low-level `delete()`
-  primitives rewritten to the `remove_checkpoint` pattern: validate
-  existence, measure (files, bytes), ONE `atomic_delete_dir`, return
-  the measurement. The CALLER owns the safety decision.
-- **`app/engine.py`** — `dataset_deletion_blockers()` /
-  `tokenizer_deletion_blockers()`: the guard analysis computed LIVE
-  from the ONE M64 overview (never a second scanner) — every non-empty
-  category becomes one blocker in the SAME canonical order with the
-  SAME ids; and the guarded facade `delete_dataset()` /
-  `delete_tokenizer()`: scope (registry 404) → blockers (ValueError
-  with the ordered summary) → atomic removal → the deterministic
-  result.
-- **`app/api.py`** — both DELETE routes rewritten to the M61 shape:
-  result response models, 404 mapping, structured 409 with re-derived
-  blockers, and declared `responses={409: ...}` so the blocker schemas
-  are exposed in OpenAPI; landing-page feature bullet + two route-list
-  lines.
-- **`README.md`** — Milestone 65 section; counts 626 → 630, 22 → 23
-  suites.
-- **`tests/test_data_retention.py`** (new) + three honest updates to
-  existing tests (below).
-- Evidence: **`smoke_m65_live.py`**, **`m65_pre.sha256`**.
+## 3. Dataset Retention
 
-## §3 — Guard & blocker order
+**Blocker model:** `ArtifactDeletionBlocker{reason, detail}` — reason
+is an M64 dataset category (training_run, workflow, evaluation,
+comparison, suite_run, tokenizer_training, tokenized_version), detail
+is the sorted reference ids — IDENTICAL to what
+`GET /datasets/{id}/usage` reports. **Verification:** the existing M2
+`DatasetEngine.verify` (manifest validity, record count, per-record
+hash, split recomputation, tokenized size/hash/counts) runs BEFORE the
+reference analysis; `status != ok` → RuntimeError → 409, nothing
+deleted. An unparseable `dataset.json` is registry-invisible → 404
+(the M61 unreadable-manifest convention; the registries skip it).
+**Deletion semantics:** scope → integrity → blockers (ValueError →
+409 with the re-derived ordered list) → ONE `atomic_delete_dir` of the
+dataset's OWN directory (meta + versions + records + tokenized
+artifacts) → the deterministic `{dataset_id, files_removed,
+bytes_reclaimed}`. **Retention view:** `GET /datasets/{id}/retention`
+— identity, the ordered artifact file list (sorted relative paths,
+tokenized artifacts included) + total bytes, the integrity outcome,
+`deletable` (integrity AND zero blockers) and the ordered blockers. A
+corrupt dataset is never deletable; refusals write nothing (proven
+byte-level).
 
-Dataset blockers (canonical M64 order): training_run → workflow →
-evaluation → comparison → suite_run → tokenizer_training →
-tokenized_version. Tokenizer blockers: training_run → workflow →
-evaluation → comparison → suite_run → sample → sample_quality →
-tokenized_dataset. Guard sequence per deletion: (1) scope through the
-family registry (unknown → 404, nothing deleted); (2) the LIVE
-reference-safety analysis — the ONE M64 overview; ANY visible
-reference → 409 with the ordered list (the API re-derives it for the
-structured detail, the M61 pattern); (3) ONE atomic removal of the
-artifact's OWN directory only. The old single-category dataset
-refusal (`tokenizer_training`) is preserved as one blocker category —
-same refusal, now structured and ordered. No cascade, no force, no
-bulk, no policies, no keep-N, no age rules, no background cleanup.
+## 4. Tokenizer Retention
 
-**Honest consequence (documented in README + tests):** a tokenized
-dataset/tokenizer pair is MUTUALLY protected — the tokenizer's derived
-artifacts live under the dataset (`tokenized_dataset` blocks the
-tokenizer; `tokenizer_training` + `tokenized_version` block the
-dataset). Removing derived tokenized artifacts would require a future
-EXPLICIT operation; M65 never cascades. The pre-M65 "delete the
-tokenizer first" cleanup order is therefore no longer possible once a
-dataset has been tokenized — the pre-existing pipeline test was
-updated to assert the new mutual protection (both 409s with their
-exact blocker categories).
+**Blocker model:** the same `ArtifactDeletionBlocker` with the M64
+tokenizer categories (training_run, workflow, evaluation, comparison,
+suite_run, sample, sample_quality, tokenized_dataset). **Verification
+(new, the gap the spec exposed):** `TokenizerEngine.verify` — the
+manifest must resolve AND the tokenizer.json content hash must equal
+the persisted `tokenizer_hash`; mismatch → `status: failed` → the
+guard refuses with 409. An unparseable manifest is registry-invisible
+→ 404. **Deletion semantics:** the identical M61-precise sequence
+(the tokenizer family's pre-M65 deletion was an UNGUARDED rmtree —
+now scope → integrity → blockers → atomic removal). **Retention
+view:** `GET /tokenizers/{id}/retention` — identity (incl.
+`trained_on_dataset_id` provenance), the ordered artifact files
+(manifest.json + tokenizer.json) + bytes, integrity, `deletable`,
+ordered blockers. The pre-M65 mutual-protection consequence is
+preserved and documented: a tokenized pair blocks in both directions
+(`tokenized_dataset` ↔ `tokenizer_training` + `tokenized_version`);
+no cascade, no force.
 
-## §4 — Consistency
+## 5. Canonical Dependency Invariant
 
-The headline invariant is structural: the guard calls the ONE M64
-analysis and converts its non-empty categories to blockers verbatim —
-**nothing protected that is not shown, nothing shown that is not
-protected**, in the same canonical order with the same reference ids.
-Tested in both directions at engine level (blockers == the overview's
-non-empty categories, full-coverage fixtures where EVERY category is
-non-empty) and over HTTP (the 409 `detail.blockers` == the usage
-route's categories rebuilt as blockers). Cross-milestone: M61
-checkpoint deletion, M62 retention, M63 project storage and M64 usage
-are untouched (their suites run green verbatim; the production smoke
-re-verified M62 13/10/3 and the M64 totals 16/15). The M64 test's
-guard-interop assertion still passes unchanged (the refusal still
-names the tokenizer_training tokenizers and writes nothing).
+**One analysis, structurally:** `dataset_deletion_blockers` and
+`tokenizer_deletion_blockers` literally call the ONE M64 usage
+overview and convert every non-empty category to a blocker verbatim —
+there is no second scanner anywhere in the codebase; the retention
+views and the DELETE guards consume the same objects. **Bidirectional
+invariant, tested per category:** `usage count > 0 ⟺ category in
+blockers ⟺ deletable == False` — asserted as an explicit per-category
+loop over the full-coverage fixtures (every category non-empty), as
+list-equality between usage/retention/guard at engine level, and as
+HTTP parity (the 409 `detail.blockers` == the usage route's non-empty
+categories rebuilt as blockers == the retention view's blockers).
+Conversely `usage count == 0 ⟹ category absent from blockers`.
+Integrity never bypasses the invariant: a corrupt artifact is
+not-deletable regardless of references (the M61 ordering — proven by
+a corrupt+referenced dataset refusing with the INTEGRITY error, not
+the blocker error). Cross-milestone: M62 (13/10/3) and M63/M64 views
+re-verified green in the suites and the live smokes.
 
-## §5 — Tests
+## 6. Verification
 
-**Targeted (4 new, `tests/test_data_retention.py`):**
-`test_m65_dataset_guard_is_m64` / `test_m65_tokenizer_guard_is_m64`
-(both-directions parity on full-coverage fixtures — all 7 / all 8
-categories non-empty; refusals write nothing — byte-level sha
-inventories; no `.tmp-delete-*` residue; unknown → the family 404);
-`test_m65_unreferenced_deletion_and_live_recompute` (exact
-files/bytes results verified against independent walks; ONLY the
-artifact's own files disappear from the inventory; registries shrink;
-repeated deletion → 404; live recompute — deleting the unreferenced
-tokenizer shrinks the dataset's tokenizer_training but the dataset
-stays protected by its other references; the full unblock chain:
-fresh dataset blocked ONLY by tokenizer_training → delete the
-tokenizer → the dataset becomes deletable);
-`test_m65_api_retention` (HTTP: 409 details with the exact overview
-blockers both directions; refusals write nothing; unknown → 404;
-unreferenced artifacts delete with exact stats; the guarded artifacts
-survive; OpenAPI: 89 paths UNCHANGED, DELETE rides the existing detail
-routes, all five M65 schemas exposed).
+**Focused M65 tests (6 total in `tests/test_data_retention.py`):**
+the two guard-parity tests (both directions, full coverage, refusals
+write nothing, unknown → 404); unreferenced-deletion + live-recompute
+(exact stats vs independent walks, only-own-files-disappear
+inventories, the unblock chain); the new retention-views test
+(unreferenced: deletable + exact file lists/bytes; referenced: triple
+parity + per-category invariant; corrupt dataset/tokenizer: never
+deletable, deletion refused RuntimeError, restore flips integrity
+back; malformed manifests: registry-invisible 404 for view AND
+delete, then restored); the new HTTP test (shapes, corrupt → 409 over
+HTTP, malformed → 404, determinism, zero-mutation inventory, OpenAPI
+91). Plus 3 honestly-updated existing tests (typed deletion results,
+the guard message, the mutual-protection cleanup tail). **Full suite:
+630 → 632, ×2 consecutive runs on the final state** (exit 0 both).
+**Statics:** pyflakes + compileall clean. **OpenAPI:** **89 → 91**
+(exactly the two retention GETs; DELETEs unchanged on their existing
+paths; 50 count assertions bumped; standalone-verified). **Live
+smokes (each exactly once, zero corrections):** the initial
+`smoke_m65_live.py` — **18/18** (production read-only; guards + safe
+dataset deletion verified on a discarded copy); this delta's
+`smoke_m65_retention_live.py` — **21/21** (production read-only:
+retention views with independent artifact walks, triple parity with
+usage + the protected 409s, determinism, zero mutation; on the copy:
+the views equal production, a fresh tokenizer's retention view
+proves it deletable, the ONE safe deletion with exact stats
+2 files / 4,682 B, live recompute, copy discarded).
 
-**Updated existing tests (3, honest semantic changes):**
-`test_data_api.py` — the two deletion response-shape assertions
-(`{"deleted": id}` → the typed files/bytes results) and the pipeline
-test's cleanup tail (now asserts the mutual protection 409s with
-their exact blocker categories); `test_data_engine.py` — the guard
-message match ("training source" → "tokenizer_training").
+## 7. Storage Proof
 
-**Full suite: 626 → 630, ×2 consecutive runs on the final state**
-(exit 0 both). **Statics:** pyflakes clean, compileall clean.
-**OpenAPI:** **89 paths, UNCHANGED** (no new routes — both DELETEs
-ride the existing detail paths; the result + typed-409 + blocker
-schemas are newly exposed; standalone-verified).
+**Production before: 52 files / 8,926,407 B. After: 52 files /
+8,926,407 B — byte-identical** (sha256-verified 52/52 against
+`m65_retention_pre.sha256`; also verified after the initial M65 smoke
+against its own inventory), 0 tmp, 0 residue, 0 servers. Protected
+DELETE calls produced zero filesystem mutation (verified in tests
+byte-level and in both smokes). **The one safe deletion certified**
+(§11) executed exactly once, on the discarded COPY: the fresh
+tokenizer `manifest.json + tokenizer.json` — 2 files / 4,682 B,
+removed atomically (no `.tmp-delete-*` residue), with the
+before-measurement equal to the reported result; the previous
+certification's safe deletion (a 4-file/1,936 B dataset, also on a
+copy) was likewise one-shot. Production contains no safe
+dataset/tokenizer (both referenced — 16 and 15 references), so per
+§12 no production deletion was manufactured; the safe paths are
+certified by the deterministic fixtures + the copy protocol. M65 adds
+zero persistent retention records — both analyses are live-computed.
 
-## §6 — Live smoke
+## 8. Git
 
-Executed **exactly once** (uvicorn, port 8787): **18/18 PASSED on the
-first execution — zero corrections.** Protocol per the spec: the
-production artifacts are both referenced, so **no deletion was
-attempted over HTTP** (the server log shows GETs only). Production
-(read-only): project/registries; disk == `m65_pre.sha256` 52/52; the
-M64 usage views coherent (16 / 15 references); M62 retention 13/10/3.
-Throwaway COPY (engine-level, discarded afterwards): the copy's usage
-views equal the production HTTP answers; both guards refuse with
-EXACTLY the M64 blocker lists (6 and 5 non-empty categories); the
-refusals are read-only (copy inventory stable at 52 files); unknown
-ids → FileNotFoundError; live recompute on the copy (train a new
-tokenizer → tokenizer_training 1→2; delete it → back to 1, with the
-exact 2-file result); an unreferenced dataset deletes with exact
-stats (4 files / 1,936 B, no residue); the protected artifacts survive
-everything; the copy is discarded. Production byte-identical
-before/after.
+- `8c3d555` — M65: explicit verified dataset & tokenizer retention
+  (initial delivery, 11 files) · `ff741ce` — M65 pre-smoke inventory
+  (both pushed previously).
+- This delta: `M65: integrity-first guards + retention views (spec
+  compliance)` — engine/schemas/api/tokenizer, README, tests, the
+  smoke, this report; then `M65: retention-smoke production inventory
+  (m65_retention_pre.sha256)` — the rebuilt root's pre-smoke
+  inventory.
+- Both pushed to `origin/arena/01a071e9-code-forge`; remote branch
+  tip == HEAD; worktree clean (only the untracked `egg-info`).
 
-## §7 — Storage
+## 9. Final Status & Next Milestone
 
-**Before: 52 files / 8,926,421 B. After: 52 files / 8,926,421 B —
-byte-identical (sha256-verified 52/52; identical to the M64 state), 0
-tmp, 0 copy residue, 0 servers left running.** M65 added zero
-persistent storage; production was never mutated.
+**M65 is complete** against the full quality bar: both deletions
+protected by the canonical M64 analysis (no second scanner — the
+guards call the overview directly), deterministic ordered blockers,
+integrity verified before mutation, atomic deletion, bidirectional
+usage/blocker agreement, zero mutation on refusals, safe deletion
+removing only the intended directory, unrelated artifacts
+byte-identical, 632 ×2 green, statics clean, OpenAPI 91 correct, both
+live certifications first-execution clean, storage minimal (zero
+persistent records), git pushed. **Limitations (documented, not
+gaps):** a tokenized dataset/tokenizer pair is mutually protected —
+removing derived tokenized artifacts requires a future EXPLICIT
+operation (never a cascade); a corrupt unreferenced artifact cannot
+be deleted through the API until manually repaired (the deliberate
+M61 semantics); the tokenizer content-hash verifier is new (there was
+none) and minimal by design.
 
-## §8 — Git
-
-- `M65: explicit verified dataset & tokenizer retention` —
-  implementation, tests (new + updated), README/landing docs, the
-  smoke, this report.
-- `M65: pre-smoke production inventory (m65_pre.sha256)` — the
-  production root's pre-smoke inventory (52 files; byte-identical to
-  the M64 inventory, evidencing the unchanged state).
-- Both pushed to `origin/arena/01a071e9-code-forge`; remote branch tip
-  == HEAD; worktree clean (only the untracked `egg-info`).
-
-## §9 — Next milestone
-
-The retention matrix is now complete for checkpoints (M61/M62),
-datasets and tokenizers (M64/M65) — but the MODEL itself is the
-remaining unguarded deletion: `DELETE /models/{id}` is still a plain
-`rmtree` of the model directory (M1-era `Storage.remove`). Most of a
-model's evidence lives INSIDE its directory and dies coherently with
-it — but three ROOT-LEVEL families persist model references outside
-it: M10 suite-run records (`suite-runs/<id>` carrying `model_id`),
-M15 samples (`samples/<model_id>/…`) and M16 sample-quality
-measurements (`sample-evaluations/<model_id>/…`). Deleting a model
-today silently orphans those records — exactly the pre-M61 situation,
-now the LAST family with the gap. The architecturally-consistent next
-milestone is **M66 — read-only model usage overview** (the M64
-pattern): one live-computed view per model listing every external
-reference (suite runs, samples, sample-quality measurements — via the
-ONE existing listings, never a second scanner) plus the model's
-internal-family ownership summary (what lives inside its directory
-and therefore goes with it). Pure visibility; the guard (M67) follows
-once the reference surface is shown.
+**Next milestone — M66, read-only model usage overview.** The model
+itself is the last unguarded deletion: `DELETE /models/{id}` is still
+a plain M1-era rmtree. Three ROOT-LEVEL families persist model
+references outside the model directory — M10 suite-run records,
+M15 samples, M16 sample-quality measurements — so deleting a model
+today silently orphans them. M66 applies the proven M64 pattern:
+one live-computed view per model listing every external reference
+(through the ONE existing listings) plus the internal ownership
+summary (the M62/M63 numbers), before any future guard. The
+ready-to-paste prompt follows.
 
 ---
 
@@ -248,7 +274,7 @@ implementations for:
 * the OpenAPI count conventions and the README/landing conventions.
 
 Run the current full test suite before implementation and record the
-baseline (expect 630 passed, OpenAPI 89 paths).
+baseline (expect 632 passed, OpenAPI 91 paths).
 
 ### 2. M66 OBJECTIVE
 
@@ -303,7 +329,7 @@ Focused tests following existing style, at minimum:
 * zero writes (byte-level inventory comparison);
 * unknown model -> 404; a fresh model -> zeroed external categories;
 * a new external reference (suite run) -> the overview recomputes;
-* OpenAPI: exactly one new path (89 -> 90, reason reported); README
+* OpenAPI: exactly one new path (91 -> 92, reason reported); README
   + landing updates; full regression suite green.
 
 ### 5. LIVE CERTIFICATION
