@@ -788,6 +788,79 @@ class CheckpointRetentionOverview(BaseModel):
     checkpoints: list[CheckpointRetentionEntry] = Field(default_factory=list)
 
 
+class ProjectStorageCategory(BaseModel):
+    """ONE physical storage category of the project (M63).
+
+    ``name`` is a stable category from the canonical order (models /
+    checkpoints / model_records / datasets / tokenizers / suite_runs /
+    samples / sample_evaluations / policies / probe_suites /
+    workflow_recipes / project / unclassified); ``files``/``bytes`` are
+    PHYSICAL file counts and byte sizes — every project file belongs to
+    EXACTLY ONE category (no double counting) so the categories sum to
+    the project totals. Computed live from one filesystem walk — never
+    stored, never a second accounting registry."""
+
+    name: str
+    files: int
+    bytes: int
+
+
+class ProjectModelStorageSummary(BaseModel):
+    """ONE model's row in the M63 project storage overview.
+
+    Compact aggregates only (M62 remains the detailed checkpoint-level
+    view): the model's own current-state artifacts (``model_bytes``:
+    manifest + weights.pt + weights.sha256), its evidence-record
+    storage (``records_bytes``: evaluations / comparisons / gates /
+    workflows manifests), and its checkpoint retention aggregates —
+    the SAME numbers that model's M62 overview reports (one retention
+    analysis, never a second). ``total_model_bytes`` is the sum of the
+    three. Computed live; a model whose manifest cannot be parsed is
+    skipped (the registry convention) — its files still count in the
+    project/category totals, never silently discarded."""
+
+    model_id: str
+    name: str
+    created_at: datetime
+    model_bytes: int                      # manifest + weights + hash sidecar
+    records_bytes: int                    # model-scoped evidence manifests
+    checkpoint_count: int                 # the M62 overview's totals (verbatim)
+    deletable_checkpoints: int
+    protected_checkpoints: int
+    total_checkpoint_bytes: int
+    reclaimable_checkpoint_bytes: int
+    protected_checkpoint_bytes: int
+    total_model_bytes: int                # model + records + checkpoints
+
+
+class ProjectStorageOverview(BaseModel):
+    """Read-only live-computed PHYSICAL storage overview of the whole
+    project (M63): what the project stores, per category and per model,
+    and how much is reclaimable. ``total_files``/``total_bytes`` count
+    every physical file under the storage root (excluding the tmp/
+    scratch directory and hidden crash-residue entries) — the
+    filesystem is the oracle. The categories partition those files
+    exactly (sum == totals). ``reclaimable_checkpoint_bytes`` is the
+    sum over ALL models of the M62-deletable checkpoint artifact sets
+    ONLY (never model weights, tokenizer, dataset or record storage);
+    M61 deletion is the only operation that ever reclaims them. Zero
+    storage, zero mutation, byte-identical over unchanged state; an
+    empty project reports zeroed totals with an empty model
+    collection."""
+
+    total_files: int
+    total_bytes: int
+    model_count: int
+    checkpoint_count: int
+    deletable_checkpoints: int
+    protected_checkpoints: int
+    total_checkpoint_bytes: int
+    reclaimable_checkpoint_bytes: int
+    protected_checkpoint_bytes: int
+    categories: list[ProjectStorageCategory] = Field(default_factory=list)
+    models: list[ProjectModelStorageSummary] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Evaluation (read-only measurement of an existing model state)
 # --------------------------------------------------------------------------- #

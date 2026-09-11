@@ -40,6 +40,7 @@ from .schemas import (
     SuiteRunSummary,
     ModelRecord,
     ProjectInfo,
+    ProjectStorageOverview,
     SampleGenerateRequest,
     SampleEvaluationRecord,
     SampleRecord,
@@ -903,6 +904,26 @@ def index() -> HTMLResponse:
         every call: zero storage, zero mutation, byte-identical over
         unchanged state.</li>
 
+      <li><b>M63 read-only project storage overview</b> —
+        <code>GET /project/storage</code> lifts storage visibility one
+        level (checkpoint &rarr; model &rarr; project): total physical
+        files/bytes under the storage root, a complete category
+        partition (models / checkpoints / model_records / datasets /
+        tokenizers / suite_runs / samples / sample_evaluations /
+        policies / probe_suites / workflow_recipes / project /
+        unclassified — every physical file in EXACTLY ONE category,
+        never counted twice, nothing silently discarded) and one
+        compact row per model (its own state + records + checkpoint
+        bytes; the retention aggregates are VERBATIM that model's M62
+        overview — one analysis, never a second). Project totals are
+        deterministic sums over the rows; the physical filesystem is
+        the independent byte oracle. <code>reclaimable</code> counts
+        ONLY currently-deletable checkpoint artifact sets across all
+        models — never weights, datasets, tokenizers or records. M63
+        REPORTS storage; M61 PERFORMS deletion — no cleanup, no
+        policies, no quotas, no garbage collection. Zero storage, zero
+        mutation, byte-identical over unchanged state.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -944,6 +965,7 @@ def index() -> HTMLResponse:
   <div class="card"><b>REST API</b> (interactive docs at <code>/docs</code>)
     <ul>
       <li><code>GET   {prefix}/project</code> — project info &amp; artifact counts</li>
+      <li><code>GET   {prefix}/project/storage</code> — read-only PHYSICAL storage overview of the whole project: totals, category partition (no double counting) and per-model rows with the M62 retention aggregates (M63)</li>
       <li><code>POST  {prefix}/models</code> — create a model (validated config)</li>
       <li><code>POST  {prefix}/datasets/upload</code> — ingest txt/md/csv/json → versioned dataset</li>
       <li><code>GET   {prefix}/datasets/&#123;id&#125;/verify</code> — integrity check (tamper detection)</li>
@@ -1035,6 +1057,30 @@ def index() -> HTMLResponse:
 @api.get("/project", response_model=ProjectInfo, tags=["meta"])
 def project_info() -> dict[str, Any]:
     return _forge().project_info()
+
+
+@api.get("/project/storage",
+         response_model=ProjectStorageOverview, tags=["meta"])
+def project_storage_overview() -> ProjectStorageOverview:
+    """Read-only PHYSICAL storage overview of the whole project (M63):
+    total files/bytes, a complete category partition (models /
+    checkpoints / model_records / datasets / tokenizers / suite_runs /
+    samples / sample_evaluations / policies / probe_suites /
+    workflow_recipes / project / unclassified — every physical file in
+    EXACTLY ONE category, so the categories sum to the totals; nothing
+    is silently discarded) and one compact row per model (its own
+    state + records + checkpoint bytes, with the retention aggregates
+    VERBATIM from that model's M62 overview — one retention analysis,
+    never a second). ``reclaimable_checkpoint_bytes`` sums ONLY the
+    currently-deletable checkpoint artifact sets across all models —
+    never model weights, tokenizer, dataset or record storage. M63
+    REPORTS storage; M61 PERFORMS deletion — this view deletes
+    nothing, retains nothing automatically, runs no cleanup and
+    persists no policy or quota. Computed live from one filesystem
+    walk: zero storage, zero mutation, byte-identical over unchanged
+    state; an empty project reports zeroed totals with an empty model
+    collection."""
+    return _forge().project_storage_overview()
 
 
 @api.get("/system", response_model=dict, tags=["meta"])

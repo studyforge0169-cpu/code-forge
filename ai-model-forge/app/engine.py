@@ -12,17 +12,17 @@ from typing import Any, Optional
 
 
 from . import config as forge_cfg
-from .comparison import ComparisonEngine
+from .comparison import COMPARISONS_DIR, ComparisonEngine
 from .dashboards import DashboardEngine
 from .dataset import DatasetEngine
-from .evaluation import EvaluationEngine
-from .gates import GateEngine
+from .evaluation import EVALUATIONS_DIR, EvaluationEngine
+from .gates import GATES_DIR, GateEngine
 from .hardware import HardwareSpec, detect_hardware
 from .model_builder import build_transformer, content_hash
-from .policies import PolicyEngine
-from .recipes import RecipeEngine
-from .sampling import SamplingEngine
-from .sample_quality import SampleQualityEngine
+from .policies import POLICIES_DIR, SUITES_DIR, PolicyEngine
+from .recipes import RECIPES_DIR, RecipeEngine
+from .sampling import SAMPLES_DIR, SamplingEngine
+from .sample_quality import SAMPLE_EVALUATIONS_DIR, SampleQualityEngine
 from .schemas import (
     CheckpointDeletionBlocker,
     CheckpointDeletionResult,
@@ -41,6 +41,9 @@ from .schemas import (
     PolicyDefinition,
     ProbeSuite,
     ProbeSuiteCreateRequest,
+    ProjectModelStorageSummary,
+    ProjectStorageCategory,
+    ProjectStorageOverview,
     SuiteRunRecord,
     SuiteRunRequest,
     SuiteRunSummary,
@@ -58,10 +61,10 @@ from .schemas import (
     utcnow,
 )
 from .storage import Storage
-from .suite_runs import SuiteRunEngine
+from .suite_runs import SUITE_RUNS_DIR, SuiteRunEngine
 from .tokenizer import TokenizerEngine
-from .training import TrainingEngine
-from .workflows import WorkflowEngine
+from .training import CHECKPOINTS_DIR, TrainingEngine
+from .workflows import WORKFLOWS_DIR, WorkflowEngine
 
 log = forge_cfg.get_logger("forge")
 
@@ -590,6 +593,162 @@ class ModelForge:
             reclaimable_checkpoint_bytes=sum(e.size_bytes
                                              for e in deletable),
             checkpoints=entries)
+
+    # Canonical PROJECT STORAGE category order (M63, fixed and
+    # deterministic). Every physical project file belongs to EXACTLY
+    # ONE category — the family directory constants are imported from
+    # the ONE place each family defines its layout (never a second
+    # taxonomy), and "unclassified" is the explicit catch-all so no
+    # file is ever silently discarded.
+    PROJECT_STORAGE_CATEGORIES = (
+        "models",              # models/<id>/{manifest,weights.pt,weights.sha256}
+        "checkpoints",         # models/<id>/checkpoints/**
+        "model_records",       # models/<id>/{evaluations,comparisons,gates,workflows}/**
+        "datasets",            # datasets/**
+        "tokenizers",          # tokenizers/**
+        "suite_runs",          # suite-runs/**
+        "samples",             # samples/**
+        "sample_evaluations",  # sample-evaluations/**
+        "policies",            # policies/**
+        "probe_suites",        # probe-suites/**
+        "workflow_recipes",    # workflow-recipes/**
+        "project",             # project.json
+        "unclassified",        # explicit catch-all (never silent)
+    )
+
+    def project_storage_overview(self) -> ProjectStorageOverview:
+        """Read-only live-computed PHYSICAL storage overview of the
+        whole project (M63): totals, category partition and per-model
+        rows, plus the project-level retention aggregates.
+
+        Accounting rules (the M63 invariants):
+
+        * ONE physical walk classifies every file under the storage
+          root into EXACTLY ONE category (the family directory
+          constants above; tmp/ scratch and hidden crash-residue
+          entries are outside the boundary), so the categories sum to
+          ``total_files``/``total_bytes`` — no file is ever counted
+          twice and nothing is silently discarded (unknown layouts
+          land in the explicit ``unclassified`` category).
+        * checkpoint retention numbers are NEVER recomputed here: each
+          model row carries its M62 ``checkpoint_retention_overview``
+          aggregates VERBATIM (the ONE M61 blocker analysis and the
+          ONE artifact-set measurement), and the project aggregates
+          are deterministic sums over the rows. ``reclaimable`` counts
+          ONLY currently-deletable checkpoint artifact sets — never
+          model weights, tokenizer, dataset or record storage; M61
+          deletion is the only operation that ever reclaims them.
+        * model rows follow the registry order (``list_models``:
+          created_at) and cover record-valid models only; a model
+          whose manifest cannot be parsed is skipped (the registry
+          convention) while its files still count in the physical
+          category totals.
+        * ``checkpoints`` category bytes are PHYSICAL (including any
+          listing-invisible checkpoint directory of a valid model);
+          ``total_checkpoint_bytes`` is the registry-visible M62 sum —
+          the two agree exactly on healthy storage.
+
+        Zero storage, zero mutation, deterministic (byte-identical
+        over unchanged state); an empty project reports zeroed totals
+        with an empty model collection and only the ``project``
+        category non-empty."""
+        root = self.storage.root
+        evidence = (EVALUATIONS_DIR, COMPARISONS_DIR, GATES_DIR,
+                    WORKFLOWS_DIR)
+        root_families = {
+            self.storage.datasets_dir.name: "datasets",
+            self.storage.tokenizers_dir.name: "tokenizers",
+            SUITE_RUNS_DIR: "suite_runs",
+            SAMPLES_DIR: "samples",
+            SAMPLE_EVALUATIONS_DIR: "sample_evaluations",
+            POLICIES_DIR: "policies",
+            SUITES_DIR: "probe_suites",
+            RECIPES_DIR: "workflow_recipes",
+        }
+
+        # ---- ONE physical walk: relative posix path -> byte size ----
+        sizes: dict[str, int] = {}
+        if root.exists():
+            for p in sorted(root.rglob("*")):
+                rel = p.relative_to(root)
+                if rel.parts[0] == "tmp":
+                    continue          # atomic-write scratch (startup-cleaned)
+                if any(part.startswith(".") for part in rel.parts):
+                    continue          # hidden crash residue (atomic renames)
+                if p.is_file():
+                    sizes[rel.as_posix()] = p.stat().st_size
+
+        def category_of(rel: str) -> str:
+            parts = rel.split("/")
+            if parts[0] == "models":
+                if len(parts) == 3:
+                    return "models"   # directly in the model dir
+                if len(parts) >= 4:
+                    if parts[2] == CHECKPOINTS_DIR:
+                        return "checkpoints"
+                    if parts[2] in evidence:
+                        return "model_records"
+                return "unclassified"
+            if rel == "project.json":
+                return "project"
+            return root_families.get(parts[0], "unclassified")
+
+        cat_files = {name: 0 for name in self.PROJECT_STORAGE_CATEGORIES}
+        cat_bytes = {name: 0 for name in self.PROJECT_STORAGE_CATEGORIES}
+        for rel, size in sizes.items():
+            cat = category_of(rel)
+            cat_files[cat] += 1
+            cat_bytes[cat] += size
+
+        # ---- per-model rows: registry order, M62 numbers VERBATIM ----
+        rows: list[ProjectModelStorageSummary] = []
+        for record in self.list_models():
+            mid = record.id
+            model_bytes = 0
+            records_bytes = 0
+            for rel, size in sizes.items():
+                parts = rel.split("/")
+                if parts[:2] != ["models", mid]:
+                    continue
+                if len(parts) == 3:
+                    model_bytes += size
+                elif len(parts) >= 4 and parts[2] in evidence:
+                    records_bytes += size
+            ov = self.checkpoint_retention_overview(mid)
+            rows.append(ProjectModelStorageSummary(
+                model_id=mid,
+                name=record.name,
+                created_at=record.created_at,
+                model_bytes=model_bytes,
+                records_bytes=records_bytes,
+                checkpoint_count=ov.total_checkpoints,
+                deletable_checkpoints=ov.deletable_checkpoints,
+                protected_checkpoints=ov.protected_checkpoints,
+                total_checkpoint_bytes=ov.total_checkpoint_bytes,
+                reclaimable_checkpoint_bytes=ov.reclaimable_checkpoint_bytes,
+                protected_checkpoint_bytes=sum(
+                    e.size_bytes for e in ov.checkpoints if not e.deletable),
+                total_model_bytes=(model_bytes + records_bytes
+                                   + ov.total_checkpoint_bytes)))
+
+        return ProjectStorageOverview(
+            total_files=len(sizes),
+            total_bytes=sum(sizes.values()),
+            model_count=len(rows),
+            checkpoint_count=sum(r.checkpoint_count for r in rows),
+            deletable_checkpoints=sum(r.deletable_checkpoints for r in rows),
+            protected_checkpoints=sum(r.protected_checkpoints for r in rows),
+            total_checkpoint_bytes=sum(r.total_checkpoint_bytes
+                                       for r in rows),
+            reclaimable_checkpoint_bytes=sum(r.reclaimable_checkpoint_bytes
+                                             for r in rows),
+            protected_checkpoint_bytes=sum(r.protected_checkpoint_bytes
+                                           for r in rows),
+            categories=[ProjectStorageCategory(name=name,
+                                               files=cat_files[name],
+                                               bytes=cat_bytes[name])
+                        for name in self.PROJECT_STORAGE_CATEGORIES],
+            models=rows)
 
     # ------------------------------------------------------------------ #
     # Evaluation (thin delegation to the evaluation engine; read-only)

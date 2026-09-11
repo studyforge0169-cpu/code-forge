@@ -2094,6 +2094,50 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 63 — read-only PROJECT STORAGE OVERVIEW
+  (`GET /project/storage`)
+- **concept**: storage visibility one level up — checkpoint (M62) ->
+  model -> PROJECT. One read-only, project-scoped, live-computed
+  overview answers "what does the whole project store, where, and how
+  much of it is reclaimable" without walking every model
+- **physical accounting (no double counting)**: ONE filesystem walk
+  classifies every file under the storage root (tmp/ scratch and
+  hidden crash-residue entries are outside the boundary) into
+  EXACTLY ONE category — `models` (manifest/weights.pt/weights.sha256),
+  `checkpoints`, `model_records` (evaluations/comparisons/gates/
+  workflows), `datasets`, `tokenizers`, `suite_runs`, `samples`,
+  `sample_evaluations`, `policies`, `probe_suites`,
+  `workflow_recipes`, `project`, and an EXPLICIT `unclassified`
+  catch-all (nothing is silently discarded) — so the categories sum
+  exactly to `total_files`/`total_bytes`; the family names come from
+  the ONE place each family defines its layout (never a second
+  taxonomy), and the physical filesystem is the independent byte
+  oracle
+- **per-model rows** (registry order): the model's own state bytes,
+  its evidence-record bytes and its checkpoint retention aggregates —
+  VERBATIM that model's M62 overview (the ONE M61 blocker analysis
+  and the ONE artifact-set measurement, never a second retention
+  accounting); project aggregates are deterministic sums over the
+  rows. A model with an unparseable manifest is skipped (the registry
+  convention) while its files stay counted in the category totals
+- **reclaimable vs total**: `reclaimable_checkpoint_bytes` sums ONLY
+  the currently-deletable checkpoint artifact sets across all models
+  — never model weights, tokenizer, dataset or record storage; M61
+  deletion is the only operation that ever reclaims them. M63
+  REPORTS storage; M61 PERFORMS deletion
+- **honest corruption accounting**: an integrity-failed checkpoint is
+  never reclaimable (the M62/M61 semantics); a listing-invisible
+  checkpoint directory stays in the physical `checkpoints` category
+  while the registry-visible totals exclude it — the divergence is
+  visible, never hidden
+- **semantics**: read-only, zero storage, zero mutation,
+  deterministic (byte-identical over unchanged state); an empty
+  project reports zeroed totals with an empty model collection. No
+  cleanup, no policies, no quotas, no garbage collection, no
+  cross-model operations — observability only
+- OpenAPI: path count 86 -> 87 (exactly this one new read-only
+  route)
+
 ### Milestone 62 — read-only RETENTION OVERVIEW
   (`GET /models/{model_id}/checkpoints/retention`)
 - **concept**: visibility before deletion. M61 made checkpoint retention
@@ -2502,7 +2546,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 617 tests
+pytest                       # 623 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3011,7 +3055,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 617 tests across 20 suites
+  tests/               # 623 tests across 21 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

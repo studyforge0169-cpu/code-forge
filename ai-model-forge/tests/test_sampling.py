@@ -787,7 +787,7 @@ def test_m27_api_404s_isolation_regressions_openapi(api_client):
     spec = api_client.get("/openapi.json").json()
     path = "/api/v1/models/{model_id}/samples/by-checkpoint/{checkpoint_id}"
     generic = "/api/v1/models/{model_id}/samples/{sample_id}"
-    assert len(spec["paths"]) == 86
+    assert len(spec["paths"]) == 87
     assert list(spec["paths"]).count(path) == 1
     ops = spec["paths"][path]
     assert set(ops) == {"get"} and ops["get"]["tags"] == ["sampling"]
@@ -1077,7 +1077,7 @@ def test_m32_api_404s_isolation_regressions_openapi(api_client):
     # + 1 (M49 comparisons by-seed)
     # + 1 (M50 suite-runs by-reused)
     # = 82
-    assert len(spec["paths"]) == 86
+    assert len(spec["paths"]) == 87
     path = ("/api/v1/models/{model_id}/samples/by-tokenizer"
             "/{tokenizer_id}")
     keys = list(spec["paths"])
@@ -1366,7 +1366,7 @@ def test_m40_api_by_strategy_404_422s_isolation_regressions_openapi(
     # + 1 (M48 evaluations by-seed)
     # + 1 (M49 comparisons by-seed)
     # + 1 (M50 suite-runs by-reused) = 82
-    assert len(spec["paths"]) == 86
+    assert len(spec["paths"]) == 87
     path = "/api/v1/models/{model_id}/samples/by-strategy/{strategy}"
     keys = list(spec["paths"])
     assert keys.count(path) == 1
