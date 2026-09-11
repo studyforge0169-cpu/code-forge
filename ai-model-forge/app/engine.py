@@ -39,6 +39,8 @@ from .schemas import (
     GateDecisionResult,
     ModelCreateRequest,
     ModelRecord,
+    ModelUsageCategory,
+    ModelUsageOverview,
     PolicyCreateRequest,
     PolicyDefinition,
     ProbeSuite,
@@ -1053,6 +1055,112 @@ class ModelForge:
             integrity_verified=integrity_verified,
             deletable=integrity_verified and not blockers,
             blockers=blockers)
+
+    # Canonical M66 model usage category order (fixed and
+    # deterministic). The first six are INTERNAL model-scoped families
+    # (persisted inside models/<id>/ — ownership); the last four are
+    # EXTERNAL root-level families persisting the model id OUTSIDE the
+    # model directory — exactly the surface a future model-retention
+    # guard must refuse on.
+    MODEL_USAGE_CATEGORIES = (
+        "training_run",      # the model manifest's own RunProvenance
+        "checkpoint",        # models/<id>/checkpoints/
+        "workflow",          # models/<id>/workflows/
+        "evaluation",        # models/<id>/evaluations/
+        "comparison",        # models/<id>/comparisons/
+        "gate",              # models/<id>/gates/
+        "suite_run",         # suite-runs/<id> (root-level)
+        "sample",            # samples/<model_id>/ (root-level)
+        "sample_quality",    # sample-evaluations/<model_id>/ (root-level)
+        "workflow_recipe",   # workflow-recipes/<id> stage configs (root)
+    )
+    MODEL_USAGE_INTERNAL_CATEGORIES = frozenset(MODEL_USAGE_CATEGORIES[:6])
+
+    @staticmethod
+    def _recipe_model_ids(recipe) -> set[str]:
+        """Model ids DIRECTLY named by ONE workflow recipe's stage
+        configs (train stage configs, evaluate stage configs and gate
+        policies all persist ``model_id``; suite-run/publish/recipe
+        stages never name a model). A recipe is INERT DATA but its
+        definition is bound to the models it names — deleting such a
+        model would leave the recipe unresolvable — so it is a REAL
+        persisted external reference. Read-only scan, the M64
+        ``_workflow_data_refs`` pattern."""
+        ids: set[str] = set()
+        for stage in recipe.stages:
+            if stage.training is not None:
+                ids.add(stage.training.model_id)
+            if stage.evaluation is not None:
+                ids.add(stage.evaluation.config.model_id)
+            if stage.gate is not None:
+                ids.add(stage.gate.policy.model_id)
+        return ids
+
+    def model_usage_overview(self, model_id: str) -> ModelUsageOverview:
+        """Read-only live-computed usage overview of ONE model (M66):
+        every persisted record that references it, by category — the
+        internal model-scoped families (the model's own training
+        provenance, checkpoints, workflows, evaluations, comparisons,
+        gate decisions — all through the ONE authoritative listings)
+        plus the EXTERNAL root-level families persisting the model id
+        outside the model directory (suite runs, samples, sample-quality
+        measurements, and workflow recipes whose stage configs name the
+        model). Per-category references are the listings' record ids,
+        sorted and unique; internal/external splits expose exactly what
+        a future model-retention guard would need. Zero storage, zero
+        mutation, byte-identical over unchanged state; unknown or
+        registry-invisible (unparseable manifest) model ->
+        FileNotFoundError (404 at the API)."""
+        record = self._scope_data_artifact(self.storage.load_record,
+                                           model_id, "model")
+        categories = [
+            ("training_run",
+             sorted(p.run_id for p in record.training_provenance)),
+            ("checkpoint",
+             sorted(c.checkpoint_id
+                    for c in self.training.list_checkpoints(model_id))),
+            ("workflow",
+             sorted(w.workflow_id
+                    for w in self.list_workflows(model_id))),
+            ("evaluation",
+             sorted(e.eval_id
+                    for e in self.list_evaluations(model_id))),
+            ("comparison",
+             sorted(c.comparison_id
+                    for c in self.list_comparisons(model_id))),
+            ("gate",
+             sorted(g.decision_id
+                    for g in self.list_gate_decisions(model_id))),
+            ("suite_run",
+             sorted(r.suite_run_id
+                    for r in self.list_suite_runs(model_id))),
+            ("sample",
+             sorted(s.sample_id
+                    for s in self.list_samples(model_id))),
+            ("sample_quality",
+             sorted(sq.evaluation_id
+                    for sq in self.list_sample_evaluations(model_id))),
+            ("workflow_recipe",
+             sorted(r.recipe_id for r in self.recipes.list()
+                    if model_id in self._recipe_model_ids(r))),
+        ]
+        internal = sum(len(refs) for name, refs in categories
+                       if name in self.MODEL_USAGE_INTERNAL_CATEGORIES)
+        external = sum(len(refs) for name, refs in categories
+                       if name not in self.MODEL_USAGE_INTERNAL_CATEGORIES)
+        return ModelUsageOverview(
+            model_id=model_id,
+            name=record.name,
+            created_at=record.created_at,
+            architecture=record.architecture.value,
+            parameter_count=record.parameter_count,
+            referenced=internal + external > 0,
+            externally_referenced=external > 0,
+            total_references=internal + external,
+            internal_references=internal,
+            external_references=external,
+            categories=[ModelUsageCategory(category=c, references=r)
+                        for c, r in categories])
 
     def dataset_deletion_blockers(
             self, dataset_id: str) -> list[ArtifactDeletionBlocker]:

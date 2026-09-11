@@ -481,7 +481,7 @@ def test_m64_api_usage_overviews(api_client):
 
     # OpenAPI: exactly two new paths (87 -> 89), only GET, schemas exposed
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 91
+    assert len(spec["paths"]) == 92
     for path in ("/api/v1/datasets/{dataset_id}/usage",
                  "/api/v1/tokenizers/{tokenizer_id}/usage"):
         assert set(spec["paths"][path].keys()) == {"get"}

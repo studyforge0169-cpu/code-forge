@@ -2094,6 +2094,41 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 66 — read-only MODEL USAGE OVERVIEW
+  (`GET /models/{model_id}/usage`)
+- **concept**: visibility one family up — the model itself is the last
+  unguarded deletion (an M1-era `DELETE /models/{id}` rmtree; M67's
+  subject). M66 answers "what persisted artifacts currently reference
+  this model?" BEFORE any future model-retention decision: every
+  referencing record by category, with the internal/external split
+  that separates ownership from what a deletion would ORPHAN
+- **categories (canonical order)**: six INTERNAL model-scoped families
+  — `training_run` (the model manifest's own persisted run
+  provenance), `checkpoint`, `workflow`, `evaluation`, `comparison`,
+  `gate` (all inside `models/{id}/`, discovered through the ONE
+  authoritative listings) — plus four EXTERNAL root-level families
+  that persist the model id OUTSIDE the model directory: `suite_run`
+  (`suite-runs/<id>`), `sample` (`samples/{model_id}/`),
+  `sample_quality` (`sample-evaluations/{model_id}/`) and
+  `workflow_recipe` (recipes whose train/evaluate/gate stage configs
+  name the model — a recipe is inert data, but its definition is
+  bound to the models it names: deleting such a model would leave the
+  recipe unresolvable)
+- **aggregates**: per-category sorted unique record ids,
+  `internal_references` / `external_references` splits,
+  `total_references`, `referenced`, `externally_referenced` (exactly
+  the future-guard surface). A reference overview, NOT a storage
+  overview: references are reported once each, never byte-duplicated
+- **semantics**: read-only, zero storage, zero mutation, deterministic
+  (canonical category order, listing-order-derived sorted ids,
+  byte-identical over unchanged state, recomputed live); unknown or
+  registry-invisible (unparseable manifest) model -> the family's 404;
+  a fresh model -> all-empty categories. Computed through the ONE
+  authoritative listings and the M64-style recipe stage-config scan —
+  never a second scanner. No model deletion or guard exists or
+  changes here (M66 is strictly preparatory visibility)
+- OpenAPI: path count 91 -> 92 (exactly this one new read-only route)
+
 ### Milestone 65 — explicit VERIFIED dataset & tokenizer RETENTION
   (`DELETE /datasets/{id}`, `DELETE /tokenizers/{id}`)
 - **concept**: the M61 pattern one family over — data-artifact deletion
@@ -2637,7 +2672,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 632 tests
+pytest                       # 636 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3146,7 +3181,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 630 tests across 23 suites
+  tests/               # 636 tests across 24 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

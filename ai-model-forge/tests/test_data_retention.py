@@ -424,7 +424,7 @@ def test_m65_api_retention(api_client):
 
     # ---- OpenAPI: NO new paths; schemas exposed --------------------- #
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 91
+    assert len(spec["paths"]) == 92
     d = spec["paths"]["/api/v1/datasets/{dataset_id}"]
     assert set(d.keys()) == {"get", "delete"}
     t = spec["paths"]["/api/v1/tokenizers/{tokenizer_id}"]
@@ -677,7 +677,7 @@ def test_m65_api_retention_views(api_client):
 
     # ---- OpenAPI: exactly two new paths (89 -> 91) -------------------- #
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 91
+    assert len(spec["paths"]) == 92
     for pth in ("/api/v1/datasets/{dataset_id}/retention",
                 "/api/v1/tokenizers/{tokenizer_id}/retention"):
         assert set(spec["paths"][pth].keys()) == {"get"}

@@ -1038,6 +1038,53 @@ class TokenizerRetentionOverview(BaseModel):
     blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
 
 
+
+class ModelUsageCategory(BaseModel):
+    """ONE reference category of the M66 read-only model usage
+    overview.
+
+    ``category`` is a stable name from the canonical model usage order;
+    ``references`` lists the persisted record ids of that family that
+    reference the model (sorted, unique). Internal categories
+    (training_run / checkpoint / workflow / evaluation / comparison /
+    gate) are records persisted INSIDE the model's own directory; the
+    external categories (suite_run / sample / sample_quality /
+    workflow_recipe) are ROOT-LEVEL records persisting the model id
+    OUTSIDE it — what a future model deletion would orphan. Computed
+    live from the authoritative listings — never stored, never a
+    second registry."""
+
+    category: str
+    references: list[str] = Field(default_factory=list)
+
+
+class ModelUsageOverview(BaseModel):
+    """Read-only live-computed usage overview of ONE model (M66):
+    every persisted record that references it, by category — internal
+    model-scoped families plus the root-level families that persist
+    model references outside the model directory (suite runs, samples,
+    sample-quality measurements, and workflow recipes whose stage
+    configs name the model). ``external_references`` /
+    ``externally_referenced`` expose exactly the surface a future
+    model-retention guard must refuse on; ``internal_references`` is
+    ownership (what lives inside the model's directory and goes with
+    it). Zero storage, zero mutation, byte-identical over unchanged
+    state; unknown or registry-invisible (unparseable manifest) model
+    -> FileNotFoundError (404 at the API)."""
+
+    model_id: str
+    name: str
+    created_at: datetime
+    architecture: str
+    parameter_count: int
+    referenced: bool
+    externally_referenced: bool
+    total_references: int
+    internal_references: int
+    external_references: int
+    categories: list[ModelUsageCategory] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Evaluation (read-only measurement of an existing model state)
 # --------------------------------------------------------------------------- #

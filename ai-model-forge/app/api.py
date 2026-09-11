@@ -39,6 +39,7 @@ from .schemas import (
     SuiteRunRequest,
     SuiteRunSummary,
     ModelRecord,
+    ModelUsageOverview,
     ProjectInfo,
     ProjectStorageOverview,
     SampleGenerateRequest,
@@ -975,6 +976,23 @@ def index() -> HTMLResponse:
         integrity outcome, <code>deletable</code> and the ordered
         blockers. No cascade, no force, no bulk, no policies.</li>
 
+      <li><b>M66 read-only model usage overview</b> —
+        <code>GET /models/&#123;id&#125;/usage</code> answers "what
+        persisted artifacts currently reference this model?" BEFORE any
+        future model-retention decision: every referencing record by
+        category — the internal model-scoped families (training runs,
+        checkpoints, workflows, evaluations, comparisons, gate
+        decisions) and the EXTERNAL root-level families that persist
+        the model id outside the model directory (suite runs, samples,
+        sample-quality measurements, and workflow recipes whose stage
+        configs name the model — deleting the model today would orphan
+        exactly these). Deterministic category order + sorted record
+        ids + internal/external splits
+        (<code>externally_referenced</code> is the future-guard
+        surface). Computed live through the ONE authoritative listings
+        (never a second scanner). Visibility only — no model deletion
+        or guard exists or changes here.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -1029,6 +1047,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/datasets/&#123;id&#125;/tokenize</code> — tokenize with a stored tokenizer</li>
       <li><code>POST  {prefix}/tokenizers/train</code> — deterministic byte-level BPE</li>
       <li><code>POST  {prefix}/training/run</code> — train (CPT/SFT), synchronous; optional <code>resume_from_checkpoint_id</code> initializes the run from an immutable checkpoint without publishing it (M54)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/usage</code> — read-only model usage overview: every referencing record by category (internal families + external root-level suite runs / samples / sample quality / recipes; M66)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints</code> — immutable checkpoint store</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/by-run/&#123;run&#125;</code> — checkpoints of one training run (provenance-validated, M46)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best</code> — deterministic selection by MINIMUM persisted validation loss (read-only, criterion explicit, M52)</li>
@@ -1190,6 +1209,26 @@ def get_model(model_id: str) -> ModelRecord:
         return _forge().get_model(model_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"model '{model_id}' not found") from exc
+
+
+@api.get("/models/{model_id}/usage",
+         response_model=ModelUsageOverview, tags=["models"])
+def model_usage(model_id: str) -> ModelUsageOverview:
+    """Read-only usage overview of ONE model (M66): every persisted
+    record that references it, by category — the internal model-scoped
+    families (training runs, checkpoints, workflows, evaluations,
+    comparisons, gate decisions) plus the EXTERNAL root-level families
+    persisting the model id outside the model directory (suite runs,
+    samples, sample-quality measurements, workflow recipes whose stage
+    configs name the model — exactly what a future model-retention
+    guard would have to refuse on). Per-category sorted record ids,
+    deterministic counts and internal/external splits. Computed live:
+    zero storage, zero mutation, byte-identical over unchanged state.
+    Visibility only — no deletion semantics exist or change here."""
+    try:
+        return _forge().model_usage_overview(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @api.get("/models/{model_id}/verify", response_model=dict, tags=["models"])
