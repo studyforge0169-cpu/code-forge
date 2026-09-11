@@ -38,7 +38,10 @@ from .schemas import (
     SuiteRunRecord,
     SuiteRunRequest,
     SuiteRunSummary,
+    ModelDeletionBlocked,
+    ModelDeletionResult,
     ModelRecord,
+    ModelRetentionOverview,
     ModelUsageOverview,
     ProjectInfo,
     ProjectStorageOverview,
@@ -993,6 +996,27 @@ def index() -> HTMLResponse:
         (never a second scanner). Visibility only — no model deletion
         or guard exists or changes here.</li>
 
+      <li><b>M67 explicit VERIFIED model retention</b> —
+        <code>DELETE /models/&#123;id&#125;</code> (the same M1-era
+        route, its unsafe rmtree replaced) now deletes exactly ONE
+        model — only with live proof that nothing OUTSIDE the model
+        directory references it: scope (unknown or registry-invisible
+        model -> 404, nothing deleted), INTEGRITY FIRST (the M2
+        verifier — a corrupt, incomplete or missing-weights model ->
+        409, never deletable, no force flag), then the ONE M66
+        dependency analysis — ANY external root-level reference
+        (suite run, sample, sample-quality measurement, model-bound
+        workflow recipe, model-bound gate policy) -> 409 with the
+        ordered typed blocker list (the SAME categories and ids the
+        M66 usage overview reports; the model's internal families —
+        training runs, checkpoints, workflows, evaluations,
+        comparisons, gates — are ownership and go WITH the model),
+        then ONE atomic removal of the model's own directory with a
+        deterministic files/bytes result.
+        <code>GET /models/&#123;id&#125;/retention</code> exposes the
+        same decision read-only. No cascade, no force, no bulk, no
+        automatic cleanup.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -1047,7 +1071,8 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/datasets/&#123;id&#125;/tokenize</code> — tokenize with a stored tokenizer</li>
       <li><code>POST  {prefix}/tokenizers/train</code> — deterministic byte-level BPE</li>
       <li><code>POST  {prefix}/training/run</code> — train (CPT/SFT), synchronous; optional <code>resume_from_checkpoint_id</code> initializes the run from an immutable checkpoint without publishing it (M54)</li>
-      <li><code>GET   {prefix}/models/&#123;id&#125;/usage</code> — read-only model usage overview: every referencing record by category (internal families + external root-level suite runs / samples / sample quality / recipes; M66)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/usage</code> — read-only model usage overview: every referencing record by category (internal families + external root-level suite runs / samples / sample quality / recipes / policies; M66)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/retention</code> — read-only deletion-readiness view (integrity, deletable, ordered blockers; M67)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints</code> — immutable checkpoint store</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/by-run/&#123;run&#125;</code> — checkpoints of one training run (provenance-validated, M46)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best</code> — deterministic selection by MINIMUM persisted validation loss (read-only, criterion explicit, M52)</li>
@@ -1231,6 +1256,26 @@ def model_usage(model_id: str) -> ModelUsageOverview:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.get("/models/{model_id}/retention",
+         response_model=ModelRetentionOverview, tags=["models"])
+def model_retention(model_id: str) -> ModelRetentionOverview:
+    """Read-only retention overview of ONE model (M67): the
+    deletion-readiness view — identity, the ordered artifact files +
+    total bytes of the model's OWN directory (its whole internal
+    history), the M2 integrity-verification outcome, ``deletable``
+    (True iff integrity passes AND the ONE M66 usage analysis finds
+    no EXTERNAL reference) and the ordered blockers (the SAME list
+    the DELETE guard refuses on). The INTERNAL model-scoped families
+    are ownership and never block; the EXTERNAL root-level families
+    (suite runs, samples, sample-quality measurements, model-bound
+    recipes, model-bound gate policies) are exactly what protects the
+    model. Zero storage, zero mutation."""
+    try:
+        return _forge().model_retention_overview(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/verify", response_model=dict, tags=["models"])
 def verify_model(model_id: str) -> dict[str, Any]:
     try:
@@ -1257,12 +1302,52 @@ def download_weights(model_id: str) -> Response:
     )
 
 
-@api.delete("/models/{model_id}", response_model=dict, tags=["models"])
-def delete_model(model_id: str) -> dict[str, Any]:
-    if model_id not in _forge().storage.model_ids():
-        raise HTTPException(status_code=404, detail=f"model '{model_id}' not found")
-    _forge().delete_model(model_id)
-    return {"deleted": model_id}
+@api.delete("/models/{model_id}",
+            response_model=ModelDeletionResult, tags=["models"],
+            responses={409: {"model": ModelDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (the M66 external usage "
+                             "categories) — or integrity refusal"}})
+def delete_model(model_id: str) -> ModelDeletionResult:
+    """Explicit VERIFIED model retention (M67): delete exactly ONE
+    model — only with live proof that nothing OUTSIDE the model
+    directory references it.
+
+    The guard: scope through the registry (unknown or
+    registry-invisible model -> 404, nothing deleted); INTEGRITY
+    FIRST (the M2 verifier — manifest parse, state reload, weights
+    hash sidecar; a corrupt model -> 409, never deletable); then the
+    LIVE dependency analysis — EXACTLY the EXTERNAL root-level
+    references the M66 ``GET /models/{id}/usage`` overview reports
+    (suite runs, samples, sample-quality measurements, model-bound
+    workflow recipes, model-bound gate policies; ANY reference ->
+    409 with the ordered typed blocker list — nothing protected that
+    is not shown, nothing shown that is not protected). The model's
+    INTERNAL families (training runs, checkpoints, workflows,
+    evaluations, comparisons, gate decisions) are ownership: they
+    live inside the model directory and are removed atomically WITH
+    it. Then ONE atomic removal of the model's own directory. No
+    cascade, no force, no bulk mode. The deterministic result reports
+    the removed files and reclaimed bytes; every root-level family's
+    records stay untouched (they were protected BY the guard)."""
+    try:
+        return _forge().delete_model(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # protection rejection: re-derive the ordered blocker list for
+        # a structured 409 detail (the M65 pattern; diagnostic only)
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().model_deletion_blockers(model_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "model_id": model_id,
+                    "protected": True, "blockers": blockers}) from exc
 
 
 # --------------------------------------------------------------------------- #

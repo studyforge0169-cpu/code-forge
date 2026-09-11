@@ -2094,6 +2094,50 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 67 — explicit VERIFIED MODEL RETENTION
+  (`DELETE /models/{model_id}` + `GET /models/{model_id}/retention`)
+- **concept**: the final lifecycle-safety rung. M66 made every
+  persisted model reference visible; M67 replaces the model DELETE's
+  M1-era unguarded `rmtree` with the proven M61/M65 verified-retention
+  pattern — the SAME route, no second endpoint, zero new DELETE paths
+- **the guard, in order**: (1) scope through the registry (unknown or
+  registry-invisible (unparseable manifest) model -> 404, nothing
+  deleted); (2) INTEGRITY FIRST (the existing M2 verifier — manifest
+  parse, state reload, weights hash sidecar; a corrupt, incomplete or
+  missing-weights model -> 409 and is NEVER deletable; no force flag,
+  no filesystem fallback); (3) the ONE M66 dependency analysis as the
+  blocker source; (4) ONE atomic removal of the model's own directory
+  (`atomic_delete_dir` — rename-to-hidden-sibling + rmtree) returning
+  the deterministic `{model_id, files_removed, bytes_reclaimed}`
+- **the blocker policy (explicit)**: the guard refuses on EXACTLY the
+  M66-visible EXTERNAL root-level references — `suite_run`, `sample`,
+  `sample_quality`, `workflow_recipe`, `policy` (M67's inspection
+  proved the M66 surface incomplete by one family: registered gate
+  policies persist `policy.model_id` and are resolution-checked
+  against it, the same inert-definition-binds-a-model pattern as
+  recipes; the category was added to the ONE M66 analysis, so usage
+  and guard stay in lockstep). The INTERNAL model-scoped families —
+  `training_run`, `checkpoint`, `workflow`, `evaluation`,
+  `comparison`, `gate` — are OWNERSHIP: they live inside
+  `models/{id}/` and are removed atomically WITH the model, so they
+  never orphan a persisted record and never block. The 409 carries a
+  TYPED ordered blocker list (`{category, reference_id, detail}` per
+  reference) — the SAME categories and ids the M66 usage overview
+  reports: nothing protected that is not shown, nothing shown that is
+  not protected
+- **`GET /models/{id}/retention`**: the read-only deletion-readiness
+  view (identity, ordered artifact files + bytes of the model's own
+  directory, integrity outcome, `deletable`, ordered blockers — the
+  SAME list the guard refuses on)
+- **no cascade**: a protected DELETE changes nothing on disk
+  (byte-verified); a successful DELETE removes ONLY the model's own
+  directory — root-level families are protected BY the guard, never
+  rewritten or removed. No automatic deletion, no GC, no policies, no
+  TTLs, no background jobs. Live certification executed the success
+  path on a DISPOSABLE COPY only; production stays byte-identical
+- OpenAPI: path count 92 -> 93 (exactly the one new read-only
+  retention route; the DELETE rides the existing M1 path)
+
 ### Milestone 66 — read-only MODEL USAGE OVERVIEW
   (`GET /models/{model_id}/usage`)
 - **concept**: visibility one family up — the model itself is the last
@@ -2106,14 +2150,17 @@ generation never trains, evaluates, scores, ranks or judges output.
   — `training_run` (the model manifest's own persisted run
   provenance), `checkpoint`, `workflow`, `evaluation`, `comparison`,
   `gate` (all inside `models/{id}/`, discovered through the ONE
-  authoritative listings) — plus four EXTERNAL root-level families
+  authoritative listings) — plus five EXTERNAL root-level families
   that persist the model id OUTSIDE the model directory: `suite_run`
   (`suite-runs/<id>`), `sample` (`samples/{model_id}/`),
-  `sample_quality` (`sample-evaluations/{model_id}/`) and
+  `sample_quality` (`sample-evaluations/{model_id}/`),
   `workflow_recipe` (recipes whose train/evaluate/gate stage configs
   name the model — a recipe is inert data, but its definition is
   bound to the models it names: deleting such a model would leave the
-  recipe unresolvable)
+  recipe unresolvable) and `policy` (registered gate policies persist
+  `policy.model_id` and are resolution-checked against it — the same
+  pattern; added by M67's inspection, which proved the original
+  four-family surface incomplete)
 - **aggregates**: per-category sorted unique record ids,
   `internal_references` / `external_references` splits,
   `total_references`, `referenced`, `externally_referenced` (exactly
@@ -2672,7 +2719,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 636 tests
+pytest                       # 641 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3181,7 +3228,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 636 tests across 24 suites
+  tests/               # 641 tests across 25 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

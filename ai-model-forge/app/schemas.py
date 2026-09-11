@@ -1085,6 +1085,81 @@ class ModelUsageOverview(BaseModel):
     categories: list[ModelUsageCategory] = Field(default_factory=list)
 
 
+class ModelDeletionBlocker(BaseModel):
+    """Why ONE model may not be deleted (M67 reference safety): ONE
+    persisted EXTERNAL reference that would be orphaned by the
+    deletion.
+
+    ``category`` is a stable name from the canonical model usage
+    order's EXTERNAL (root-level) tail — suite_run / sample /
+    sample_quality / workflow_recipe / policy; ``reference_id`` is the
+    SAME persisted record id the M66 usage overview reports;
+    ``detail`` carries short authoritative identifying information
+    from that record. The INTERNAL model-scoped categories
+    (training_run / checkpoint / workflow / evaluation / comparison /
+    gate) are ownership — they live inside ``models/<id>/`` and are
+    removed atomically WITH the model, so they never orphan a
+    persisted record and never appear here. Computed LIVE from the
+    ONE M66 usage analysis — never stored, never a second scanner.
+    The guard refuses on EXACTLY what the M66 overview shows:
+    nothing protected that is not shown, nothing shown that is not
+    protected."""
+
+    category: str
+    reference_id: str
+    detail: str
+
+
+class ModelDeletionResult(BaseModel):
+    """Deterministic result of ONE explicit verified model deletion
+    (M67): what was removed and how much storage it held. The model's
+    own directory (manifest, weights, checkpoints, workflows,
+    evaluations, comparisons, gate decisions — its whole internal
+    history) is gone atomically; every root-level family's records
+    are untouched (they were protected BY the guard)."""
+
+    model_id: str
+    files_removed: int
+    bytes_reclaimed: int
+
+
+class ModelDeletionBlocked(BaseModel):
+    """The structured 409 detail of a REFUSED model deletion (M67):
+    the ordered typed blocker list — the SAME external categories and
+    reference ids the M66 usage overview reports — so a client can
+    render exactly what protects the model."""
+
+    message: str
+    model_id: str
+    protected: bool = True
+    blockers: list[ModelDeletionBlocker] = Field(default_factory=list)
+
+
+class ModelRetentionOverview(BaseModel):
+    """Read-only live-computed retention overview of ONE model
+    (M67): the deletion-readiness view. Identity, the ordered artifact
+    file list (sorted relative paths of the model's OWN directory —
+    its whole internal history) and its total bytes, the M2
+    integrity-verification outcome, ``deletable`` — True iff
+    integrity passes AND the ONE M66 reference analysis finds no
+    EXTERNAL reference — and the ordered blockers (the SAME list the
+    DELETE guard refuses on). A corrupt model is never deletable; an
+    unknown or registry-invisible (unparseable manifest) model ->
+    FileNotFoundError (404 at the API). Zero storage, zero mutation,
+    byte-identical over unchanged state."""
+
+    model_id: str
+    name: str
+    created_at: datetime
+    architecture: str
+    parameter_count: int
+    files: list[str] = Field(default_factory=list)
+    size_bytes: int
+    integrity_verified: bool
+    deletable: bool
+    blockers: list[ModelDeletionBlocker] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Evaluation (read-only measurement of an existing model state)
 # --------------------------------------------------------------------------- #

@@ -38,6 +38,7 @@ from app.schemas import (
     GatePolicy,
     GateRequest,
     ModelCreateRequest,
+    PolicyCreateRequest,
     ProbeSuiteCreateRequest,
     SampleGenerateRequest,
     SampleStrategy,
@@ -157,6 +158,17 @@ def _oracle(root: Path, model_id: str) -> dict[str, list[str]]:
             walk(rec.get("stages", []))
             if model_id in refs:
                 out["workflow_recipe"].append(rec["recipe_id"])
+    proot = root / "policies"
+    if proot.exists():
+        for d in sorted(proot.iterdir()):
+            if not d.is_dir():
+                continue
+            try:
+                rec = json.loads((d / "manifest.json").read_text())
+            except Exception:
+                continue
+            if rec.get("policy", {}).get("model_id") == model_id:
+                out["policy"].append(rec["policy_id"])
     for c in out:
         out[c] = sorted(out[c])
     return out
@@ -272,6 +284,16 @@ def env(tmp_path_factory):
                 dataset_id=e.ds, tokenizer_id=e.tok, learning_rate=3e-3,
                 batch_size=8, max_seq_len=32, eval_every_steps=4,
                 keep_best=False, seed=9, steps=4))]))
+    # (9) a registered gate policy naming this model (root-level;
+    #     added by M67's inspection — policies persist policy.model_id
+    #     and are resolution-checked against it, the recipe pattern)
+    forge.register_policy(PolicyCreateRequest(
+        policy_id="m66-model-policy", description="M66 usage fixture",
+        policy=GatePolicy(
+            name="m66-gate-policy", model_id=e.model, dataset_id=e.ds,
+            tokenizer_id=e.tok, split="validation", batch_size=8,
+            max_seq_len=32, seed=10, baseline_type="current",
+            tolerance=1.0)))
 
     # a second model with its OWN training (isolation) and a fresh one
     e.other = forge.create_model(ModelCreateRequest(config=TransformerConfig(
@@ -344,6 +366,7 @@ def test_m66_model_usage_overview(env):
         sq.evaluation_id
         for sq in forge.list_sample_evaluations(env.model))
     assert cats["workflow_recipe"] == ["m66-model-recipe"]
+    assert cats["policy"] == ["m66-model-policy"]
 
     # full coverage of the fixture: every category non-empty
     assert all(cats[c] for c in ModelForge.MODEL_USAGE_CATEGORIES)
@@ -355,7 +378,8 @@ def test_m66_model_usage_overview(env):
                    if c not in ModelForge.MODEL_USAGE_INTERNAL_CATEGORIES)
     assert o1.internal_references == internal
     # suite_run(1) + sample(1) + sample_quality(1) + workflow_recipe(1)
-    assert o1.external_references == external == 4
+    # + policy(1)
+    assert o1.external_references == external == 5
     assert o1.total_references == internal + external
     assert o1.referenced is True and o1.externally_referenced is True
     # the internal families live INSIDE the model directory; the
@@ -380,6 +404,7 @@ def test_m66_scope_isolation_and_empty(env):
     assert ocats["suite_run"] == [] and ocats["sample"] == []
     assert ocats["sample_quality"] == []
     assert ocats["workflow_recipe"] == []   # the recipe names the OTHER model
+    assert ocats["policy"] == []            # so does the policy
     assert oo.external_references == 0 and oo.externally_referenced is False
     assert oo.internal_references == 2 and oo.referenced is True
     # the rich model's references never leak
@@ -531,6 +556,10 @@ def test_m66_api_model_usage(api_client):
         r["recipe_id"] for r in
         api_client.get("/api/v1/workflows/recipes").json()
         if mid in _json.dumps(r["stages"]))   # independent recipe scan
+    assert cats["policy"] == sorted(
+        p["policy_id"] for p in
+        api_client.get("/api/v1/policies").json()
+        if p["policy"]["model_id"] == mid)   # independent policy scan
 
     # independent oracle over the session root
     oracle = _oracle(storage_root, mid)
@@ -555,7 +584,7 @@ def test_m66_api_model_usage(api_client):
 
     # OpenAPI: exactly one new path (91 -> 92)
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 92
+    assert len(spec["paths"]) == 93
     NEW = "/api/v1/models/{model_id}/usage"
     assert set(spec["paths"][NEW].keys()) == {"get"}
     for s in ("ModelUsageOverview", "ModelUsageCategory"):

@@ -38,7 +38,10 @@ from .schemas import (
     GateBaselineType,
     GateDecisionResult,
     ModelCreateRequest,
+    ModelDeletionBlocker,
+    ModelDeletionResult,
     ModelRecord,
+    ModelRetentionOverview,
     ModelUsageCategory,
     ModelUsageOverview,
     PolicyCreateRequest,
@@ -70,7 +73,7 @@ from .schemas import (
     TransformerConfig,
     utcnow,
 )
-from .storage import Storage
+from .storage import Storage, atomic_delete_dir
 from .suite_runs import SUITE_RUNS_DIR, SuiteRunEngine
 from .tokenizer import TokenizerEngine
 from .training import CHECKPOINTS_DIR, TrainingEngine
@@ -207,9 +210,62 @@ class ModelForge:
         records.sort(key=lambda r: r.created_at)
         return records
 
-    def delete_model(self, model_id: str) -> None:
-        self.storage.remove(model_id)
-        log.info("deleted model %s", model_id)
+    def delete_model(self, model_id: str) -> ModelDeletionResult:
+        """Explicit VERIFIED model retention (M67): remove ONE model
+        — only after proving, live, that nothing OUTSIDE the model
+        directory references it. The full guard, in order: (1) scope
+        through the registry (``storage.load_record`` — unknown or
+        registry-invisible (unparseable manifest) model ->
+        FileNotFoundError, nothing deleted); (2) INTEGRITY FIRST (the
+        M61/M65 ordering): the existing M2 verifier
+        (``storage.verify_integrity`` — manifest parse, state reload,
+        weights hash sidecar) must pass; a corrupt, incomplete or
+        missing-weights model is REFUSED with RuntimeError (409) —
+        deletion never bypasses integrity validation, and no force
+        flag or filesystem fallback exists; (3) the LIVE dependency
+        analysis (``model_deletion_blockers`` — EXACTLY the EXTERNAL
+        root-level references of the ONE M66 usage overview: suite
+        runs, samples, sample-quality measurements, model-bound
+        workflow recipes and model-bound gate policies; ANY such
+        reference -> ValueError listing the ordered typed blockers, so
+        deletion can never orphan a persisted record. The INTERNAL
+        model-scoped families — training runs, checkpoints,
+        workflows, evaluations, comparisons, gate decisions — are
+        ownership: they live INSIDE ``models/<id>/`` and are removed
+        atomically WITH the model, so they never block); (4) ATOMIC
+        removal of the model's OWN directory only
+        (``atomic_delete_dir`` — one rename to a hidden sibling, then
+        rmtree; no partial model can ever be observed). No cascade,
+        no force, no bulk mode — exactly the one explicitly requested
+        model. Never touches root-level families (they are protected
+        BY the guard). Replaces the M1-era unguarded rmtree."""
+        self._scope_data_artifact(self.storage.load_record, model_id,
+                                  "model")
+        try:
+            self.storage.verify_integrity(model_id)
+        except Exception as exc:
+            # scope already proved the manifest loads, so ANY failure
+            # here is an integrity failure (missing/corrupt weights,
+            # hash mismatch, empty state) — refuse (409), never a
+            # silent rmtree
+            raise RuntimeError(
+                f"model '{model_id}' could not be verified: "
+                f"{exc}") from exc
+        blockers = self.model_deletion_blockers(model_id)
+        if blockers:
+            summary = "; ".join(f"{b.category}: {b.reference_id}"
+                                for b in blockers)
+            raise ValueError(
+                f"model '{model_id}' is referenced and cannot be "
+                f"deleted — {summary}")
+        model_dir = self.storage.model_dir(model_id)
+        files, nbytes = self._artifact_files(model_dir)
+        atomic_delete_dir(model_dir)
+        log.info("M67 verified model deletion %s (%d files, %d bytes)",
+                 model_id, len(files), nbytes)
+        return ModelDeletionResult(model_id=model_id,
+                                   files_removed=len(files),
+                                   bytes_reclaimed=nbytes)
 
     def verify_model(self, model_id: str) -> dict[str, Any]:
         """Full integrity check: manifest parse, state reload, hash sidecar."""
@@ -1058,10 +1114,14 @@ class ModelForge:
 
     # Canonical M66 model usage category order (fixed and
     # deterministic). The first six are INTERNAL model-scoped families
-    # (persisted inside models/<id>/ — ownership); the last four are
+    # (persisted inside models/<id>/ — ownership); the last five are
     # EXTERNAL root-level families persisting the model id OUTSIDE the
-    # model directory — exactly the surface a future model-retention
-    # guard must refuse on.
+    # model directory — exactly the surface the M67 deletion guard
+    # refuses on. (M67 inspection proved the M66 surface incomplete by
+    # one family: registered gate policies persist ``policy.model_id``
+    # at policies/<id>/ and are resolution-checked against it — the
+    # same inert-definition-binds-a-model pattern as workflow recipes
+    # — so ``policy`` joins the external tail.)
     MODEL_USAGE_CATEGORIES = (
         "training_run",      # the model manifest's own RunProvenance
         "checkpoint",        # models/<id>/checkpoints/
@@ -1073,6 +1133,7 @@ class ModelForge:
         "sample",            # samples/<model_id>/ (root-level)
         "sample_quality",    # sample-evaluations/<model_id>/ (root-level)
         "workflow_recipe",   # workflow-recipes/<id> stage configs (root)
+        "policy",            # policies/<id> registry policy (root)
     )
     MODEL_USAGE_INTERNAL_CATEGORIES = frozenset(MODEL_USAGE_CATEGORIES[:6])
 
@@ -1104,8 +1165,9 @@ class ModelForge:
         gate decisions — all through the ONE authoritative listings)
         plus the EXTERNAL root-level families persisting the model id
         outside the model directory (suite runs, samples, sample-quality
-        measurements, and workflow recipes whose stage configs name the
-        model). Per-category references are the listings' record ids,
+        measurements, model-bound workflow recipes and model-bound
+        registered gate policies). Per-category references are the
+        listings' record ids,
         sorted and unique; internal/external splits expose exactly what
         a future model-retention guard would need. Zero storage, zero
         mutation, byte-identical over unchanged state; unknown or
@@ -1143,6 +1205,9 @@ class ModelForge:
             ("workflow_recipe",
              sorted(r.recipe_id for r in self.recipes.list()
                     if model_id in self._recipe_model_ids(r))),
+            ("policy",
+             sorted(d.policy_id for d in self.policies.list_policies()
+                    if d.policy.model_id == model_id)),
         ]
         internal = sum(len(refs) for name, refs in categories
                        if name in self.MODEL_USAGE_INTERNAL_CATEGORIES)
@@ -1161,6 +1226,90 @@ class ModelForge:
             external_references=external,
             categories=[ModelUsageCategory(category=c, references=r)
                         for c, r in categories])
+
+    def model_deletion_blockers(
+            self, model_id: str) -> list[ModelDeletionBlocker]:
+        """The M67 deletion guard's ordered blocker list: EXACTLY the
+        EXTERNAL (root-level) references of the ONE M66 usage
+        analysis — the same categories, the same persisted reference
+        ids, the same canonical order (category order, then sorted
+        reference ids). The INTERNAL model-scoped categories
+        (training_run / checkpoint / workflow / evaluation /
+        comparison / gate) are OWNERSHIP: they live inside
+        ``models/<id>/`` and are removed atomically WITH the model, so
+        deleting the model leaves nothing unresolved and they never
+        block. The EXTERNAL categories (suite_run / sample /
+        sample_quality / workflow_recipe / policy) persist the model
+        id OUTSIDE the model directory — deleting the model would
+        leave those records unresolved — so every such reference is
+        ONE typed blocker with short authoritative identifying detail
+        from the SAME ONE listings the overview itself uses. Nothing
+        protected that is not shown, nothing shown that is not
+        protected. Zero storage, zero mutation."""
+        overview = self.model_usage_overview(model_id)
+        details: dict[tuple[str, str], str] = {}
+        for r in self.list_suite_runs(model_id):
+            details[("suite_run", r.suite_run_id)] = f"suite '{r.suite_id}'"
+        for s in self.list_samples(model_id):
+            details[("sample", s.sample_id)] = \
+                f"checkpoint '{s.checkpoint_id}'"
+        for sq in self.list_sample_evaluations(model_id):
+            details[("sample_quality", sq.evaluation_id)] = \
+                f"sample '{sq.sample_id}'"
+        for r in self.recipes.list():
+            if model_id in self._recipe_model_ids(r):
+                details[("workflow_recipe", r.recipe_id)] = \
+                    f"config_hash '{r.config_hash}'"
+        for d in self.policies.list_policies():
+            if d.policy.model_id == model_id:
+                details[("policy", d.policy_id)] = \
+                    f"gate policy '{d.policy.name}'"
+        blockers: list[ModelDeletionBlocker] = []
+        for cat in overview.categories:
+            if cat.category in self.MODEL_USAGE_INTERNAL_CATEGORIES:
+                continue  # ownership — removed WITH the model
+            for ref in cat.references:
+                blockers.append(ModelDeletionBlocker(
+                    category=cat.category, reference_id=ref,
+                    detail=details.get(
+                        (cat.category, ref),
+                        f"references model '{model_id}'")))
+        return blockers
+
+    def model_retention_overview(
+            self, model_id: str) -> ModelRetentionOverview:
+        """Read-only live-computed retention overview of ONE model
+        (M67): the deletion-readiness view — identity, the ordered
+        artifact files + total bytes of the model's OWN directory (its
+        whole internal history), the M2 integrity-verification
+        outcome, ``deletable`` (True iff integrity passes AND the ONE
+        M66 reference analysis finds no EXTERNAL reference) and the
+        ordered blockers (the SAME list the DELETE guard refuses on).
+        A corrupt model is never deletable; an unknown or
+        registry-invisible (unparseable manifest) model ->
+        FileNotFoundError (404 at the API). Zero storage, zero
+        mutation, byte-identical over unchanged state."""
+        record = self._scope_data_artifact(self.storage.load_record,
+                                           model_id, "model")
+        files, nbytes = self._artifact_files(
+            self.storage.model_dir(model_id))
+        try:
+            integrity_verified = (
+                self.verify_model(model_id).get("integrity") == "ok")
+        except Exception:
+            integrity_verified = False
+        blockers = self.model_deletion_blockers(model_id)
+        return ModelRetentionOverview(
+            model_id=model_id,
+            name=record.name,
+            created_at=record.created_at,
+            architecture=record.architecture.value,
+            parameter_count=record.parameter_count,
+            files=files,
+            size_bytes=nbytes,
+            integrity_verified=integrity_verified,
+            deletable=integrity_verified and not blockers,
+            blockers=blockers)
 
     def dataset_deletion_blockers(
             self, dataset_id: str) -> list[ArtifactDeletionBlocker]:

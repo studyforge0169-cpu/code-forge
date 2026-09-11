@@ -57,8 +57,14 @@ def test_create_and_read_model(api_client):
     assert dl.content[:2] == b"PK"  # torch 2.x zipfile container for state dicts
     assert dl.headers["content-type"] == "application/octet-stream"
 
-    # delete and 404 afterwards
-    assert api_client.delete(f"/api/v1/models/{model_id}").json()["deleted"] == model_id
+    # delete and 404 afterwards (M67: the same route now returns the
+    # typed verified-deletion result instead of the M1-era shape)
+    res = api_client.delete(f"/api/v1/models/{model_id}")
+    assert res.status_code == 200
+    body = res.json()
+    assert set(body) == {"model_id", "files_removed", "bytes_reclaimed"}
+    assert body["model_id"] == model_id
+    assert body["files_removed"] > 0 and body["bytes_reclaimed"] > 0
     assert api_client.get(f"/api/v1/models/{model_id}").status_code == 404
 
 
