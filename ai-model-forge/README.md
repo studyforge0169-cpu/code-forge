@@ -2094,6 +2094,46 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 65 — explicit VERIFIED dataset & tokenizer RETENTION
+  (`DELETE /datasets/{id}`, `DELETE /tokenizers/{id}`)
+- **concept**: the M61 pattern one family over — data-artifact deletion
+  becomes explicit, verified and reference-safe. M64 made every
+  reference visible; M65 refuses on EXACTLY those references: a
+  deletion can never orphan immutable evidence
+- **the guard (fixed order)**: (1) scope through the family registry
+  (unknown dataset/tokenizer -> 404, nothing deleted); (2) the LIVE
+  reference-safety analysis — the ONE M64 usage overview, never a
+  second scanner: ANY visible reference -> 409 with an ORDERED blocker
+  list in the SAME canonical categories and reference ids the usage
+  overview reports (nothing protected that is not shown, nothing shown
+  that is not protected); (3) ONE ATOMIC removal of the artifact's OWN
+  directory only (the `remove_checkpoint` pattern: one rename to a
+  hidden `.tmp-delete-*` sibling, then rmtree — no partial artifact
+  can ever be observed)
+- **closing the gaps**: the tokenizer family's pre-M65 deletion was an
+  UNGUARDED rmtree (the pre-M61 situation one family over) — now fully
+  guarded; the dataset family's single-category guard (tokenizers
+  trained on it) becomes the full ordered list (the old
+  `tokenizer_training` refusal is one blocker category, same refusal,
+  now structured)
+- **results**: a successful deletion returns the deterministic
+  files/bytes measurement of what was removed; every other family's
+  records stay untouched (they were protected BY the guard)
+- **honest consequence**: a tokenized dataset/tokenizer pair is
+  MUTUALLY protected (the tokenizer's derived artifacts live under the
+  dataset: `tokenized_dataset` blocks the tokenizer;
+  `tokenizer_training` + `tokenized_version` block the dataset) —
+  removing derived tokenized artifacts would need a future EXPLICIT
+  operation; M65 never cascades, never forces
+- **semantics**: no cascade deletion, no force flag, no bulk mode, no
+  policies, no keep-N, no age rules, no background cleanup — exactly
+  the one explicitly requested artifact. The guard recomputes live
+  (deleting a referencing artifact shrinks the blocker list; the M61
+  checkpoint route and M62/M63/M64 views are untouched)
+- OpenAPI: path count UNCHANGED at 89 (both DELETEs ride the existing
+  detail routes; the typed 409 blocker detail + result schemas are
+  newly exposed)
+
 ### Milestone 64 — read-only DATASET & TOKENIZER USAGE OVERVIEW
   (`GET /datasets/{dataset_id}/usage`, `GET /tokenizers/{tokenizer_id}/usage`)
 - **concept**: visibility one family over — datasets and tokenizers are
@@ -2581,7 +2621,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 626 tests
+pytest                       # 630 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3090,7 +3130,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 626 tests across 22 suites
+  tests/               # 630 tests across 23 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

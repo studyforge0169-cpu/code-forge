@@ -340,7 +340,7 @@ def test_delete_protected_while_tokenizer_trains_on_it(forge):
     ds_id = up["dataset_id"]
     cfg = TokenizerConfig(name="prot-tok", vocab_size=320)
     rec = forge.train_tokenizer(cfg, dataset_id=ds_id)
-    with pytest.raises(ValueError, match="training source"):
+    with pytest.raises(ValueError, match="tokenizer_training"):
         forge.delete_dataset(ds_id)
     forge.delete_tokenizer(rec.id)
     forge.delete_dataset(ds_id)  # now allowed

@@ -35,7 +35,10 @@ def test_upload_list_get_verify_delete(api_client):
     assert got["versions"][0]["counts"]["unique_record_count"] == 1
 
     assert api_client.get(f"{DATASETS}/{ds_id}/verify").json()["status"] == "ok"
-    assert api_client.delete(f"{DATASETS}/{ds_id}").json()["deleted"] == ds_id
+    r = api_client.delete(f"{DATASETS}/{ds_id}")          # M65 verified deletion
+    assert r.status_code == 200, r.text
+    assert r.json()["dataset_id"] == ds_id
+    assert r.json()["files_removed"] > 0 and r.json()["bytes_reclaimed"] > 0
     assert api_client.get(f"{DATASETS}/{ds_id}").status_code == 404
 
 
@@ -127,7 +130,10 @@ def test_train_list_get_delete_tokenizer(api_client):
     assert any(t["id"] == rec["id"] for t in api_client.get(TOKENIZERS).json())
     got = api_client.get(f"{TOKENIZERS}/{rec['id']}").json()
     assert got["tokenizer_hash"] == rec["tokenizer_hash"]
-    assert api_client.delete(f"{TOKENIZERS}/{rec['id']}").json()["deleted"] == rec["id"]
+    r = api_client.delete(f"{TOKENIZERS}/{rec['id']}")     # M65 verified deletion
+    assert r.status_code == 200, r.text
+    assert r.json()["tokenizer_id"] == rec["id"]
+    assert r.json()["files_removed"] > 0 and r.json()["bytes_reclaimed"] > 0
     assert api_client.get(f"{TOKENIZERS}/{rec['id']}").status_code == 404
     assert api_client.delete(f"{TOKENIZERS}/{rec['id']}").status_code == 404
 
@@ -202,9 +208,20 @@ def test_full_pipeline_tokenize_via_api(api_client):
     assert report["status"] == "ok"
     assert report["versions"][0]["tokenized"][0]["tokenizer_id"] == tok_id
 
-    # cleanup: tokenizer first, then dataset
-    assert api_client.delete(f"{TOKENIZERS}/{tok_id}").status_code == 200
-    assert api_client.delete(f"{DATASETS}/{ds_id}").status_code == 200
+    # M65 explicit verified retention: after tokenization the pair is
+    # MUTUALLY protected — the tokenizer's derived artifacts live under
+    # the dataset (tokenized_dataset blocker) while the dataset is the
+    # tokenizer's training source and holds its tokenized versions
+    # (tokenizer_training + tokenized_version blockers). Neither can be
+    # deleted while the derived artifacts exist; no cascade, no force.
+    r = api_client.delete(f"{TOKENIZERS}/{tok_id}")
+    assert r.status_code == 409, r.text
+    assert {b["reason"] for b in r.json()["detail"]["blockers"]} == \
+        {"tokenized_dataset"}
+    r = api_client.delete(f"{DATASETS}/{ds_id}")
+    assert r.status_code == 409, r.text
+    assert {b["reason"] for b in r.json()["detail"]["blockers"]} == \
+        {"tokenizer_training", "tokenized_version"}
 
 
 def test_project_counts_include_new_artifact_kinds(api_client):

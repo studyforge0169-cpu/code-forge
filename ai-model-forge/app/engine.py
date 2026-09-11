@@ -26,6 +26,7 @@ from .sample_quality import SAMPLE_EVALUATIONS_DIR, SampleQualityEngine
 from .schemas import (
     CheckpointDeletionBlocker,
     CheckpointDeletionResult,
+    ArtifactDeletionBlocker,
     ArtifactUsageCategory,
     CheckpointRetentionEntry,
     CheckpointRetentionOverview,
@@ -45,7 +46,9 @@ from .schemas import (
     ProjectModelStorageSummary,
     ProjectStorageCategory,
     ProjectStorageOverview,
+    DatasetDeletionResult,
     DatasetUsageOverview,
+    TokenizerDeletionResult,
     TokenizerUsageOverview,
     SuiteRunRecord,
     SuiteRunRequest,
@@ -229,8 +232,6 @@ class ModelForge:
     def verify_dataset(self, dataset_id: str) -> dict[str, Any]:
         return self.datasets.verify(dataset_id)
 
-    def delete_dataset(self, dataset_id: str) -> None:
-        self.datasets.delete(dataset_id)
 
     def tokenize_dataset(self, dataset_id: str, tokenizer_id: str,
                          version: Optional[int] = None) -> dict[str, Any]:
@@ -267,8 +268,6 @@ class ModelForge:
     def list_tokenizers(self) -> list[dict[str, Any]]:
         return [t.model_dump(mode="json") for t in self.tokenizers.list()]
 
-    def delete_tokenizer(self, tokenizer_id: str) -> None:
-        self.tokenizers.delete(tokenizer_id)
 
     # ------------------------------------------------------------------ #
     # Training (thin delegation to the training engine)
@@ -951,6 +950,100 @@ class ModelForge:
             total_references=total,
             categories=[ArtifactUsageCategory(category=c, references=r)
                         for c, r in categories])
+
+    def dataset_deletion_blockers(
+            self, dataset_id: str) -> list[ArtifactDeletionBlocker]:
+        """The reference-safety analysis for dataset deletion (M65),
+        computed LIVE from the ONE M64 usage overview — never a second
+        scanner. Every M64-visible reference category with at least one
+        reference becomes one blocker, in the SAME canonical order and
+        with the SAME reference ids the ``GET /datasets/{id}/usage``
+        overview reports (the guard refuses on EXACTLY what the
+        overview shows: nothing protected that is not shown, nothing
+        shown that is not protected). Unknown dataset ->
+        FileNotFoundError (404 at the API); zero storage, zero
+        mutation."""
+        overview = self.dataset_usage_overview(dataset_id)
+        return [ArtifactDeletionBlocker(reason=c.category,
+                                        detail=", ".join(c.references))
+                for c in overview.categories if c.references]
+
+    def tokenizer_deletion_blockers(
+            self, tokenizer_id: str) -> list[ArtifactDeletionBlocker]:
+        """The reference-safety analysis for tokenizer deletion (M65),
+        computed LIVE from the ONE M64 usage overview — never a second
+        scanner. Every M64-visible reference category with at least one
+        reference becomes one blocker, in the SAME canonical order and
+        with the SAME reference ids the
+        ``GET /tokenizers/{id}/usage`` overview reports. Unknown
+        tokenizer -> FileNotFoundError (404 at the API); zero storage,
+        zero mutation."""
+        overview = self.tokenizer_usage_overview(tokenizer_id)
+        return [ArtifactDeletionBlocker(reason=c.category,
+                                        detail=", ".join(c.references))
+                for c in overview.categories if c.references]
+
+    def delete_dataset(self, dataset_id: str) -> DatasetDeletionResult:
+        """Explicit VERIFIED dataset retention (M65): remove ONE
+        dataset — only after proving, live, that nothing references it.
+        The full guard, in order: (1) scope through the M2 registry
+        (``load_meta`` — unknown dataset -> FileNotFoundError, nothing
+        deleted); (2) the LIVE reference-safety analysis
+        (``dataset_deletion_blockers`` — the ONE M64 analysis: training
+        runs, workflows, evaluations, comparisons, suite runs, the
+        tokenizers trained on it and the tokenized versions derived
+        from it; ANY reference -> ValueError listing the ordered
+        blockers, so deletion can never orphan referencing evidence);
+        (3) ATOMIC removal of the dataset's OWN directory only
+        (``DatasetEngine.delete`` — one rename to a hidden sibling,
+        then rmtree; no partial dataset can ever be observed). No
+        cascade, no force, no bulk mode, no policies — exactly the one
+        explicitly requested dataset. Never touches tokenizers,
+        models, checkpoints or any other family's records (they are
+        protected BY the guard)."""
+        blockers = self.dataset_deletion_blockers(dataset_id)
+        if blockers:
+            summary = "; ".join(f"{b.reason}: {b.detail}" for b in blockers)
+            raise ValueError(
+                f"dataset '{dataset_id}' is referenced and cannot be "
+                f"deleted — {summary}")
+        files, nbytes = self.datasets.delete(dataset_id)
+        log.info("M65 verified dataset deletion %s (%d files, %d bytes)",
+                 dataset_id, files, nbytes)
+        return DatasetDeletionResult(dataset_id=dataset_id,
+                                     files_removed=files,
+                                     bytes_reclaimed=nbytes)
+
+    def delete_tokenizer(self, tokenizer_id: str) -> TokenizerDeletionResult:
+        """Explicit VERIFIED tokenizer retention (M65): remove ONE
+        tokenizer — only after proving, live, that nothing references
+        it. The full guard, in order: (1) scope through the registry
+        (``TokenizerEngine.load`` — unknown tokenizer ->
+        FileNotFoundError, nothing deleted); (2) the LIVE
+        reference-safety analysis (``tokenizer_deletion_blockers`` —
+        the ONE M64 analysis: training runs, workflows, evaluations,
+        comparisons, suite runs, samples, sample-quality measurements
+        and the dataset versions it tokenized; ANY reference ->
+        ValueError listing the ordered blockers — closing the pre-M61
+        gap this family had: an unguarded rmtree); (3) ATOMIC removal
+        of the tokenizer's OWN directory only. No cascade, no force,
+        no bulk mode, no policies. Never touches datasets (a
+        referenced tokenizer's tokenized artifacts under a dataset
+        appear in this analysis as ``tokenized_dataset`` and therefore
+        block deletion), models, checkpoints or any other family's
+        records."""
+        blockers = self.tokenizer_deletion_blockers(tokenizer_id)
+        if blockers:
+            summary = "; ".join(f"{b.reason}: {b.detail}" for b in blockers)
+            raise ValueError(
+                f"tokenizer '{tokenizer_id}' is referenced and cannot "
+                f"be deleted — {summary}")
+        files, nbytes = self.tokenizers.delete(tokenizer_id)
+        log.info("M65 verified tokenizer deletion %s (%d files, %d bytes)",
+                 tokenizer_id, files, nbytes)
+        return TokenizerDeletionResult(tokenizer_id=tokenizer_id,
+                                       files_removed=files,
+                                       bytes_reclaimed=nbytes)
 
     # ------------------------------------------------------------------ #
     # Evaluation (thin delegation to the evaluation engine; read-only)

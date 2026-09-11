@@ -49,9 +49,13 @@ from .schemas import (
     CheckpointDeletionResult,
     CheckpointRetentionOverview,
     CheckpointSelection,
+    DatasetDeletionBlocked,
+    DatasetDeletionResult,
     DatasetUsageOverview,
     RollbackRequest,
     TokenizerConfig,
+    TokenizerDeletionBlocked,
+    TokenizerDeletionResult,
     TokenizerUsageOverview,
     TrainingConfig,
     TrainingReport,
@@ -943,6 +947,22 @@ def index() -> HTMLResponse:
         registries (never a second scanner). Visibility only: no
         deletion guards are added or changed here.</li>
 
+      <li><b>M65 explicit verified dataset &amp; tokenizer retention</b> —
+        <code>DELETE /datasets/&#123;id&#125;</code> and
+        <code>DELETE /tokenizers/&#123;id&#125;</code> become explicit,
+        verified and reference-safe (the M61 pattern one family over):
+        the guard refuses with 409 + an ORDERED blocker list while ANY
+        M64-visible reference exists — the SAME canonical categories
+        and reference ids the usage overview reports (nothing
+        protected that is not shown, nothing shown that is not
+        protected) — and a successful deletion removes the artifact's
+        OWN directory ATOMICALLY (one rename to a hidden sibling, then
+        rmtree — no partial artifact can ever be observed), returning
+        the deterministic files/bytes result. The tokenizer family's
+        pre-M65 gap (an unguarded rmtree) is closed; the dataset
+        family's single-category guard becomes the full ordered list.
+        No cascade, no force, no bulk, no policies.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -987,6 +1007,8 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/project/storage</code> — read-only PHYSICAL storage overview of the whole project: totals, category partition (no double counting) and per-model rows with the M62 retention aggregates (M63)</li>
       <li><code>GET   {prefix}/datasets/&#123;id&#125;/usage</code> — read-only usage overview of one dataset: every referencing record by category (training runs, workflows, evaluations, comparisons, suite runs, tokenizer training, tokenized versions; M64)</li>
       <li><code>GET   {prefix}/tokenizers/&#123;id&#125;/usage</code> — read-only usage overview of one tokenizer: every referencing record by category (training runs, workflows, evaluations, comparisons, suite runs, samples, sample quality, tokenized datasets; M64)</li>
+      <li><code>DELETE {prefix}/datasets/&#123;id&#125;</code> — explicit VERIFIED dataset retention: one dataset, only with zero M64-visible references (ordered blockers on 409), atomic removal, deterministic files/bytes result (M65)</li>
+      <li><code>DELETE {prefix}/tokenizers/&#123;id&#125;</code> — explicit VERIFIED tokenizer retention: one tokenizer, only with zero M64-visible references (ordered blockers on 409), atomic removal, deterministic files/bytes result (M65)</li>
       <li><code>POST  {prefix}/models</code> — create a model (validated config)</li>
       <li><code>POST  {prefix}/datasets/upload</code> — ingest txt/md/csv/json → versioned dataset</li>
       <li><code>GET   {prefix}/datasets/&#123;id&#125;/verify</code> — integrity check (tamper detection)</li>
@@ -1280,15 +1302,40 @@ def tokenize_dataset(dataset_id: str, payload: dict) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@api.delete("/datasets/{dataset_id}", response_model=dict, tags=["datasets"])
-def delete_dataset(dataset_id: str) -> dict[str, Any]:
+@api.delete("/datasets/{dataset_id}",
+            response_model=DatasetDeletionResult, tags=["datasets"],
+            responses={409: {"model": DatasetDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (the M64 usage categories)"}})
+def delete_dataset(dataset_id: str) -> DatasetDeletionResult:
+    """Explicit VERIFIED dataset retention (M65): delete exactly ONE
+    dataset — only with live proof that nothing references it.
+
+    The guard: scope through the M2 registry (unknown dataset -> 404,
+    nothing deleted); the LIVE reference-safety analysis — training
+    runs, workflows, evaluations, comparisons, suite runs, tokenizers
+    trained on it, tokenized versions (ANY reference -> 409 with the
+    ordered blocker list, the SAME categories and ids the M64
+    ``GET /datasets/{id}/usage`` overview reports); then ONE atomic
+    removal of the dataset's own directory. No cascade, no force, no
+    bulk mode. The deterministic result reports the removed files and
+    reclaimed bytes; every other family's records stay untouched."""
     try:
-        _forge().delete_dataset(dataset_id)
-    except ValueError as exc:  # dependency conflict
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _forge().delete_dataset(dataset_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"deleted": dataset_id}
+    except ValueError as exc:
+        # protection rejection: re-derive the ordered blocker list for a
+        # structured 409 detail (the M61 pattern; the list is diagnostic)
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().dataset_deletion_blockers(dataset_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "dataset_id": dataset_id,
+                    "protected": True, "blockers": blockers}) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -1351,12 +1398,37 @@ def tokenizer_usage(tokenizer_id: str) -> TokenizerUsageOverview:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@api.delete("/tokenizers/{tokenizer_id}", response_model=dict, tags=["tokenizers"])
-def delete_tokenizer(tokenizer_id: str) -> dict[str, Any]:
-    if not _forge().tokenizers.exists_id(tokenizer_id):
-        raise HTTPException(status_code=404, detail=f"tokenizer '{tokenizer_id}' not found")
-    _forge().delete_tokenizer(tokenizer_id)
-    return {"deleted": tokenizer_id}
+@api.delete("/tokenizers/{tokenizer_id}",
+            response_model=TokenizerDeletionResult, tags=["tokenizers"],
+            responses={409: {"model": TokenizerDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (the M64 usage categories)"}})
+def delete_tokenizer(tokenizer_id: str) -> TokenizerDeletionResult:
+    """Explicit VERIFIED tokenizer retention (M65): delete exactly ONE
+    tokenizer — only with live proof that nothing references it.
+
+    The guard: scope through the registry (unknown tokenizer -> 404,
+    nothing deleted); the LIVE reference-safety analysis — training
+    runs, workflows, evaluations, comparisons, suite runs, samples,
+    sample-quality measurements, tokenized dataset versions (ANY
+    reference -> 409 with the ordered blocker list, the SAME
+    categories and ids the M64 ``GET /tokenizers/{id}/usage``
+    overview reports); then ONE atomic removal of the tokenizer's own
+    directory. No cascade, no force, no bulk mode."""
+    try:
+        return _forge().delete_tokenizer(tokenizer_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().tokenizer_deletion_blockers(tokenizer_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "tokenizer_id": tokenizer_id,
+                    "protected": True, "blockers": blockers}) from exc
 
 
 # --------------------------------------------------------------------------- #

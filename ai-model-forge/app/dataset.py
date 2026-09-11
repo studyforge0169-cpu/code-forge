@@ -51,7 +51,9 @@ from .schemas import (
     TokenizedInfo,
     VersionManifest,
 )
-from .storage import Storage, atomic_write_bytes, atomic_write_json, hash_file_sha256, read_json
+from .storage import (Storage, atomic_delete_dir,
+                   atomic_write_bytes, atomic_write_json,
+                   hash_file_sha256, read_json)
 
 log = forge_cfg.get_logger("dataset")
 
@@ -683,18 +685,28 @@ class DatasetEngine:
 
     # ----------------------------------------------------------- deletion
 
-    def delete(self, dataset_id: str) -> None:
-        """Remove a dataset. Refused while a tokenizer is trained on it."""
-        import shutil
-
+    def delete(self, dataset_id: str) -> tuple[int, int]:
+        """Remove ONE dataset's directory ATOMICALLY (M65 low-level
+        primitive, the ``remove_checkpoint`` pattern): the dataset's
+        whole own tree (meta + every version + records + tokenized
+        artifacts) disappears in ONE ``os.rename`` to a hidden
+        ``.tmp-delete-*`` sibling the registry scans skip, so no
+        observer ever sees a half-deleted dataset. Returns
+        ``(files_removed, bytes_reclaimed)`` measured from the files as
+        they existed immediately before removal. The CALLER (the forge
+        facade) owns the safety decision — the FULL M64 reference
+        analysis must have passed before this is called, because
+        deletion must never become a way to orphan referencing
+        evidence."""
         if not self._meta_path(dataset_id).exists():
             raise FileNotFoundError(f"dataset '{dataset_id}' not found")
-        dependents = _referencing_tokenizers(self.storage, dataset_id)
-        if dependents:
-            raise ValueError(
-                f"dataset '{dataset_id}' is the training source of tokenizer(s) "
-                f"{dependents}; delete those tokenizers first")
-        shutil.rmtree(self.storage.dataset_dir(dataset_id), ignore_errors=True)
+        ddir = self.storage.dataset_dir(dataset_id)
+        files = sorted(p for p in ddir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(ddir)
+        log.info("deleted dataset %s (%d files, %d bytes)",
+                 dataset_id, len(files), nbytes)
+        return len(files), nbytes
 
 
 def _referencing_tokenizers(storage: Storage, dataset_id: str) -> list[str]:

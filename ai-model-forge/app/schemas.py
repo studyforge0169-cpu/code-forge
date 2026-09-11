@@ -924,6 +924,69 @@ class TokenizerUsageOverview(BaseModel):
     categories: list[ArtifactUsageCategory] = Field(default_factory=list)
 
 
+class ArtifactDeletionBlocker(BaseModel):
+    """Why ONE data artifact (dataset/tokenizer) may not be deleted
+    (M65 reference safety).
+
+    ``reason`` is a stable category from the artifact kind's canonical
+    M64 usage-category order (the SAME order the usage overview
+    reports); ``detail`` names the referencing records deterministically
+    (sorted ids, comma-joined). Computed LIVE from the ONE M64 usage
+    analysis — never stored, never a second scanner. The guard refuses
+    on EXACTLY what the M64 overview shows: nothing protected that is
+    not shown, nothing shown that is not protected."""
+
+    reason: str
+    detail: str
+
+
+class DatasetDeletionResult(BaseModel):
+    """Deterministic result of ONE explicit verified dataset deletion
+    (M65): what was removed and how much storage it held. The
+    dataset's own directory (meta + every version + records +
+    tokenized artifacts) is gone atomically; every other family's
+    records are untouched (they were protected BY the guard)."""
+
+    dataset_id: str
+    files_removed: int
+    bytes_reclaimed: int
+
+
+class TokenizerDeletionResult(BaseModel):
+    """Deterministic result of ONE explicit verified tokenizer deletion
+    (M65): what was removed and how much storage it held. The
+    tokenizer's own directory (manifest + tokenizer.json) is gone
+    atomically; every other family's records are untouched (they were
+    protected BY the guard)."""
+
+    tokenizer_id: str
+    files_removed: int
+    bytes_reclaimed: int
+
+
+class DatasetDeletionBlocked(BaseModel):
+    """The structured 409 detail of a REFUSED dataset deletion (M65):
+    the ordered blocker list — the SAME categories and reference ids
+    the M64 usage overview reports — so a client can render exactly
+    what protects the artifact."""
+
+    message: str
+    dataset_id: str
+    protected: bool = True
+    blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
+
+
+class TokenizerDeletionBlocked(BaseModel):
+    """The structured 409 detail of a REFUSED tokenizer deletion
+    (M65): the ordered blocker list — the SAME categories and
+    reference ids the M64 usage overview reports."""
+
+    message: str
+    tokenizer_id: str
+    protected: bool = True
+    blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Evaluation (read-only measurement of an existing model state)
 # --------------------------------------------------------------------------- #

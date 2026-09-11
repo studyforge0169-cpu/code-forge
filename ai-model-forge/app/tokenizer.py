@@ -32,7 +32,9 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 from . import config as forge_cfg
 from .hardware import detect_hardware
 from .schemas import TokenizerConfig, TokenizerRecord
-from .storage import Storage, atomic_write_bytes, atomic_write_json, hash_file_sha256, read_json
+from .storage import (Storage, atomic_delete_dir,
+                   atomic_write_bytes, atomic_write_json,
+                   hash_file_sha256, read_json)
 
 log = forge_cfg.get_logger("tokenizer")
 
@@ -87,10 +89,24 @@ class TokenizerEngine:
             raise FileNotFoundError(f"tokenizer '{tokenizer_id}' not found")
         return Tokenizer.from_file(str(path))
 
-    def delete(self, tokenizer_id: str) -> None:
-        import shutil
-
-        shutil.rmtree(self.storage.tokenizer_dir(tokenizer_id), ignore_errors=True)
+    def delete(self, tokenizer_id: str) -> tuple[int, int]:
+        """Remove ONE tokenizer's directory ATOMICALLY (M65 low-level
+        primitive, the ``remove_checkpoint`` pattern): manifest +
+        tokenizer.json disappear in ONE ``os.rename`` to a hidden
+        ``.tmp-delete-*`` sibling the registry scans skip. Returns
+        ``(files_removed, bytes_reclaimed)`` measured from the files as
+        they existed immediately before removal. The CALLER (the forge
+        facade) owns the safety decision — the FULL M64 reference
+        analysis must have passed before this is called, because
+        deletion must never become a way to orphan referencing
+        evidence."""
+        tdir = self.storage.tokenizer_dir(tokenizer_id)
+        files = sorted(p for p in tdir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(tdir)
+        log.info("deleted tokenizer %s (%d files, %d bytes)",
+                 tokenizer_id, len(files), nbytes)
+        return len(files), nbytes
 
     # ------------------------------------------------------------------ #
     # Training
