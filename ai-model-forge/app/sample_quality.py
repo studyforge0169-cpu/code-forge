@@ -114,7 +114,8 @@ from .hardware import detect_hardware
 from .model_builder import build_transformer, content_hash, restore_state
 from .sampling import SAMPLES_DIR, SAMPLE_PREFIX, SamplingEngine
 from .schemas import SampleEvaluationRecord, SampleRecord
-from .storage import Storage, atomic_write_json, read_json
+from .storage import (Storage, atomic_delete_dir,
+                      atomic_write_json, read_json)
 from .tokenizer import TokenizerEngine
 from .training import TrainingEngine
 
@@ -548,6 +549,24 @@ class SampleQualityEngine:
     def _sample_path(self, model_id: str, sample_id: str) -> Path:
         return (self.storage.root / SAMPLES_DIR / model_id
                 / f"{SAMPLE_PREFIX}{sample_id}" / MANIFEST)
+
+    def delete(self, model_id: str, evaluation_id: str) -> tuple[int, int]:
+        """Remove ONE sample-quality measurement's directory ATOMICALLY
+        (M68 low-level primitive, the ``DatasetEngine.delete``
+        pattern): the measurement's own single-manifest directory
+        disappears in ONE ``os.rename`` to a hidden ``.tmp-delete-*``
+        sibling the registry scans skip. Returns
+        ``(files_removed, bytes_reclaimed)`` measured from the files
+        as they existed immediately before removal. The CALLER (the
+        forge facade) owns the safety decision — scope and the
+        result-hash integrity verification must have passed before
+        this is called. A measurement is a LEAF record: nothing
+        persists its evaluation_id."""
+        edir = self._evaluation_dir(model_id, evaluation_id)
+        files = sorted(p for p in edir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(edir)
+        return len(files), nbytes
 
     def _persist(self, record: SampleEvaluationRecord) -> None:
         """Write one immutable sample-evaluation manifest (atomic; only

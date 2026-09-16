@@ -761,8 +761,10 @@ def test_m67_api_model_retention(api_client):
     assert api_client.delete(f"/api/v1/models/{mid2}").status_code == 404
 
     # OpenAPI: 93 paths; the retention route is GET-only; NO new
-    # DELETE paths (the model DELETE is the SAME pre-existing route);
-    # the delete-operation set is exactly the four pre-existing ones
+    # DELETE paths (the model DELETE is the SAME pre-existing route).
+    # (M68 later added the three record-lifecycle DELETEs — operations
+    # on pre-existing resource paths — which is why the set below
+    # counts seven; M67 itself changed no delete operation.)
     spec = api_client.get("/openapi.json").json()
     assert len(spec["paths"]) == 93
     assert set(spec["paths"]["/api/v1/models/{model_id}/retention"]
@@ -775,6 +777,9 @@ def test_m67_api_model_retention(api_client):
         "/api/v1/datasets/{dataset_id}",
         "/api/v1/models/{model_id}",
         "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}",
+        "/api/v1/models/{model_id}/sample-quality/{evaluation_id}",
+        "/api/v1/models/{model_id}/samples/{sample_id}",
+        "/api/v1/models/{model_id}/suite-runs/{suite_run_id}",
         "/api/v1/tokenizers/{tokenizer_id}",
     ]
     for s in ("ModelDeletionResult", "ModelDeletionBlocked",

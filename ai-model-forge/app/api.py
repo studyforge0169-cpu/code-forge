@@ -35,6 +35,7 @@ from .schemas import (
     PolicyDefinition,
     ProbeSuite,
     ProbeSuiteCreateRequest,
+    SuiteRunDeletionResult,
     SuiteRunRecord,
     SuiteRunRequest,
     SuiteRunSummary,
@@ -46,7 +47,10 @@ from .schemas import (
     ProjectInfo,
     ProjectStorageOverview,
     SampleGenerateRequest,
+    SampleEvaluationDeletionResult,
     SampleEvaluationRecord,
+    SampleDeletionBlocked,
+    SampleDeletionResult,
     SampleRecord,
     SampleStrategy,
     BestCheckpointHistory,
@@ -1017,6 +1021,26 @@ def index() -> HTMLResponse:
         same decision read-only. No cascade, no force, no bulk, no
         automatic cleanup.</li>
 
+      <li><b>M68 explicit suite-run &amp; sample lifecycle</b> — the
+        root-level runtime records get their own VERIFIED deletions
+        (the M61/M65/M67 pattern): <code>DELETE
+        /models/&#123;id&#125;/suite-runs/&#123;run&#125;</code>,
+        <code>DELETE /models/&#123;id&#125;/samples/&#123;sample&#125;</code>
+        and <code>DELETE
+        /models/&#123;id&#125;/sample-quality/&#123;eval&#125;</code> —
+        each: scope (unknown/registry-invisible -> 404, nothing
+        deleted), INTEGRITY FIRST (the record's persisted
+        result_hash must reproduce; tampered -> 409, never
+        deletable), then ONE atomic removal with exact files/bytes. A
+        sample is REFUSED (typed 409) while any sample-quality
+        measurement references it — measurements are leaves and
+        delete freely, which is exactly what UNBLOCKS a model: delete
+        the referencing records and the M67 guard's live analysis
+        lets the model go. Suite-run probe evaluations are
+        model-owned and never cascaded. Recipes/policies/probe-suites
+        stay immutable by design. No cascade, no force, no bulk, no
+        automatic cleanup.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -1124,6 +1148,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/probe-suites</code> / <code>GET {prefix}/probe-suites/&#123;suite_id&#125;</code> — immutable suites</li>
       <li><code>POST  {prefix}/suite-runs</code> — execute one named suite against one state (independent M4 evaluations, immutable run record)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs</code> / <code>GET {prefix}/models/&#123;id&#125;/suite-runs/&#123;run&#125;</code> — immutable suite-run history</li>
+      <li><code>DELETE {prefix}/models/&#123;id&#125;/suite-runs/&#123;run&#125;</code> — explicit verified suite-run deletion (scope + result-hash integrity + atomic; leaf record, no cascade; M68)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;</code> — suite-run records of ONE named suite (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;/summary</code> — bookkeeping summary of ONE suite's runs (count, ordered ids, earliest/latest; read-only)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-checkpoint/&#123;ckpt&#125;</code> — suite runs executed against ONE checkpoint state (read-only, deterministic, no aggregation)</li>
@@ -1135,9 +1160,11 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/workflows/recipes/&#123;recipe_id&#125;/runs</code> — cross-model run lineage of one recipe (read-only; 404 unknown recipe)</li>
       <li><code>POST  {prefix}/samples/generate</code> — deterministic generation from one explicit verified checkpoint (greedy / seeded temperature; inference only)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples</code> / <code>GET {prefix}/models/&#123;id&#125;/samples/&#123;sample&#125;</code> — immutable sample history</li>
+      <li><code>DELETE {prefix}/models/&#123;id&#125;/samples/&#123;sample&#125;</code> — explicit verified sample deletion (refused 409 while sample-quality measurements reference it; M68)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-checkpoint/&#123;ckpt&#125;</code> — samples generated from ONE checkpoint (read-only, deterministic, persisted identity authoritative)</li>
       <li><code>POST  {prefix}/models/&#123;id&#125;/samples/&#123;sample&#125;/quality</code> — per-sample likelihood measurement (sample-driven state resolution; causal-LM loss over generated targets; no body config)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality</code> / <code>GET {prefix}/models/&#123;id&#125;/sample-quality/&#123;eval&#125;</code> — immutable sample-evaluation history</li>
+      <li><code>DELETE {prefix}/models/&#123;id&#125;/sample-quality/&#123;eval&#125;</code> — explicit verified measurement deletion (leaf record; unblocks the sample; M68)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/records</code> — full immutable M16 sample-evaluation records (loss/perplexity included; read-only, deterministic, no statistics)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/by-sample/&#123;sample&#125;</code> — M16 measurements of ONE sample (read-only, deterministic, no statistics)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/by-checkpoint/&#123;checkpoint&#125;</code> — M16 measurements recorded under ONE checkpoint (read-only, deterministic, no statistics)</li>
@@ -2866,6 +2893,29 @@ def list_suite_runs_by_reused_count(model_id: str,
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.delete("/models/{model_id}/suite-runs/{suite_run_id}",
+            response_model=SuiteRunDeletionResult, tags=["suite-runs"],
+            responses={409: {"description": "integrity refusal — the "
+                            "record's persisted result_hash does not "
+                            "reproduce (never deletable, no force)"}})
+def delete_suite_run(model_id: str, suite_run_id: str) -> SuiteRunDeletionResult:
+    """Explicit VERIFIED suite-run retention (M68): delete exactly ONE
+    suite run. Scope (unknown model / unknown run / registry-invisible
+    manifest -> 404, nothing deleted), then INTEGRITY FIRST (the
+    persisted result_hash must reproduce; a tampered record -> 409,
+    never deletable). A suite run is a LEAF record — no reference
+    guard; its probe EVALUATIONS are model-owned and are never touched
+    (no cascade). Then ONE atomic removal of the run's own directory
+    with a deterministic files/bytes result. No cascade, no force, no
+    bulk mode."""
+    try:
+        return _forge().delete_suite_run(model_id, suite_run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/suite-runs/{suite_run_id}",
          response_model=SuiteRunRecord, tags=["suite-runs"])
 def get_suite_run(model_id: str, suite_run_id: str) -> SuiteRunRecord:
@@ -3275,6 +3325,46 @@ def list_samples_by_strategy(model_id: str, strategy: SampleStrategy
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.delete("/models/{model_id}/samples/{sample_id}",
+            response_model=SampleDeletionResult, tags=["sampling"],
+            responses={409: {"model": SampleDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (the sample-quality "
+                             "measurements) — or integrity refusal"}})
+def delete_sample(model_id: str, sample_id: str) -> SampleDeletionResult:
+    """Explicit VERIFIED sample retention (M68): delete exactly ONE
+    sample — only with live proof that nothing references it. Scope
+    (unknown model / unknown sample / registry-invisible -> 404,
+    nothing deleted); INTEGRITY FIRST (the persisted result_hash must
+    reproduce; tampered -> 409, never deletable); then the LIVE
+    reference guard — ANY sample-quality measurement referencing the
+    sample -> 409 with the ordered blocker list (the SAME measurement
+    ids the M19 by-sample listing reports). Then ONE atomic removal of
+    the sample's own directory with a deterministic files/bytes
+    result. No cascade (measurements are protected BY the guard), no
+    force, no bulk mode."""
+    try:
+        return _forge().delete_sample(model_id, sample_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # protection rejection: re-derive the ordered blocker list for
+        # a structured 409 detail (the M65 pattern; diagnostic only)
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().sample_deletion_blockers(model_id,
+                                                          sample_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "model_id": model_id,
+                    "sample_id": sample_id,
+                    "protected": True, "blockers": blockers}) from exc
+
+
 @api.get("/models/{model_id}/samples/{sample_id}",
          response_model=SampleRecord, tags=["sampling"])
 def get_sample(model_id: str, sample_id: str) -> SampleRecord:
@@ -3449,6 +3539,31 @@ def list_sample_quality_by_tokenizer(model_id: str, tokenizer_id: str
             model_id, tokenizer_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.delete("/models/{model_id}/sample-quality/{evaluation_id}",
+            response_model=SampleEvaluationDeletionResult,
+            tags=["sample-quality"],
+            responses={409: {"description": "integrity refusal — the "
+                            "record's persisted result_hash does not "
+                            "reproduce (never deletable, no force)"}})
+def delete_sample_evaluation(model_id: str,
+                             evaluation_id: str) -> SampleEvaluationDeletionResult:
+    """Explicit VERIFIED sample-quality measurement retention (M68):
+    delete exactly ONE measurement. Scope (unknown model / unknown
+    measurement / registry-invisible -> 404, nothing deleted), then
+    INTEGRITY FIRST (the persisted result_hash must reproduce;
+    tampered -> 409, never deletable). A measurement is a LEAF record
+    — no reference guard; deleting it is exactly what unblocks the
+    sample it measured (live through the M67 model guard). Then ONE
+    atomic removal with a deterministic files/bytes result. No
+    cascade, no force, no bulk mode."""
+    try:
+        return _forge().delete_sample_evaluation(model_id, evaluation_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @api.get("/models/{model_id}/sample-quality/{evaluation_id}",

@@ -77,7 +77,7 @@ from .schemas import (
     SuiteRunSummary,
     utcnow,
 )
-from .storage import atomic_write_json, read_json
+from .storage import atomic_delete_dir, atomic_write_json, read_json
 from .comparison import ComparisonEngine
 from .dataset import DatasetEngine
 from .evaluation import EvaluationEngine
@@ -396,6 +396,26 @@ class SuiteRunEngine:
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
+
+    def delete(self, suite_run_id: str) -> tuple[int, int]:
+        """Remove ONE suite run's directory ATOMICALLY (M68 low-level
+        primitive, the ``DatasetEngine.delete`` pattern): the run's own
+        single-manifest directory disappears in ONE ``os.rename`` to a
+        hidden ``.tmp-delete-*`` sibling the registry scans skip, so no
+        observer ever sees a half-deleted run. Returns
+        ``(files_removed, bytes_reclaimed)`` measured from the files as
+        they existed immediately before removal. The CALLER (the forge
+        facade) owns the safety decision — scope and the result-hash
+        integrity verification must have passed before this is called.
+        A suite run is a LEAF record: nothing persists a
+        ``suite_run_id``, and the probe EVALUATIONS it triggered are
+        MODEL-OWNED (inside models/<id>/evaluations/) — they are never
+        touched here (no cascade)."""
+        d = self._run_dir(suite_run_id)
+        files = sorted(p for p in d.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(d)
+        return len(files), nbytes
 
     def _persist(self, record: SuiteRunRecord) -> None:
         d = self._run_dir(record.suite_run_id)

@@ -80,7 +80,8 @@ from .schemas import (
     SampleRecord,
     SampleStrategy,
 )
-from .storage import Storage, atomic_write_json, read_json
+from .storage import (Storage, atomic_delete_dir,
+                      atomic_write_json, read_json)
 from .tokenizer import TokenizerEngine
 from .training import TrainingEngine
 
@@ -439,6 +440,22 @@ class SamplingEngine:
         }
         blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         return hashlib.sha256(blob).hexdigest()
+
+    def delete(self, model_id: str, sample_id: str) -> tuple[int, int]:
+        """Remove ONE sample's directory ATOMICALLY (M68 low-level
+        primitive, the ``DatasetEngine.delete`` pattern): the sample's
+        own single-manifest directory disappears in ONE ``os.rename``
+        to a hidden ``.tmp-delete-*`` sibling the registry scans skip.
+        Returns ``(files_removed, bytes_reclaimed)`` measured from the
+        files as they existed immediately before removal. The CALLER
+        (the forge facade) owns the safety decision — scope, the
+        result-hash integrity verification and the sample-quality
+        reference guard must have passed before this is called."""
+        sdir = self._sample_dir(model_id, sample_id)
+        files = sorted(p for p in sdir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(sdir)
+        return len(files), nbytes
 
     def _persist(self, record: SampleRecord) -> None:
         """Write one immutable sample manifest (atomic; never rewritten)."""

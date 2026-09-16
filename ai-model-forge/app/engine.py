@@ -57,6 +57,7 @@ from .schemas import (
     TokenizerDeletionResult,
     TokenizerRetentionOverview,
     TokenizerUsageOverview,
+    SuiteRunDeletionResult,
     SuiteRunRecord,
     SuiteRunRequest,
     SuiteRunSummary,
@@ -66,7 +67,9 @@ from .schemas import (
     WorkflowRecipeResolution,
     WorkflowStatus,
     SampleGenerateRequest,
+    SampleEvaluationDeletionResult,
     SampleEvaluationRecord,
+    SampleDeletionResult,
     SampleRecord,
     SampleStrategy,
     TokenizerConfig,
@@ -1943,6 +1946,38 @@ class ModelForge:
     def get_suite_run(self, model_id: str, suite_run_id: str) -> SuiteRunRecord:
         return self.suite_runs.get_suite_run(model_id, suite_run_id)
 
+    def delete_suite_run(self, model_id: str,
+                         suite_run_id: str) -> SuiteRunDeletionResult:
+        """Explicit VERIFIED suite-run retention (M68): remove ONE
+        suite run — after scope and integrity verification. The guard,
+        in order: (1) scope through the family getter (unknown model,
+        unknown run, or registry-invisible (unparseable manifest) run
+        -> FileNotFoundError, nothing deleted); (2) INTEGRITY FIRST
+        (the M61/M65/M67 ordering): the record's persisted
+        ``result_hash`` must reproduce from its semantic payload — a
+        tampered/corrupt record is REFUSED with RuntimeError (409);
+        (3) NO reference guard — a suite run is a LEAF record: nothing
+        persists a suite_run_id. Its probe EVALUATIONS are MODEL-OWNED
+        (inside models/<id>/evaluations/) and are never touched (no
+        cascade — they simply keep existing); (4) ATOMIC removal of
+        the run's own directory (``SuiteRunEngine.delete`` — the
+        ``DatasetEngine.delete`` pattern). No cascade, no force, no
+        bulk mode."""
+        record = self._scope_data_artifact(
+            lambda sid: self.suite_runs.get_suite_run(model_id, sid),
+            suite_run_id, "suite run")
+        if self.suite_runs.result_hash(record) != record.result_hash:
+            raise RuntimeError(
+                f"suite run '{suite_run_id}' failed integrity "
+                f"verification — refusing to delete corrupted storage")
+        files, nbytes = self.suite_runs.delete(suite_run_id)
+        log.info("M68 verified suite-run deletion %s (%d files, %d bytes)",
+                 suite_run_id, files, nbytes)
+        return SuiteRunDeletionResult(model_id=record.model_id,
+                                      suite_run_id=suite_run_id,
+                                      files_removed=files,
+                                      bytes_reclaimed=nbytes)
+
     def list_suite_runs_for_suite(self, model_id: str,
                                   suite_id: str) -> list[SuiteRunRecord]:
         """Immutable M10 suite-run records of ONE named suite (M21
@@ -2095,6 +2130,62 @@ class ModelForge:
         """One persisted immutable sample (404 unknown model or sample)."""
         return self.samples.get_sample(model_id, sample_id)
 
+    def sample_deletion_blockers(
+            self, model_id: str, sample_id: str
+    ) -> list[ArtifactDeletionBlocker]:
+        """The M68 sample deletion guard's ordered blocker list:
+        EXACTLY the sample-quality measurements referencing the sample
+        — the ONE M19 ``list_sample_evaluations_for_sample`` listing,
+        the same persisted evaluation ids, sorted. A measurement
+        persists ``sample_id`` OUTSIDE the sample's own directory
+        (sample-evaluations/<model_id>/), so deleting the sample would
+        leave it referencing a missing record — it blocks. Nothing
+        else references a sample. Zero storage, zero mutation."""
+        measurements = self.sample_quality \
+            .list_sample_evaluations_for_sample(model_id, sample_id)
+        if not measurements:
+            return []
+        ids = ", ".join(sorted(m.evaluation_id for m in measurements))
+        return [ArtifactDeletionBlocker(
+            reason="sample_quality",
+            detail=f"sample-quality measurement(s) '{ids}'")]
+
+    def delete_sample(self, model_id: str,
+                      sample_id: str) -> SampleDeletionResult:
+        """Explicit VERIFIED sample retention (M68): remove ONE
+        sample — only after proving, live, that nothing references it.
+        The guard, in order: (1) scope through the family getter
+        (unknown model, unknown sample, or registry-invisible
+        (unparseable manifest) sample -> FileNotFoundError, nothing
+        deleted); (2) INTEGRITY FIRST: the record's persisted
+        ``result_hash`` must reproduce — a tampered/corrupt sample is
+        REFUSED with RuntimeError (409); (3) the LIVE reference guard
+        (``sample_deletion_blockers`` — the ONE M19 listing: ANY
+        sample-quality measurement referencing the sample ->
+        ValueError listing the ordered blockers, so deletion can never
+        orphan a persisted measurement); (4) ATOMIC removal of the
+        sample's own directory (``SamplingEngine.delete``). No
+        cascade, no force, no bulk mode."""
+        record = self._scope_data_artifact(
+            lambda sid: self.samples.get_sample(model_id, sid),
+            sample_id, "sample")
+        if self.samples.result_hash(record) != record.result_hash:
+            raise RuntimeError(
+                f"sample '{sample_id}' failed integrity verification "
+                f"— refusing to delete corrupted storage")
+        blockers = self.sample_deletion_blockers(model_id, sample_id)
+        if blockers:
+            summary = "; ".join(f"{b.reason}: {b.detail}" for b in blockers)
+            raise ValueError(
+                f"sample '{sample_id}' of model '{model_id}' is "
+                f"referenced and cannot be deleted — {summary}")
+        files, nbytes = self.samples.delete(model_id, sample_id)
+        log.info("M68 verified sample deletion %s/%s (%d files, %d bytes)",
+                 model_id, sample_id, files, nbytes)
+        return SampleDeletionResult(model_id=model_id, sample_id=sample_id,
+                                    files_removed=files,
+                                    bytes_reclaimed=nbytes)
+
     def list_samples_for_checkpoint(self, model_id: str,
                                     checkpoint_id: str
                                     ) -> list[SampleRecord]:
@@ -2185,6 +2276,38 @@ class ModelForge:
         model or evaluation; read-only)."""
         return self.sample_quality.get_sample_evaluation(model_id,
                                                          evaluation_id)
+
+    def delete_sample_evaluation(
+            self, model_id: str,
+            evaluation_id: str) -> SampleEvaluationDeletionResult:
+        """Explicit VERIFIED sample-quality measurement retention
+        (M68): remove ONE measurement — after scope and integrity
+        verification. (1) scope through the family getter (unknown
+        model, unknown measurement, or registry-invisible ->
+        FileNotFoundError, nothing deleted); (2) INTEGRITY FIRST: the
+        record's persisted ``result_hash`` must reproduce —
+        tampered/corrupt -> RuntimeError (409); (3) NO reference
+        guard — a measurement is a LEAF record: nothing persists its
+        evaluation_id (deleting it is exactly what UNBLOCKS the
+        sample it measured, live through the M67 model guard's ONE
+        M66 analysis); (4) ATOMIC removal of the measurement's own
+        directory (``SampleQualityEngine.delete``). No cascade, no
+        force, no bulk mode."""
+        record = self._scope_data_artifact(
+            lambda eid: self.sample_quality.get_sample_evaluation(
+                model_id, eid),
+            evaluation_id, "sample evaluation")
+        if self.sample_quality.result_hash(record) != record.result_hash:
+            raise RuntimeError(
+                f"sample evaluation '{evaluation_id}' failed integrity "
+                f"verification — refusing to delete corrupted storage")
+        files, nbytes = self.sample_quality.delete(model_id, evaluation_id)
+        log.info("M68 verified sample-evaluation deletion %s/%s (%d files,"
+                 " %d bytes)", model_id, evaluation_id, files, nbytes)
+        return SampleEvaluationDeletionResult(
+            model_id=model_id, evaluation_id=evaluation_id,
+            sample_id=record.sample_id,
+            files_removed=files, bytes_reclaimed=nbytes)
 
     def list_sample_evaluations_for_sample(
             self, model_id: str, sample_id: str

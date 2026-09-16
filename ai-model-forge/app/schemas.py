@@ -925,8 +925,8 @@ class TokenizerUsageOverview(BaseModel):
 
 
 class ArtifactDeletionBlocker(BaseModel):
-    """Why ONE data artifact (dataset/tokenizer) may not be deleted
-    (M65 reference safety).
+    """Why ONE data artifact (dataset/tokenizer — M65 — or sample —
+    M68) may not be deleted (reference safety).
 
     ``reason`` is a stable category from the artifact kind's canonical
     M64 usage-category order (the SAME order the usage overview
@@ -1158,6 +1158,58 @@ class ModelRetentionOverview(BaseModel):
     integrity_verified: bool
     deletable: bool
     blockers: list[ModelDeletionBlocker] = Field(default_factory=list)
+
+
+class SuiteRunDeletionResult(BaseModel):
+    """Deterministic result of ONE explicit verified suite-run deletion
+    (M68): what was removed and how much storage it held. The suite
+    run's own directory (its single manifest) is gone atomically; the
+    probe EVALUATIONS it triggered are MODEL-OWNED (inside
+    models/{id}/evaluations/) and are never touched — no cascade."""
+
+    model_id: str
+    suite_run_id: str
+    files_removed: int
+    bytes_reclaimed: int
+
+
+class SampleDeletionResult(BaseModel):
+    """Deterministic result of ONE explicit verified sample deletion
+    (M68): what was removed and how much storage it held. The sample's
+    own directory is gone atomically; every other family's records are
+    untouched (sample-quality measurements were protected BY the
+    guard)."""
+
+    model_id: str
+    sample_id: str
+    files_removed: int
+    bytes_reclaimed: int
+
+
+class SampleEvaluationDeletionResult(BaseModel):
+    """Deterministic result of ONE explicit verified sample-quality
+    measurement deletion (M68): what was removed and how much storage
+    it held. The measurement's own directory is gone atomically;
+    nothing else changes — a measurement is a LEAF record."""
+
+    model_id: str
+    evaluation_id: str
+    sample_id: str
+    files_removed: int
+    bytes_reclaimed: int
+
+
+class SampleDeletionBlocked(BaseModel):
+    """The structured 409 detail of a REFUSED sample deletion (M68):
+    the ordered blocker list — the SAME categories and reference ids a
+    usage view of the sample would report — so a client can render
+    exactly what protects the sample."""
+
+    message: str
+    model_id: str
+    sample_id: str
+    protected: bool = True
+    blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #

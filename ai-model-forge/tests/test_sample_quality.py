@@ -26,7 +26,8 @@ measurement under sample-evaluations/, no auxiliary files, no .tmp, all
 pre-existing files byte-identical); read-only deterministic list/get;
 no_grad measurement through the existing forward path. Covered (HTTP):
 POST /models/{id}/samples/{sid}/quality (body-less), deterministic list
-and get, 404/409/422 behavior with zero growth, 405 on edit/delete,
+and get, 404/409/422 behavior with zero growth, 405 on edit,
+the M68 verified deletion,
 OpenAPI exposure. M1–M15 tests are untouched.
 """
 from __future__ import annotations
@@ -310,7 +311,16 @@ def test_first_generated_token_conditioned_on_prompt(env):
     allpos = F.cross_entropy(logits2[0, :-1].float(),
                              torch.tensor(ids[1:]), reduction="none")
     r = env.sq.run(env.big_model, s.sample_id)
-    assert abs(r.loss_nats - float(allpos[p_len - 1:].mean())) < 1e-6
+    # like-for-like: the record rounds metrics to 6 decimals (the
+    # schema contract) and the engine's float32 batch-mean sums in a
+    # different order than this recomputation, so compare against the
+    # ROUNDED recomputation with a few-ulp slack (the semantic claim —
+    # the measurement IS the mean NLL over exactly the generated
+    # positions — is unchanged; the old unrounded comparison was
+    # numerically invalid at the 1e-6 tolerance and flaked when the
+    # true value sat near a rounding boundary)
+    assert abs(r.loss_nats
+               - round(float(allpos[p_len - 1:].mean()), 6)) < 2e-6
     env.no_tmp()
 
 
@@ -739,10 +749,19 @@ def test_api_quality_post_list_get_determinism(api_client):
                          f"{e1['evaluation_id']}")
     assert one.status_code == 200
     assert one.json()["result_hash"] == e1["result_hash"]
-    # no edit/delete endpoints (405)
+    # no edit endpoint (405); DELETE is now the M68 verified-deletion
+    # route — deleting the measurement proves the record goes (the
+    # guarded lifecycle is covered in test_suite_sample_lifecycle.py)
     url1 = f"{MODELS}/{h['mid']}/sample-quality/{e1['evaluation_id']}"
     assert api_client.put(url1).status_code == 405
-    assert api_client.delete(url1).status_code == 405
+    d = api_client.delete(url1)
+    assert d.status_code == 200
+    dbody = d.json()
+    assert set(dbody) == {"model_id", "evaluation_id", "sample_id",
+                          "files_removed", "bytes_reclaimed"}
+    assert dbody["evaluation_id"] == e1["evaluation_id"]
+    assert dbody["sample_id"] == s1["sample_id"]
+    assert api_client.get(url1).status_code == 404
     # 404s
     assert api_client.post(_quality_url(h["mid"], "no-such-sample")
                            ).status_code == 404

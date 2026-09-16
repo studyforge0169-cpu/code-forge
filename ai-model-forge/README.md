@@ -2094,6 +2094,44 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 68 — explicit SUITE-RUN & SAMPLE LIFECYCLE
+  (`DELETE /models/{id}/suite-runs/{run}` + `DELETE /models/{id}/samples/{sample}`
+  + `DELETE /models/{id}/sample-quality/{eval}`)
+- **concept**: the root-level runtime records get their own VERIFIED
+  deletions (the M61/M65/M67 pattern) — which for the first time
+  creates a legitimate path to UNBLOCK a referenced model: delete the
+  referencing records and the M67 guard's live analysis (the ONE M66
+  usage view) lets the model go. The M67 guard code is untouched;
+  only its live input set shrinks
+- **the guard, per family**: scope (unknown model / unknown record /
+  registry-invisible (unparseable manifest) -> 404, nothing deleted)
+  -> INTEGRITY FIRST (the record's persisted `result_hash` must
+  reproduce from its semantic payload — the M65 tokenizer
+  content-hash pattern; tampered/corrupt -> 409, never deletable, no
+  force flag) -> blockers -> ONE atomic removal
+  (`atomic_delete_dir`, the `DatasetEngine.delete` pattern) with the
+  deterministic `{model_id, <record id>, files_removed,
+  bytes_reclaimed}` result
+- **blocker policy (explicit, from inspection)**: a suite run is a
+  LEAF record — nothing persists a `suite_run_id`; its probe
+  EVALUATIONS are model-owned (inside `models/{id}/evaluations/`) and
+  are NEVER touched (no cascade — they simply keep existing). A
+  sample-quality measurement is a LEAF record too — nothing persists
+  its evaluation_id; it deletes freely. A SAMPLE is BLOCKED while any
+  sample-quality measurement references it (the measurement persists
+  `sample_id` OUTSIDE the sample's directory — the same
+  reference-safety rule as every other family; the 409 carries the
+  typed ordered blocker list, the SAME measurement ids the M19
+  by-sample listing reports). Deleting the measurement is exactly
+  what unblocks the sample — and then the model
+- **OpenAPI**: path count UNCHANGED (93) — the three DELETEs are new
+  operations on the EXISTING resource paths (their GET-one routes
+  already live there); the spec's delete-operation set grows 4 -> 7
+- recipes / policies / probe-suite definitions remain IMMUTABLE by
+  design (no deletion); no cascade, no force, no bulk, no automatic
+  cleanup. Live certification ran the destructive paths on a
+  DISPOSABLE COPY only; production stays byte-identical
+
 ### Milestone 67 — explicit VERIFIED MODEL RETENTION
   (`DELETE /models/{model_id}` + `GET /models/{model_id}/retention`)
 - **concept**: the final lifecycle-safety rung. M66 made every
@@ -2719,7 +2757,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 641 tests
+pytest                       # 645 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3228,7 +3266,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 641 tests across 25 suites
+  tests/               # 645 tests across 26 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

@@ -589,14 +589,18 @@ def test_m66_api_model_usage(api_client):
     assert set(spec["paths"][NEW].keys()) == {"get"}
     for s in ("ModelUsageOverview", "ModelUsageCategory"):
         assert s in spec["components"]["schemas"], s
-    # M66 adds ZERO delete operations: the new usage path is GET-only,
-    # and the spec's total delete count is unchanged (the pre-existing
-    # model DELETE route — the M67 subject — stays exactly as it was)
+    # M66 itself added ZERO delete operations: the new usage path is
+    # GET-only. (M68 later added the three record-lifecycle DELETEs —
+    # suite-run/sample/sample-quality, operations on pre-existing
+    # resource paths — which is why the set below counts seven.)
     assert "delete" not in spec["paths"][NEW]
     deletes = [p for p, ops in spec["paths"].items() if "delete" in ops]
     assert sorted(deletes) == [
         "/api/v1/datasets/{dataset_id}",
         "/api/v1/models/{model_id}",
         "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}",
+        "/api/v1/models/{model_id}/sample-quality/{evaluation_id}",
+        "/api/v1/models/{model_id}/samples/{sample_id}",
+        "/api/v1/models/{model_id}/suite-runs/{suite_run_id}",
         "/api/v1/tokenizers/{tokenizer_id}",
     ]

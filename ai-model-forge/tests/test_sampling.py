@@ -544,11 +544,20 @@ def test_api_generate_list_get_determinism(api_client):
     assert t1.json()["generated_token_ids"] == \
         t2.json()["generated_token_ids"]
     assert t1.json()["result_hash"] == t2.json()["result_hash"]
-    # no update/delete paths exist (405)
+    # no update path exists (405); DELETE is now the M68
+    # verified-deletion route (s1 carries no quality measurement, so
+    # it deletes freely; the guarded lifecycle is covered in
+    # test_suite_sample_lifecycle.py)
     assert api_client.put(f"{MODELS}/{h['mid']}/samples/{s1['sample_id']}"
                           ).status_code == 405
-    assert api_client.delete(f"{MODELS}/{h['mid']}/samples/{s1['sample_id']}"
-                             ).status_code == 405
+    d = api_client.delete(f"{MODELS}/{h['mid']}/samples/{s1['sample_id']}")
+    assert d.status_code == 200
+    dbody = d.json()
+    assert set(dbody) == {"model_id", "sample_id", "files_removed",
+                          "bytes_reclaimed"}
+    assert dbody["sample_id"] == s1["sample_id"]
+    assert api_client.get(f"{MODELS}/{h['mid']}/samples/{s1['sample_id']}"
+                          ).status_code == 404
 
 
 def test_api_failure_paths_and_zero_manifest_growth(api_client):
