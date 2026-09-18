@@ -1212,6 +1212,74 @@ class SampleDeletionBlocked(BaseModel):
     blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
 
 
+class SuiteRunRetentionOverview(BaseModel):
+    """Read-only live-computed retention overview of ONE suite run
+    (M68): the deletion-readiness view — identity, the ordered
+    artifact files + total bytes of the run's OWN directory, the
+    record's result-hash integrity outcome, ``deletable`` (True iff
+    integrity passes — a suite run is a LEAF record: nothing persists
+    a suite_run_id, so the blocker list is always empty) and the
+    ordered blockers (the SAME list the DELETE guard refuses on).
+    Unknown or registry-invisible (unparseable manifest) run ->
+    FileNotFoundError (404 at the API). Zero storage, zero mutation,
+    byte-identical over unchanged state."""
+
+    model_id: str
+    suite_run_id: str
+    suite_id: str
+    created_at: datetime
+    files: list[str] = Field(default_factory=list)
+    size_bytes: int
+    integrity_verified: bool
+    deletable: bool
+    blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
+
+
+class SampleRetentionOverview(BaseModel):
+    """Read-only live-computed retention overview of ONE sample
+    (M68): the deletion-readiness view — identity, the ordered
+    artifact files + total bytes of the sample's OWN directory, the
+    record's result-hash integrity outcome, ``deletable`` (True iff
+    integrity passes AND no sample-quality measurement references the
+    sample — the ONE M19 listing) and the ordered blockers (the SAME
+    list the DELETE guard refuses on). A tampered sample is never
+    deletable; unknown or registry-invisible (unparseable manifest)
+    sample -> FileNotFoundError (404 at the API). Zero storage, zero
+    mutation, byte-identical over unchanged state."""
+
+    model_id: str
+    sample_id: str
+    checkpoint_id: str
+    created_at: datetime
+    files: list[str] = Field(default_factory=list)
+    size_bytes: int
+    integrity_verified: bool
+    deletable: bool
+    blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
+
+
+class SampleEvaluationRetentionOverview(BaseModel):
+    """Read-only live-computed retention overview of ONE sample-quality
+    measurement (M68): the deletion-readiness view — identity, the
+    ordered artifact files + total bytes of the measurement's OWN
+    directory, the record's result-hash integrity outcome,
+    ``deletable`` (True iff integrity passes — a measurement is a LEAF
+    record: nothing persists its evaluation_id, so the blocker list is
+    always empty) and the ordered blockers (the SAME list the DELETE
+    guard refuses on). Unknown or registry-invisible (unparseable
+    manifest) record -> FileNotFoundError (404 at the API). Zero
+    storage, zero mutation, byte-identical over unchanged state."""
+
+    model_id: str
+    sample_id: str
+    evaluation_id: str
+    files: list[str] = Field(default_factory=list)
+    size_bytes: int
+    integrity_verified: bool
+    deletable: bool
+    blockers: list[ArtifactDeletionBlocker] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Evaluation (read-only measurement of an existing model state)
 # --------------------------------------------------------------------------- #

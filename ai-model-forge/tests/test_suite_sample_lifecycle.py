@@ -31,6 +31,7 @@ import pytest
 
 from app.engine import ModelForge
 from app.schemas import (
+    ArtifactDeletionBlocker,
     ComparisonState,
     EvalStateKind,
     ModelCreateRequest,
@@ -504,7 +505,51 @@ def test_m68_api_lifecycle(api_client):
     assert ucats["sample"] == [sample_id]
     assert ucats["sample_quality"] == [quality_id]
 
-    # the sample DELETE is refused with the typed structured 409
+    # the three RETENTION VIEWS (M68 delta): deletion-readiness, the
+    # SAME decision the DELETE guard makes (the §5 invariant)
+    before = _inventory(storage_root)
+    rrun = api_client.get(
+        f"/api/v1/models/{mid}/suite-runs/{run_id}/retention")
+    rsmp = api_client.get(
+        f"/api/v1/models/{mid}/samples/{sample_id}/retention")
+    rqua = api_client.get(
+        f"/api/v1/models/{mid}/sample-quality/{quality_id}/retention")
+    assert rrun.status_code == rsmp.status_code == \
+        rqua.status_code == 200
+    vrun, vsmp, vqua = rrun.json(), rsmp.json(), rqua.json()
+    assert set(vrun) == {"model_id", "suite_run_id", "suite_id",
+                         "created_at", "files", "size_bytes",
+                         "integrity_verified", "deletable", "blockers"}
+    assert set(vsmp) == {"model_id", "sample_id", "checkpoint_id",
+                         "created_at", "files", "size_bytes",
+                         "integrity_verified", "deletable", "blockers"}
+    assert set(vqua) == {"model_id", "sample_id", "evaluation_id",
+                         "files", "size_bytes", "integrity_verified",
+                         "deletable", "blockers"}
+    # leaves are deletable; the sample is blocked by its measurement
+    assert vrun["deletable"] is True and vrun["integrity_verified"] is True
+    assert vrun["blockers"] == [] and vrun["files"] and \
+        vrun["size_bytes"] > 0
+    assert vqua["deletable"] is True and vqua["blockers"] == []
+    assert vsmp["deletable"] is False and \
+        vsmp["integrity_verified"] is True
+    assert vsmp["blockers"] == [
+        {"reason": "sample_quality",
+         "detail": f"sample-quality measurement(s) '{quality_id}'"}]
+    # determinism (byte-identical) + zero mutation
+    assert api_client.get(
+        f"/api/v1/models/{mid}/samples/{sample_id}/retention"
+    ).content == rsmp.content
+    assert _inventory(storage_root) == before
+    # unknown ids -> 404
+    for path in (f"/api/v1/models/{mid}/suite-runs/no-such/retention",
+                 f"/api/v1/models/{mid}/samples/no-such/retention",
+                 f"/api/v1/models/{mid}/sample-quality/no-such/retention",
+                 "/api/v1/models/no-m68/suite-runs/x/retention"):
+        assert api_client.get(path).status_code == 404, path
+
+    # the sample DELETE is refused with the typed structured 409 —
+    # and its blockers are EXACTLY the retention view's blockers
     before = _inventory(storage_root)
     d = api_client.delete(f"/api/v1/models/{mid}/samples/{sample_id}")
     assert d.status_code == 409, d.text
@@ -516,6 +561,7 @@ def test_m68_api_lifecycle(api_client):
     assert detail["blockers"] == [
         {"reason": "sample_quality",
          "detail": f"sample-quality measurement(s) '{quality_id}'"}]
+    assert detail["blockers"] == vsmp["blockers"]   # view == guard
     assert _inventory(storage_root) == before
 
     # the model DELETE is still refused (M67 surface, untouched guard)
@@ -537,12 +583,19 @@ def test_m68_api_lifecycle(api_client):
                         "bytes_reclaimed": d.json()["bytes_reclaimed"]}
     assert d.json()["bytes_reclaimed"] > 0
 
+    # the sample's retention view flips to deletable, live (no cache)
+    fsmp = api_client.get(
+        f"/api/v1/models/{mid}/samples/{sample_id}/retention").json()
+    assert fsmp["deletable"] is True and fsmp["blockers"] == []
     d = api_client.delete(f"/api/v1/models/{mid}/samples/{sample_id}")
     assert d.status_code == 200, d.text
     body = d.json()
     assert set(body) == {"model_id", "sample_id", "files_removed",
                          "bytes_reclaimed"}
     assert body["files_removed"] == 1 and body["bytes_reclaimed"] > 0
+    # DELETE stats == the retention view's artifact accounting (§5)
+    assert body["files_removed"] == len(fsmp["files"])
+    assert body["bytes_reclaimed"] == fsmp["size_bytes"]
 
     d = api_client.delete(
         f"/api/v1/models/{mid}/suite-runs/{run_id}")
@@ -575,10 +628,11 @@ def test_m68_api_lifecycle(api_client):
         assert r1.status_code == 404, path
         assert r1.content == r2.content    # deterministic repeats
 
-    # OpenAPI: 93 paths (the three DELETEs are new OPERATIONS on the
-    # EXISTING resource paths — zero new paths); delete set == 7
+    # OpenAPI: 96 paths (the three M68 DELETEs are new OPERATIONS on
+    # EXISTING resource paths; the three M68-delta retention views are
+    # new GET-only paths); delete set == 7 (unchanged by the delta)
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 93
+    assert len(spec["paths"]) == 96
     for path, get_and_delete in (
             ("/api/v1/models/{model_id}/suite-runs/{suite_run_id}", True),
             ("/api/v1/models/{model_id}/samples/{sample_id}", True),
@@ -599,9 +653,168 @@ def test_m68_api_lifecycle(api_client):
         "/api/v1/tokenizers/{tokenizer_id}",
     ]
     for s in ("SuiteRunDeletionResult", "SampleDeletionResult",
-              "SampleEvaluationDeletionResult", "SampleDeletionBlocked"):
+              "SampleEvaluationDeletionResult", "SampleDeletionBlocked",
+              "SuiteRunRetentionOverview", "SampleRetentionOverview",
+              "SampleEvaluationRetentionOverview"):
         assert s in spec["components"]["schemas"], s
+    # the three retention routes are GET-only
+    for path in ("/api/v1/models/{model_id}/suite-runs/{suite_run_id}"
+                 "/retention",
+                 "/api/v1/models/{model_id}/samples/{sample_id}"
+                 "/retention",
+                 "/api/v1/models/{model_id}/sample-quality/"
+                 "{evaluation_id}/retention"):
+        assert set(spec["paths"][path].keys()) == {"get"}, path
     # the 409 response model is documented on the sample DELETE
     assert spec["paths"]["/api/v1/models/{model_id}/samples/{sample_id}"][
         "delete"]["responses"]["409"]["content"]["application/json"][
         "schema"]["$ref"] == "#/components/schemas/SampleDeletionBlocked"
+
+
+# --------------------------------------------------------------------------- #
+# Retention views (M68 delta): the §5 invariant — retention.deletable ==
+# DELETE would succeed, retention.blockers == DELETE blockers — plus
+# integrity, live recompute, determinism and zero mutation.
+# --------------------------------------------------------------------------- #
+
+def test_m68_retention_views(tmp_path):
+    forge = ModelForge(root=tmp_path)
+    up = forge.upload_dataset([("m68r.txt", _corpus(180, "m68r"))],
+                              name="m68r-ds")
+    ds = up["dataset_id"]
+    tok = forge.train_tokenizer(
+        TokenizerConfig(name="m68r-tok", vocab_size=320),
+        dataset_id=ds).id
+    forge.tokenize_dataset(ds, tok)
+    forge.register_probe_suite(ProbeSuiteCreateRequest(
+        suite_id="m68r-suite", description="M68r fixture",
+        probes=[SuiteProbe(dataset_id=ds, split="validation",
+                           tokenizer_id=tok, batch_size=8,
+                           max_seq_len=32, seed=42)]))
+    model = _make_model(forge, "m68r-model", 9)
+    _train(forge, model, ds, tok, seed=9)
+    run = forge.run_suite(SuiteRunRequest(
+        model_id=model, suite_id="m68r-suite",
+        state=ComparisonState(state_kind=EvalStateKind.CURRENT)))
+    best = forge.select_best_checkpoint(model).checkpoint.checkpoint_id
+    sample = forge.generate_sample(SampleGenerateRequest(
+        model_id=model, checkpoint_id=best, tokenizer_id=tok,
+        prompt="canyon meadow", strategy=SampleStrategy.GREEDY,
+        max_new_tokens=6))
+    quality = forge.evaluate_sample(model, sample.sample_id)
+
+    before = _inventory(tmp_path)
+
+    # ---- the three views: shapes, leaves, blocked sample ------------- #
+    vrun = forge.suite_run_retention_overview(model, run.suite_run_id)
+    vsmp = forge.sample_retention_overview(model, sample.sample_id)
+    vqua = forge.sample_evaluation_retention_overview(
+        model, quality.evaluation_id)
+    assert vrun.model_id == vsmp.model_id == vqua.model_id == model
+    assert vrun.suite_run_id == run.suite_run_id
+    assert vrun.suite_id == "m68r-suite"
+    assert vsmp.sample_id == sample.sample_id
+    assert vsmp.checkpoint_id == best
+    assert vqua.sample_id == sample.sample_id
+    assert vqua.evaluation_id == quality.evaluation_id
+    # leaves: integrity ok, no blockers, deletable
+    assert vrun.integrity_verified is True and vrun.blockers == []
+    assert vrun.deletable is True
+    assert vqua.integrity_verified is True and vqua.blockers == []
+    assert vqua.deletable is True
+    # the sample: blocked by exactly its measurement
+    assert vsmp.integrity_verified is True
+    assert vsmp.blockers == [ArtifactDeletionBlocker(
+        reason="sample_quality",
+        detail=f"sample-quality measurement(s) '{quality.evaluation_id}'")]
+    assert vsmp.deletable is False
+
+    # artifact accounting == independent walks of the record dirs
+    for view, rdir in ((vrun, tmp_path / "suite-runs" / run.suite_run_id),
+                       (vsmp, tmp_path / "samples" / model /
+                        f"sample-{sample.sample_id}"),
+                       (vqua, tmp_path / "sample-evaluations" / model /
+                        f"evaluation-{quality.evaluation_id}")):
+        walk = sorted(p.relative_to(rdir).as_posix()
+                      for p in rdir.rglob("*") if p.is_file())
+        assert view.files == walk and len(view.files) >= 1
+        assert view.size_bytes == sum(p.stat().st_size
+                                      for p in rdir.rglob("*")
+                                      if p.is_file())
+
+    # ---- §5 invariant, blocked direction ------------------------------ #
+    with pytest.raises(ValueError):
+        forge.delete_sample(model, sample.sample_id)
+    # (the refusal wrote nothing)
+    assert _inventory(tmp_path) == before
+
+    # ---- tampered sample: integrity_verified False, never deletable --- #
+    sdir = tmp_path / "samples" / model / f"sample-{sample.sample_id}"
+    original = (sdir / "manifest.json").read_bytes()
+    rec = json.loads(original)
+    rec["prompt"] = "tampered prompt"
+    (sdir / "manifest.json").write_text(json.dumps(rec))
+    tampered = forge.sample_retention_overview(model, sample.sample_id)
+    assert tampered.integrity_verified is False
+    assert tampered.deletable is False          # integrity gates deletion
+    with pytest.raises(RuntimeError):
+        forge.delete_sample(model, sample.sample_id)
+    assert _inventory(tmp_path) != before       # the tampered bytes only
+    (sdir / "manifest.json").write_bytes(original)
+    assert _inventory(tmp_path) == before
+    # restored: blocked again (integrity flips back, blocker remains)
+    restored = forge.sample_retention_overview(model, sample.sample_id)
+    assert restored.integrity_verified is True
+    assert restored.deletable is False and restored.blockers == vsmp.blockers
+
+    # ---- determinism + zero mutation ----------------------------------- #
+    assert forge.suite_run_retention_overview(
+        model, run.suite_run_id).model_dump(mode="json") == \
+        vrun.model_dump(mode="json")
+    assert forge.sample_retention_overview(
+        model, sample.sample_id).model_dump(mode="json") == \
+        vsmp.model_dump(mode="json")
+    assert forge.sample_evaluation_retention_overview(
+        model, quality.evaluation_id).model_dump(mode="json") == \
+        vqua.model_dump(mode="json")
+    assert _inventory(tmp_path) == before
+
+    # ---- §5 invariant, deletable direction + live recompute ----------- #
+    # delete the measurement (leaf, deletable per its view): stats ==
+    # the view's accounting
+    r = forge.delete_sample_evaluation(model, quality.evaluation_id)
+    assert r.files_removed == len(vqua.files)
+    assert r.bytes_reclaimed == vqua.size_bytes
+    # the sample's view flips to deletable, live
+    flipped = forge.sample_retention_overview(model, sample.sample_id)
+    assert flipped.deletable is True and flipped.blockers == []
+    assert flipped.integrity_verified is True
+    r = forge.delete_sample(model, sample.sample_id)
+    assert r.files_removed == len(flipped.files)
+    assert r.bytes_reclaimed == flipped.size_bytes
+    # the suite run (leaf, deletable per its view)
+    r = forge.delete_suite_run(model, run.suite_run_id)
+    assert r.files_removed == len(vrun.files)
+    assert r.bytes_reclaimed == vrun.size_bytes
+    # the model's external references drained to zero -> deletable
+    mret = forge.model_retention_overview(model)
+    assert mret.deletable is True and mret.blockers == []
+    # (and the M66 usage view agrees: external references drained)
+    usage = forge.model_usage_overview(model)
+    assert usage.external_references == 0
+    mres = forge.delete_model(model)
+    assert mres.files_removed == len(mret.files)
+    assert mres.bytes_reclaimed == mret.size_bytes
+
+    # ---- unknowns -> FileNotFoundError on all three views -------------- #
+    for fn, args in (
+            (forge.suite_run_retention_overview, (model, "no-such")),
+            (forge.sample_retention_overview, (model, "no-such")),
+            (forge.sample_evaluation_retention_overview,
+             (model, "no-such")),
+            (forge.suite_run_retention_overview, ("no-model", "x")),
+            (forge.sample_retention_overview, ("no-model", "x")),
+            (forge.sample_evaluation_retention_overview,
+             ("no-model", "x"))):
+        with pytest.raises(FileNotFoundError):
+            fn(*args)

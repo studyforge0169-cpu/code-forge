@@ -70,6 +70,9 @@ from .schemas import (
     SampleEvaluationDeletionResult,
     SampleEvaluationRecord,
     SampleDeletionResult,
+    SampleEvaluationRetentionOverview,
+    SampleRetentionOverview,
+    SuiteRunRetentionOverview,
     SampleRecord,
     SampleStrategy,
     TokenizerConfig,
@@ -1978,6 +1981,38 @@ class ModelForge:
                                       files_removed=files,
                                       bytes_reclaimed=nbytes)
 
+    def suite_run_retention_overview(
+            self, model_id: str,
+            suite_run_id: str) -> SuiteRunRetentionOverview:
+        """Read-only live-computed retention overview of ONE suite run
+        (M68): the deletion-readiness view — identity, the ordered
+        artifact files + total bytes of the run's OWN directory, the
+        record's result-hash integrity outcome, ``deletable`` and the
+        ordered blockers (the SAME list the DELETE guard refuses on —
+        always empty: a suite run is a LEAF record, nothing persists
+        a suite_run_id). A tampered/corrupt record is never deletable;
+        an unknown or registry-invisible (unparseable manifest) run ->
+        FileNotFoundError (404 at the API). Zero storage, zero
+        mutation, byte-identical over unchanged state."""
+        record = self._scope_data_artifact(
+            lambda sid: self.suite_runs.get_suite_run(model_id, sid),
+            suite_run_id, "suite run")
+        files, nbytes = self._artifact_files(
+            self.suite_runs._run_dir(suite_run_id))
+        integrity_verified = (
+            self.suite_runs.result_hash(record) == record.result_hash)
+        blockers: list[ArtifactDeletionBlocker] = []
+        return SuiteRunRetentionOverview(
+            model_id=record.model_id,
+            suite_run_id=suite_run_id,
+            suite_id=record.suite_id,
+            created_at=record.created_at,
+            files=files,
+            size_bytes=nbytes,
+            integrity_verified=integrity_verified,
+            deletable=integrity_verified and not blockers,
+            blockers=blockers)
+
     def list_suite_runs_for_suite(self, model_id: str,
                                   suite_id: str) -> list[SuiteRunRecord]:
         """Immutable M10 suite-run records of ONE named suite (M21
@@ -2186,6 +2221,39 @@ class ModelForge:
                                     files_removed=files,
                                     bytes_reclaimed=nbytes)
 
+    def sample_retention_overview(
+            self, model_id: str,
+            sample_id: str) -> SampleRetentionOverview:
+        """Read-only live-computed retention overview of ONE sample
+        (M68): the deletion-readiness view — identity, the ordered
+        artifact files + total bytes of the sample's OWN directory,
+        the record's result-hash integrity outcome, ``deletable``
+        (True iff integrity passes AND the ONE M19 listing finds no
+        sample-quality measurement referencing it) and the ordered
+        blockers (the SAME list the DELETE guard refuses on). A
+        tampered/corrupt sample is never deletable; an unknown or
+        registry-invisible (unparseable manifest) sample ->
+        FileNotFoundError (404 at the API). Zero storage, zero
+        mutation, byte-identical over unchanged state."""
+        record = self._scope_data_artifact(
+            lambda sid: self.samples.get_sample(model_id, sid),
+            sample_id, "sample")
+        files, nbytes = self._artifact_files(
+            self.samples._sample_dir(model_id, sample_id))
+        integrity_verified = (
+            self.samples.result_hash(record) == record.result_hash)
+        blockers = self.sample_deletion_blockers(model_id, sample_id)
+        return SampleRetentionOverview(
+            model_id=model_id,
+            sample_id=sample_id,
+            checkpoint_id=record.checkpoint_id,
+            created_at=record.created_at,
+            files=files,
+            size_bytes=nbytes,
+            integrity_verified=integrity_verified,
+            deletable=integrity_verified and not blockers,
+            blockers=blockers)
+
     def list_samples_for_checkpoint(self, model_id: str,
                                     checkpoint_id: str
                                     ) -> list[SampleRecord]:
@@ -2308,6 +2376,39 @@ class ModelForge:
             model_id=model_id, evaluation_id=evaluation_id,
             sample_id=record.sample_id,
             files_removed=files, bytes_reclaimed=nbytes)
+
+    def sample_evaluation_retention_overview(
+            self, model_id: str,
+            evaluation_id: str) -> SampleEvaluationRetentionOverview:
+        """Read-only live-computed retention overview of ONE
+        sample-quality measurement (M68): the deletion-readiness view
+        — identity, the ordered artifact files + total bytes of the
+        measurement's OWN directory, the record's result-hash
+        integrity outcome, ``deletable`` and the ordered blockers (the
+        SAME list the DELETE guard refuses on — always empty: a
+        measurement is a LEAF record, nothing persists its
+        evaluation_id). A tampered/corrupt record is never deletable;
+        an unknown or registry-invisible (unparseable manifest) record
+        -> FileNotFoundError (404 at the API). Zero storage, zero
+        mutation, byte-identical over unchanged state."""
+        record = self._scope_data_artifact(
+            lambda eid: self.sample_quality.get_sample_evaluation(
+                model_id, eid),
+            evaluation_id, "sample-quality measurement")
+        files, nbytes = self._artifact_files(
+            self.sample_quality._evaluation_dir(model_id, evaluation_id))
+        integrity_verified = (
+            self.sample_quality.result_hash(record) == record.result_hash)
+        blockers: list[ArtifactDeletionBlocker] = []
+        return SampleEvaluationRetentionOverview(
+            model_id=model_id,
+            sample_id=record.sample_id,
+            evaluation_id=evaluation_id,
+            files=files,
+            size_bytes=nbytes,
+            integrity_verified=integrity_verified,
+            deletable=integrity_verified and not blockers,
+            blockers=blockers)
 
     def list_sample_evaluations_for_sample(
             self, model_id: str, sample_id: str

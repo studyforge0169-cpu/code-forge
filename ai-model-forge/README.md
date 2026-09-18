@@ -2124,13 +2124,24 @@ generation never trains, evaluates, scores, ranks or judges output.
   typed ordered blocker list, the SAME measurement ids the M19
   by-sample listing reports). Deleting the measurement is exactly
   what unblocks the sample — and then the model
-- **OpenAPI**: path count UNCHANGED (93) — the three DELETEs are new
-  operations on the EXISTING resource paths (their GET-one routes
-  already live there); the spec's delete-operation set grows 4 -> 7
+- **retention views (M68 delta)**: `GET
+  /models/{id}/suite-runs/{run}/retention`, `GET
+  /models/{id}/samples/{sample}/retention` and `GET
+  /models/{id}/sample-quality/{eval}/retention` — the read-only
+  deletion-readiness view per record (identity, ordered artifact
+  files + bytes, the result-hash integrity outcome, `deletable`,
+  ordered blockers), computed live with zero storage; the required
+  invariant holds by construction: `retention.deletable` == DELETE
+  would succeed and `retention.blockers` == the DELETE 409 blockers
+  (both directions proven in tests and live)
+- **OpenAPI**: 93 -> 96 paths (the three M68 DELETEs are new
+  operations on the EXISTING resource paths — their GET-one routes
+  already live there; the three M68-delta retention views are new
+  GET-only paths); the spec's delete-operation set grows 4 -> 7
 - recipes / policies / probe-suite definitions remain IMMUTABLE by
   design (no deletion); no cascade, no force, no bulk, no automatic
-  cleanup. Live certification ran the destructive paths on a
-  DISPOSABLE COPY only; production stays byte-identical
+  cleanup. Live certification ran the destructive paths on
+  DISPOSABLE COPIES only; production stays byte-identical
 
 ### Milestone 67 — explicit VERIFIED MODEL RETENTION
   (`DELETE /models/{model_id}` + `GET /models/{model_id}/retention`)
@@ -2757,7 +2768,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 645 tests
+pytest                       # 646 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3266,7 +3277,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 645 tests across 26 suites
+  tests/               # 646 tests across 26 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

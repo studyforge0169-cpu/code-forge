@@ -1,276 +1,265 @@
-# Milestone 68 — Explicit Suite-Run & Sample Lifecycle: Final Report
+# Milestone 68 — Explicit Verified Suite-Run & Sample Lifecycle: Final Report
 
-**Date:** 2026-09-16 · **Branch:** `arena/01a071e9-code-forge` · **Status:** COMPLETE
+**Date:** 2026-09-18 (delta) · initial delivery 2026-09-16 · **Branch:**
+`arena/01a071e9-code-forge` · **Status:** COMPLETE (initial delivery +
+spec-compliance delta)
 
-The root-level runtime records — suite runs, samples, sample-quality
-measurements — get their own explicit, verified, atomic deletions (the
-M61/M65/M67 pattern), which for the first time creates a legitimate
-path to **unblock a referenced model**: delete the referencing records
-and the M67 guard's live analysis lets the model go. **Live-certified
-24/24; production byte-identical; all destructive certification on a
-discarded copy.** Zero new OpenAPI paths (the three DELETEs are new
-operations on existing resource paths); the M67 guard code is
-untouched — only its live input set can shrink.
+M68 gives the root-level runtime records that externally reference
+models their own explicit, verified, atomic deletions — which for the
+first time lets M67's model blocker surface legitimately shrink when
+those records are intentionally removed. Delivered in two phases: the
+initial implementation (from the M67 report's ready-to-paste prompt),
+then this spec-compliance delta against the authoritative detailed
+spec — whose audit found ONE gap (§5 retention views) and closed it.
 
 ---
 
-## 1. Inspection & Baseline
+## 1. Scope & Inspection
 
-**Environment event (disclosed):** the sandbox re-provisioned a FOURTH
-time mid-session — git sat at the initial commit `f86b670` with all
-milestone work untracked (the platform reset `.git` to the session's
-starting state while the working tree kept the latest snapshot), and
-`/home/user/venv` plus the production root were gone. Recovery (the
-proven protocol, ~4 min): `git fetch origin arena/01a071e9-code-forge
-&& git reset --mixed FETCH_HEAD` (HEAD `26eda92` == remote tip,
-worktree clean); venv rebuilt (torch 2.14.0+cu130, fastapi 0.141.1,
-pydantic 2.13.5); production root rebuilt via
-`m62_production_rebuild.py` — SAME certified structure but NEW
-content-derived ids (timestamps in the rebuild inputs): dataset
-`e7ee867f06df` (16 refs: 6/2/4/2/0/1/1), tokenizer `dbb34eaa8804`
-(15 refs: 6/2/4/2/0/0/0/1), model `3770ca1bfa23` (M62 13/10/3);
-`m68_pre.sha256` captured (52 files / 8,926,410 B / 0 tmp). **Baseline
-verified after recovery:** 641 passed (exit 0), OpenAPI 93 paths,
-production facts re-derived through the facade (M66 usage
-6/13/3/4/2/2/0/0/0/1/0 = 30 internal + 1 external; M67 retention
-integrity True / deletable False / blockers exactly
-`[workflow_recipe: m62-live-loop]` / 40 files / 8,874,613 B).
+**Selected runtime families (from repository facts, §2's conditions
+A+B+C):** suite runs (`suite-runs/<suite_run_id>/`, record id
+`suite_run_id`, model ref `model_id`), samples
+(`samples/<model_id>/sample-<id>/`, `sample_id`, `model_id` +
+`checkpoint_id`), sample-quality measurements
+(`sample-evaluations/<model_id>/evaluation-<id>/`, `evaluation_id`,
+`sample_id` + `model_id`). All three persist independently of
+`models/<id>/`, are M67 external blockers, have stable manifests and
+public GET-one routes. **Excluded by inspection:** workflow recipes
+and gate policies (registry-level, immutable by design — never folded
+into runtime-record deletion); probe-suite definitions (no model
+reference). **Inspected topology (the §3 dependency directions):**
+NOTHING persists a `suite_run_id` (leaf) and NOTHING persists a
+measurement `evaluation_id` (leaf), while a measurement persists
+`sample_id` OUTSIDE the sample's directory — so sample deletion is
+blocked by its measurements, and suite runs / measurements are leaves.
+Each family has a persisted `result_hash` (sha256 over the semantic
+payload) — a real integrity tier for these weights-less records.
+**Baselines:** initial delivery — HEAD `26eda92` (M67), 641 tests,
+OpenAPI 93, production 52 files / 8,926,410 B (post-4th-re-provision
+rebuild, `m68_pre.sha256`); delta — HEAD `4d763fa` (M68), 646 tests
+(after initial delivery), OpenAPI 93, production 52 files /
+8,926,403 B (post-5th-re-provision rebuild,
+`m68_retention_pre.sha256`; see §7). **M67's external blocker
+families that can block model deletion (§1.12):** suite_run, sample,
+sample_quality, workflow_recipe, policy — M68 makes the first three
+deletable; recipes/policies stay immutable by design.
 
-**Inspected before any code:** the three record families' engines and
-layouts (all **manifest-only** single-file records: `suite-runs/<id>/`,
-`samples/<model_id>/sample-<id>/`,
-`sample-evaluations/<model_id>/evaluation-<id>/`); their loaders
-(`get_suite_run` / `get_sample` / `get_sample_evaluation` —
-FileNotFoundError for unknown model/record, pydantic validation on
-load); their **persisted `result_hash`** fields — each family has a
-`@staticmethod result_hash(record)` computing a sha256 over the
-record's semantic payload (excluding ids/timestamps/durations), which
-gives these weights-less families a REAL integrity tier (the M65
-tokenizer content-hash pattern); the reference topology — **nothing
-persists a `suite_run_id`** (leaf record), **nothing persists a
-sample-quality `evaluation_id`** (leaf record), while
-`SampleEvaluationRecord` persists `sample_id` OUTSIDE the sample's
-directory (a real reference — the candidate blocker); the M65
-`DatasetEngine.delete` low-level pattern, `_scope_data_artifact`
-(catches ValueError subclasses — pydantic ValidationError and
-json.JSONDecodeError both map to registry-invisible 404),
-`atomic_delete_dir`, and the ONE M19
-`list_sample_evaluations_for_sample` filter; the API route conventions
-(each family's GET-one route is model-scoped:
-`/models/{model_id}/suite-runs/{suite_run_id}` etc.); and the M15/M16
-tests' "no edit/delete endpoints (405)" contract assertions.
+## 2. Implementation
 
-## 2. Suite-Run & Sample Retention Architecture
+**Initial delivery (commits `c900c12` + `4d763fa`):** three family
+low-level `delete()` primitives (measure + `atomic_delete_dir`, the
+`DatasetEngine.delete` pattern — no raw rmtree anywhere); facade
+guards `delete_suite_run`, `sample_deletion_blockers` +
+`delete_sample`, `delete_sample_evaluation` — each in the
+M61/M65/M67 order: scope (family getter through
+`_scope_data_artifact`: unknown model/record or registry-invisible →
+404, nothing deleted) → INTEGRITY FIRST (persisted `result_hash`
+must reproduce; tampered → RuntimeError → 409, never deletable, no
+force) → blockers (samples only: the ONE M19
+`list_sample_evaluations_for_sample` listing → typed 409
+`{message, model_id, sample_id, protected, blockers}`) → atomic
+removal with typed `{model_id, <record id>, files_removed,
+bytes_reclaimed}` results. Three DELETE routes ON EXISTING resource
+paths (the repo's model-scoped convention): `DELETE
+/models/{id}/suite-runs/{run}`, `DELETE /models/{id}/samples/{sample}`,
+`DELETE /models/{id}/sample-quality/{eval}` — zero duplicate paths,
+delete-operation set 4 → 7. **No second scanner anywhere:** the
+sample blocker list is the ONE M19 listing; the model-side effect
+needs NO new analysis (the M67 guard reads the ONE M66 usage view,
+which reads the ONE family listings — deletions shrink those
+listings live). **Spec-compliance delta (this delivery):** the §5
+gap closed — three read-only retention views following the
+M65/M67 pattern: `GET /models/{id}/suite-runs/{run}/retention`, `GET
+/models/{id}/samples/{sample}/retention`, `GET
+/models/{id}/sample-quality/{eval}/retention` (schemas
+`SuiteRunRetentionOverview` / `SampleRetentionOverview` /
+`SampleEvaluationRetentionOverview`: identity, ordered artifact
+files, size_bytes, integrity_verified, deletable, ordered blockers —
+computed live, zero storage; engine methods
+`suite_run_retention_overview` / `sample_retention_overview` /
+`sample_evaluation_retention_overview` reuse the same scope
+resolution, `_artifact_files` walk, result-hash check and the ONE M19
+listing the guards use). OpenAPI 93 → 96 (three GET-only paths; zero
+new DELETE routes in the delta). The M67 guard code is untouched
+throughout — only its live input set can shrink.
 
-**The inspection-driven decision (the one my M68 prompt left open):**
-sample-quality measurements **block** sample deletion — a measurement
-persists `sample_id` outside the sample's own directory, exactly the
-reference-safety rule every other family follows (the same reasoning
-that made samples block model deletion in M66/M67). Consequently the
-measurement needs its own deletion route for the unblock chain to
-complete — **three new deletions, not two**. And following the repo's
-actual route conventions (model-scoped, mirroring each family's
-GET-one route — the prompt's root-level `/suite-runs/{id}` path was
-adjusted to the repository's real convention, avoiding a second
-resolution mechanism), all three DELETEs landed on **existing resource
-paths**: `DELETE /models/{id}/suite-runs/{run}`,
-`DELETE /models/{id}/samples/{sample}`,
-`DELETE /models/{id}/sample-quality/{eval}`. **Schemas:**
-`SuiteRunDeletionResult`, `SampleDeletionResult`,
-`SampleEvaluationDeletionResult` (typed `{model_id, <record id>,
-[sample_id,] files_removed, bytes_reclaimed}`) and
-`SampleDeletionBlocked` (the structured 409); `ArtifactDeletionBlocker`
-reused for the sample blockers (docstring extended to cover samples).
-**Engine:** one low-level `delete()` per family engine
-(`SuiteRunEngine` / `SamplingEngine` / `SampleQualityEngine` — measure
-+ `atomic_delete_dir`, the `DatasetEngine.delete` pattern, caller owns
-the safety decision). **Facade:** `delete_suite_run`,
-`sample_deletion_blockers` + `delete_sample`, `delete_sample_evaluation`
-— full guards, no second scanner (the blocker list comes from the ONE
-M19 listing; the model-side effect needs no new analysis at all: the
-M67 guard reads the ONE M66 usage view, which reads the ONE family
-listings — deletions simply shrink those listings live).
+## 3. Tests
 
-## 3. Deletion Safety
+`tests/test_suite_sample_lifecycle.py` (initial: 4 tests → 645 total;
+delta: +1 test and HTTP extensions → **646 total**). Initial
+coverage: suite-run deletion (stats == independent walk, only its
+directory removed, probe evaluations preserved, repeat/unknown →
+FileNotFoundError, tampered-hash → RuntimeError, corrupt manifest →
+registry-invisible 404, both with pre/post SHA-256 equality and
+restore-then-delete round-trips); sample + measurement (typed
+blocker == the independent manifest-parse oracle, zero mutation on
+refusal, exact stats and isolation, unknowns, tamper/corrupt
+refusals); the unblock chains (both chains step-by-step with the
+M66/M67 views and the model DELETE agreeing at every step, ending in
+exact model-deletion stats); the full HTTP lifecycle (fixture through
+public routes, typed sample 409, model 409 listing all three blockers
+in canonical order, the three deletions, the model then deleting,
+404s + deterministic repeats, OpenAPI). Delta coverage (§8.D
+retention/delete invariant): the new engine test proves shapes,
+leaves-deletable, blocked-sample blockers == the guard's,
+artifact accounting == independent walks, the §5 invariant in BOTH
+directions (blocked → DELETE 409s with identical blockers and zero
+mutation; deletable → DELETE succeeds with stats == the view),
+tampered-sample integrity (integrity_verified False → deletable False
+→ RuntimeError; restored → blocked again), live flips (measurement
+deleted → sample view flips → deletes with stats == the flipped
+view), determinism, zero mutation, unknown 404s, and the full chain
+to a drained model (usage external 0 → retention deletable → DELETE
+stats == view); the HTTP test now exercises the three retention
+routes (shapes, 404s, byte-identical repeats, zero mutation, 409
+blockers == the view's blockers, the live flip before the sample
+DELETE, DELETE stats == the view's accounting, OpenAPI 96 with three
+GET-only retention routes + schemas). Updated tests (intentional
+contract changes, documented in place): M66/M67 delete-set assertions
+4 → 7 paths; the two M15/M16-era "DELETE → 405" assertions now assert
+the verified-deletion contract; OpenAPI count assertions 93 → 96
+(54 sites). **Full suite: 645 ×2 (initial) and 646 ×2 (delta), exit 0
+all four runs**; pyflakes + compileall clean; OpenAPI
+standalone-verified (96 paths, 7 delete operations, three GET-only
+retention routes). One pre-existing flake was fixed WITH cause
+analysis during the initial delivery (a sampling test's tolerance
+compared a 6-decimal-rounded persisted value against full-precision
+float32 at 1e-6 — made like-for-like; the semantic claim unchanged).
 
-The guard, per family, in the M61/M65/M67 order: **(1) scope** — the
-family getter through the `_scope_data_artifact` convention: unknown
-model, unknown record, or registry-invisible (unparseable manifest)
-→ FileNotFoundError → 404, nothing deleted. **(2) INTEGRITY FIRST** —
-the record's persisted `result_hash` must reproduce from its semantic
-payload (each family's own `result_hash` staticmethod); a tampered or
-corrupt record → RuntimeError → 409, never deletable, no force flag,
-no filesystem fallback. **(3) blockers** — samples only: ANY
-sample-quality measurement referencing the sample (the ONE M19
-listing) → ValueError → **409 with the typed ordered blocker list**
-(`{message, model_id, sample_id, protected: true, blockers:
-[{reason: "sample_quality", detail: measurement ids}]}` — the SAME ids
-the by-sample listing reports); suite runs and measurements are LEAF
-records with no reference guard. **(4) atomic removal** —
-`atomic_delete_dir` on the record's own directory only, with the
-deterministic files/bytes result measured immediately before.
-**No cascade, ever:** a suite run's probe EVALUATIONS are model-owned
-(inside `models/<id>/evaluations/`) and are never touched by suite-run
-deletion (proven live); a blocked sample deletion changes nothing on
-disk (byte-verified); recipes / policies / probe-suite definitions
-remain immutable by design; the M67 model guard is byte-for-byte
-unchanged.
+## 4. Live Certification
 
-## 4. Unblock-Chain Coherence
-
-**Deleting the referencing runtime records makes a blocked model
-deletable, live — with M66 usage, M67 retention and the model DELETE
-agreeing at every step.** The chain (proven in tests and live on the
-copy): a model referenced by a suite run + a sample + a quality
-measurement shows exactly those three EXTERNAL categories in its M66
-usage and exactly those three blockers (canonical order
-`suite_run < sample < sample_quality`) in its M67 retention view, and
-its DELETE refuses on them. Deleting the measurement unblocks nothing
-by itself (the sample still blocks — shown step-by-step); deleting the
-sample leaves the suite run; deleting the suite run drains
-`external_references` to 0 — the retention view flips to deletable
-with empty blockers, and the model DELETE succeeds with stats exactly
-equal to the retention view's files/bytes. No cache exists anywhere:
-every view recomputes from the ONE listings on each call, and the
-guard code that refuses is the same code that earlier refused — only
-its live input set shrank. The reverse direction holds by
-construction: creating a new reference (a suite run against a fresh
-model) flips the view back to blocked immediately (tested live in the
-M67 suite's recompute test, re-verified here through C2's blocked
-state arising from fresh creations).
-
-## 5. Verification
-
-**Focused tests (4 new, `tests/test_suite_sample_lifecycle.py` →
-641 + 4 = 645):** suite-run deletion (stats == independent walk, only
-its directory removed, probe evaluations preserved — count equality,
-M66 usage recomputes live, repeat/unknown → FileNotFoundError,
-tampered `result_hash` → RuntimeError and corrupt manifest →
-registry-invisible 404, both with pre/post SHA-256 equality and a
-restore-then-delete round-trip proving integrity — not scope —
-refused); sample + measurement (blocked deletion with the typed
-blocker == the independent manifest-parse oracle, zero mutation;
-measurement deletion with exact stats and isolation; sample deletion
-afterwards; unknowns; tampered-hash and corrupt-manifest refusals for
-both records with restoration and clean deletion after); the unblock
-chains (self-contained: both chains step-by-step with the M66/M67
-views and the model DELETE agreeing at every step, ending in exact
-model-deletion stats == the retention view); and the full HTTP
-lifecycle (fixture through public routes; the typed sample 409; the
-model 409 listing all three blockers in canonical order; the three
-deletions over HTTP; the model then deleting; 404s and deterministic
-repeats; OpenAPI: 93 paths, the three paths now `{get, delete}`, the
-delete-operation set == 7, `SampleDeletionBlocked` documented on the
-409). **Updated tests (each an intentional contract change, documented
-in place):** the M66/M67 delete-set assertions 4 → 7 paths; the two
-M15/M16-era "DELETE → 405" assertions now assert the new
-verified-deletion contract end-to-end (PUT remains 405 — no edit
-endpoints exist). **One pre-existing flake fixed with cause analysis:**
-`test_first_generated_token_conditioned_on_prompt` failed ONCE in
-eight runs — its tolerance compared the record's 6-decimal-ROUNDED
-`loss_nats` against a full-precision float32 recomputation at 1e-6,
-numerically invalid at rounding boundaries; made like-for-like
-(round the recomputation, 2e-6 for float32 summation-order noise; the
-semantic claim — the measurement IS the mean NLL over the generated
-positions — is unchanged). **Full suite: 645 passed ×2 consecutive
-(exit 0 both)**, plus the 641 baseline and diagnostic runs; pyflakes +
-compileall clean; OpenAPI standalone-verified.
-
-## 6. Live Certification
-
-`smoke_m68_live.py` (port 8791). **First execution: 21/24** — C4–C6
-failed on a **pure script assertion bug** (the independent
-`walk_stats(dir)` was evaluated inside each check AFTER the deletion
-had removed the directory, yielding (0,0)); the protocol was followed:
+**Initial delivery — `smoke_m68_live.py` (port 8791):** first
+execution **21/24** — C4–C6 failed on a pure script assertion bug
+(the independent `walk_stats(dir)` was evaluated AFTER each deletion
+had removed the directory, yielding (0,0)); protocol followed:
 stopped, verified read-only that production was byte-identical
-(52/52, zero mutations — the server log confirms the only production
-DELETE was the M67 refusal 409), confirmed the copy was discarded,
-fixed the evaluation order (stats captured before each deletion), and
-re-executed. **Second execution: 24/24 PASSED** — production
-read-only phase (project/registry; disk == `m68_pre.sha256` 52/52;
-M62 13/10/3; M63 52 files; M64 usage 16/15; M66 usage == certified
+(52/52, zero mutations — the only production DELETE was the M67
+refusal 409), confirmed the copy was discarded, fixed the evaluation
+order, re-executed: **24/24 PASSED** (production read-only phase:
+coherence + M66/M67 surfaces + unknown-id 404s + the M67 model
+DELETE still 409 on the recipe + determinism + zero mutation; copy
+phase: a fresh model blocked by all three families in canonical
+order, the blocked sample 409, the three deletions with exact stats,
+the probe evaluation PRESERVED — no cascade —, the model then
+unblocked and deleted with stats == its retention view, full-circle
+copy inventory proof, copy discarded). **Delta —
+`smoke_m68_retention_live.py` (port 8792):** **21/21 PASSED on the
+single first execution, zero corrections** — production read-only
+(disk == `m68_retention_pre.sha256` 52/52; M66 usage == certified
 counts == the independent manifest oracle; M67 retention blocked by
-the recipe only; the three new DELETE routes' unknown-id 404s; the M67
-model DELETE unchanged — 409 with the recipe blocker; deterministic
-byte-identical repeats; OpenAPI 93 paths / 7 delete operations with
-the 409 model documented; zero mutation), then the **disposable-copy
-phase** (guard parity for the production model; a fresh trained model
-blocked by ALL THREE new families in canonical order; its sample
-deletion refused with the typed blocker and zero mutation; the
-measurement, sample and suite run deleted with exact stats vs
-independent pre-walks; the suite run's probe evaluation PRESERVED —
-no cascade; the model then unblocked and deleted with stats == the
-retention view; the copy returned **byte-for-byte to its post-copy
-state plus exactly the one immutable suite definition registered for
-the fixture**; copy discarded). Production DELETEs attempted: two
-(one per execution), both refusals; all mutating deletions ran on
-discarded copies.
+the recipe only; the three retention routes' unknown-id 404s —
+production holds 0 runtime records; deterministic byte-identical
+repeats; OpenAPI 96 / 7 deletes / three GET-only retention routes;
+zero mutation), then the disposable-copy §5 invariant (fresh model
+blocked by all three records; leaves deletable + stats ==
+independent walks; sample blocked with view blockers == guard
+blockers; DELETE refuses with zero mutation; measurement → sample
+view flips live → sample → suite run each deleting with stats == its
+view; the model then unblocked and deleted with stats == its
+retention view; the production model on the copy untouched and still
+blocked; copy discarded). Production DELETEs attempted: two (initial,
+both refusals) + zero (delta — the delta smoke issues no production
+DELETE at all); every mutating deletion ran on discarded copies.
 
-## 7. Storage Proof
+## 5. Production Storage
 
-**Production: before == after, exactly** — 52 files / 8,926,410 B,
-every SHA-256 unchanged against `m68_pre.sha256` (captured after the
-post-re-provisioning rebuild and verified unchanged across both smoke
-executions and all test runs), 0 tmp entries, 0 manifest modifications,
-0 new persistent files (no dependency index, no retention record, no
-reference count — §22's banned list honored; blocker analysis is
-live-computed). **The disposable-copy accounting:** each deletion's
-`files_removed`/`bytes_reclaimed` equaled its independent pre-walk
-(measurement 1 file, sample 1 file, suite run 1 file, model ==
-retention files/bytes); the full-circle check proved the copy's final
-inventory equals its post-copy inventory plus exactly the one
-registered suite manifest — every created artifact was either deleted
-through the new verified routes or is an immutable definition; no
-`.tmp-delete-*` residue; 0 leftover copies after disposal.
+**Production before == after, exactly, in BOTH phases.** Initial:
+52 files / 8,926,410 B, every SHA-256 unchanged against
+`m68_pre.sha256` across both smoke executions. Delta: 52 files /
+8,926,403 B, every SHA-256 unchanged against
+`m68_retention_pre.sha256` (verified before the smoke, after all
+read-only checks, and in the final independent audit; 0 tmp entries;
+0 manifest modifications; 0 servers left running; 0 leftover copies).
+**Environment events (disclosed):** the sandbox re-provisioned a
+FOURTH time during the initial delivery and a FIFTH time before this
+delta; each recovery followed the proven protocol (repo reset to the
+remote tip, venv rebuilt, production root rebuilt via
+`m62_production_rebuild.py` — SAME certified structure, NEW
+content-derived ids; the prior root's exact bytes are unrecoverable
+by design, exactly as in every previous re-provision). **The
+disposable-copy accounting (§19):** every deletion's `files_removed`
+== its independent pre-walk == its retention view's files, and
+`bytes_reclaimed` == the byte sum of exactly those files — each
+runtime record is a single-manifest directory (1 file each:
+measurement, sample, suite run), and the model deletions' stats
+equaled their retention views' files/bytes exactly (the delta
+additionally proves view == walk == DELETE for all three families and
+the model). No unrelated artifact changed on any copy (full-inventory
+diffs); no persistent retention/dependency record was created
+anywhere (all analysis is live-computed — §12's banned list honored).
 
-## 8. Git
+## 6. Git
 
-- `M68: explicit suite-run & sample lifecycle` — the three
-  family-engine delete primitives, the facade guards + blocker helper,
-  schemas, the three DELETE routes (operations on existing paths),
-  landing/README, the new test file, the delete-set/contract/flake
-  test updates, the smoke, this report.
-- `M68: pre-smoke production inventory (m68_pre.sha256)` — the
-  rebuilt production root's certification baseline (52 files).
-- Both pushed to `origin/arena/01a071e9-code-forge`; remote branch tip
-  == HEAD; worktree clean (only the untracked `egg-info`).
+- Initial: `c900c12` "M68: explicit suite-run & sample lifecycle" (14
+  files: engine/schemas/api/suite_runs/sampling/sample_quality, the
+  new test file, M66/M67 test updates, README, smoke, report) +
+  `4d763fa` "M68: pre-smoke production inventory (m68_pre.sha256)";
+  both pushed and verified (remote tip == HEAD at the time).
+- Delta: `M68: retention views (spec compliance)` (schemas/engine/api
+  retention views + landing/README, the delta test + OpenAPI count
+  bumps 93 → 96, the delta smoke, this rewritten report) +
+  `M68: delta pre-smoke production inventory (m68_retention_pre.sha256)`.
+- Both pushed to `origin/arena/01a071e9-code-forge`; remote branch
+  tip == local HEAD verified after push; worktree clean (only the
+  untracked `egg-info`, never committed).
 
-## 9. Final Status & Next Milestone
+## 7. Limitations
 
-**M68 is complete** against the quality bar: the established
-guard/verify/atomic pattern reused with zero new deletion primitives
-and zero second scanners; the sample-quality blocker decision made
-explicitly from inspection and tested in both directions; no cascade
-(probe evaluations preserved, blocked deletions byte-inert); the
-M67 guard untouched with the unblock chain proven live end-to-end;
-independent oracles agreeing (stats, blocker ids, usage); 645 ×2
-green; statics clean; OpenAPI correct (93 paths, 7 delete operations);
-production byte-identical through both smoke executions; destructive
-certification only on discarded copies. **Limitations (documented):**
-production contains no suite runs/samples/measurements (counts 0), so
-their production-exercisable surface is the unknown-id 404 path — the
-success paths were certified on the copy; recipes, policies and
-probe-suite definitions remain undeletable BY DESIGN (immutable
-registries — a model blocked ONLY by a recipe or policy can never
-become deletable through existing operations); suite-run deletion
-leaves its probe evaluations in place intentionally (model-owned
-history — deleting those is future work).
+- Production contains NO suite runs / samples / measurements (M66
+  certified counts 0/0/0), so their production-exercisable surface is
+  the unknown-id 404 path; the success paths are certified on
+  discarded copies (fixtures cover the rest).
+- Recipes, gate policies and probe-suite definitions remain
+  undeletable BY DESIGN (immutable registries): a model blocked ONLY
+  by a recipe or policy can never become deletable through existing
+  operations.
+- Suite-run deletion leaves its probe evaluations in place
+  intentionally (model-owned history — pruning those individually is
+  M69/M70 territory).
+- Sample-quality measurement retention views carry no `created_at`
+  (the record schema has none) — identity is model/sample/evaluation
+  ids.
+- No cascade, no force, no bulk, no policies, no automation — by
+  scope.
 
-**The lifecycle lattice after M68:** datasets/tokenizers (M65),
-checkpoints (M61), models (M67), and all root-level runtime records
-(M68) have explicit verified deletion; the remaining undeletable
-records are the model-OWNED internal families — evaluations,
-comparisons, gate decisions, workflow records — which go with the
-model atomically but cannot be pruned individually. **Next milestone —
-M69, model-owned record retention (usage view first):** a read-only
-dependency overview for ONE model's internal records (what references
-an evaluation/comparison/gate/workflow record — e.g. gate decisions
-reference comparisons by-comparison; suite-run probe results name
-evaluation ids inside their records), the M66 pattern one level down,
-followed in M70 by explicit per-record deletion with internal
-reference safety. The ready-to-paste prompt follows.
+## 8. M68 Result
 
----
+**M68 is complete against the authoritative spec.** Numbers: tests
+641 (M67 baseline) → **645** (initial) → **646** (delta), full suite
+×2 green in each phase (exit 0); OpenAPI **93 → 96** paths (initial:
+3 new DELETE operations on existing resource paths, 0 new paths;
+delta: 3 new GET-only retention paths); **7 delete operations**
+total (4 pre-existing + M68's three); **0 duplicate DELETE paths**;
+selected families: **suite runs, samples, sample-quality
+measurements**; blocker categories: **sample_quality** (samples
+only; suite runs and measurements are leaves with empty blocker
+lists); new facade/engine operations: 3 deletes + 3 blocker/retention
+analyses + 3 retention overviews; the §7 M67 cross-milestone
+invariant proven live end-to-end (before: model external references
+contain the runtime record; after explicit deletion: they do not,
+and every remaining reference still blocks; all external references
+removed → the model deletes, with the M67 guard code untouched);
+independent oracles agree (stats, blocker ids, usage, retention
+views); production SHA-256 inventories identical before/after in
+both phases; all destructive certification on discarded copies; git
+clean and pushed. Transient events, handled per protocol: the
+initial smoke's first execution failed 3 checks on a script
+assertion bug (post-deletion stat evaluation) — stopped, verified
+zero mutation read-only, fixed, re-executed 24/24; one pre-existing
+test flake fixed with cause analysis; the delta smoke passed 21/21
+first-run with zero corrections. Five sandbox re-provisions total
+across the session, each recovered with the established protocol and
+disclosed.
+
+## 9. Next Milestone
+
+**M69 — model-owned record usage overview** (read-only): the
+M66-pattern dependency overview one level down — what references a
+model's OWNED internal records (evaluations, comparisons, gate
+decisions, workflow records), which today can only be deleted with
+the whole model. M69 is the discovery surface; M70 would then add
+explicit per-record deletion with internal reference safety. The
+ready-to-paste prompt follows.
 
 ### M69 — MODEL-OWNED RECORD USAGE OVERVIEW (ready-to-paste prompt)
 

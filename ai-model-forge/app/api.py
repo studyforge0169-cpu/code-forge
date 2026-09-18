@@ -36,6 +36,7 @@ from .schemas import (
     ProbeSuite,
     ProbeSuiteCreateRequest,
     SuiteRunDeletionResult,
+    SuiteRunRetentionOverview,
     SuiteRunRecord,
     SuiteRunRequest,
     SuiteRunSummary,
@@ -48,9 +49,11 @@ from .schemas import (
     ProjectStorageOverview,
     SampleGenerateRequest,
     SampleEvaluationDeletionResult,
+    SampleEvaluationRetentionOverview,
     SampleEvaluationRecord,
     SampleDeletionBlocked,
     SampleDeletionResult,
+    SampleRetentionOverview,
     SampleRecord,
     SampleStrategy,
     BestCheckpointHistory,
@@ -1039,7 +1042,11 @@ def index() -> HTMLResponse:
         lets the model go. Suite-run probe evaluations are
         model-owned and never cascaded. Recipes/policies/probe-suites
         stay immutable by design. No cascade, no force, no bulk, no
-        automatic cleanup.</li>
+        automatic cleanup. Read-only retention views expose each
+        record's deletion-readiness (<code>GET
+        .../retention</code> beside each family: identity, artifact
+        files/bytes, integrity, <code>deletable</code>, ordered
+        blockers — the SAME list the DELETE guard refuses on).</li>
 
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
@@ -1149,6 +1156,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/suite-runs</code> — execute one named suite against one state (independent M4 evaluations, immutable run record)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs</code> / <code>GET {prefix}/models/&#123;id&#125;/suite-runs/&#123;run&#125;</code> — immutable suite-run history</li>
       <li><code>DELETE {prefix}/models/&#123;id&#125;/suite-runs/&#123;run&#125;</code> — explicit verified suite-run deletion (scope + result-hash integrity + atomic; leaf record, no cascade; M68)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/&#123;run&#125;/retention</code> — read-only deletion-readiness view (integrity, deletable, blockers; M68)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;</code> — suite-run records of ONE named suite (read-only, deterministic, no aggregation)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-suite/&#123;suite_id&#125;/summary</code> — bookkeeping summary of ONE suite's runs (count, ordered ids, earliest/latest; read-only)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-checkpoint/&#123;ckpt&#125;</code> — suite runs executed against ONE checkpoint state (read-only, deterministic, no aggregation)</li>
@@ -1161,10 +1169,12 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/samples/generate</code> — deterministic generation from one explicit verified checkpoint (greedy / seeded temperature; inference only)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples</code> / <code>GET {prefix}/models/&#123;id&#125;/samples/&#123;sample&#125;</code> — immutable sample history</li>
       <li><code>DELETE {prefix}/models/&#123;id&#125;/samples/&#123;sample&#125;</code> — explicit verified sample deletion (refused 409 while sample-quality measurements reference it; M68)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/samples/&#123;sample&#125;/retention</code> — read-only deletion-readiness view (integrity, deletable, ordered blockers; M68)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/samples/by-checkpoint/&#123;ckpt&#125;</code> — samples generated from ONE checkpoint (read-only, deterministic, persisted identity authoritative)</li>
       <li><code>POST  {prefix}/models/&#123;id&#125;/samples/&#123;sample&#125;/quality</code> — per-sample likelihood measurement (sample-driven state resolution; causal-LM loss over generated targets; no body config)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality</code> / <code>GET {prefix}/models/&#123;id&#125;/sample-quality/&#123;eval&#125;</code> — immutable sample-evaluation history</li>
       <li><code>DELETE {prefix}/models/&#123;id&#125;/sample-quality/&#123;eval&#125;</code> — explicit verified measurement deletion (leaf record; unblocks the sample; M68)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/&#123;eval&#125;/retention</code> — read-only deletion-readiness view (integrity, deletable; leaf record; M68)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/records</code> — full immutable M16 sample-evaluation records (loss/perplexity included; read-only, deterministic, no statistics)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/by-sample/&#123;sample&#125;</code> — M16 measurements of ONE sample (read-only, deterministic, no statistics)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/sample-quality/by-checkpoint/&#123;checkpoint&#125;</code> — M16 measurements recorded under ONE checkpoint (read-only, deterministic, no statistics)</li>
@@ -2893,6 +2903,24 @@ def list_suite_runs_by_reused_count(model_id: str,
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.get("/models/{model_id}/suite-runs/{suite_run_id}/retention",
+         response_model=SuiteRunRetentionOverview, tags=["suite-runs"])
+def suite_run_retention(model_id: str,
+                        suite_run_id: str) -> SuiteRunRetentionOverview:
+    """Read-only retention overview of ONE suite run (M68): the
+    deletion-readiness view — identity, the ordered artifact files +
+    total bytes of the run's OWN directory, the record's result-hash
+    integrity outcome, ``deletable`` and the ordered blockers (the
+    SAME list the DELETE guard refuses on — always empty: a suite
+    run is a LEAF record). A tampered record is never deletable.
+    Zero storage, zero mutation."""
+    try:
+        return _forge().suite_run_retention_overview(model_id,
+                                                     suite_run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.delete("/models/{model_id}/suite-runs/{suite_run_id}",
             response_model=SuiteRunDeletionResult, tags=["suite-runs"],
             responses={409: {"description": "integrity refusal — the "
@@ -3325,6 +3353,24 @@ def list_samples_by_strategy(model_id: str, strategy: SampleStrategy
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.get("/models/{model_id}/samples/{sample_id}/retention",
+         response_model=SampleRetentionOverview, tags=["sampling"])
+def sample_retention(model_id: str,
+                     sample_id: str) -> SampleRetentionOverview:
+    """Read-only retention overview of ONE sample (M68): the
+    deletion-readiness view — identity, the ordered artifact files +
+    total bytes of the sample's OWN directory, the record's
+    result-hash integrity outcome, ``deletable`` (True iff integrity
+    passes AND no sample-quality measurement references the sample —
+    the ONE M19 listing) and the ordered blockers (the SAME list the
+    DELETE guard refuses on). A tampered sample is never deletable.
+    Zero storage, zero mutation."""
+    try:
+        return _forge().sample_retention_overview(model_id, sample_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.delete("/models/{model_id}/samples/{sample_id}",
             response_model=SampleDeletionResult, tags=["sampling"],
             responses={409: {"model": SampleDeletionBlocked,
@@ -3537,6 +3583,26 @@ def list_sample_quality_by_tokenizer(model_id: str, tokenizer_id: str
     try:
         return _forge().list_sample_evaluations_for_tokenizer(
             model_id, tokenizer_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/sample-quality/{evaluation_id}/retention",
+         response_model=SampleEvaluationRetentionOverview,
+         tags=["sample-quality"])
+def sample_quality_retention(model_id: str,
+                             evaluation_id: str
+                             ) -> SampleEvaluationRetentionOverview:
+    """Read-only retention overview of ONE sample-quality measurement
+    (M68): the deletion-readiness view — identity, the ordered
+    artifact files + total bytes of the measurement's OWN directory,
+    the record's result-hash integrity outcome, ``deletable`` and the
+    ordered blockers (the SAME list the DELETE guard refuses on —
+    always empty: a measurement is a LEAF record). A tampered record
+    is never deletable. Zero storage, zero mutation."""
+    try:
+        return _forge().sample_evaluation_retention_overview(
+            model_id, evaluation_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
