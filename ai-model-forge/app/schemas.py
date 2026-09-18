@@ -1304,6 +1304,62 @@ class ModelRecordRetentionOverview(BaseModel):
     blockers: list[ModelRecordDeletionBlocker] = Field(default_factory=list)
 
 
+class ProjectFamilyRetention(BaseModel):
+    """ONE deletion family's aggregate in the M72 read-only project
+    retention inventory: how many artifacts the family holds
+    (``count``), its total storage (``files``/``size_bytes`` — the
+    family's OWN artifact directories; the ``model`` family's size
+    INCLUDES its owned records, the M67 ownership semantics), how
+    many are currently deletable vs not (``deletable_count`` /
+    ``blocked_count`` — "blocked" = held by references OR failed
+    integrity, exactly ``deletable is False`` in the family's
+    retention view), and what deleting every currently-deletable
+    artifact of THIS family would reclaim. ``deletion_supported`` is
+    False only for ``training_run`` — the model manifest's own run
+    provenance has no deletion lifecycle (ownership: it goes WITH
+    the model), so it contributes counts but never deletable/
+    blocked/storage numbers."""
+
+    family: str
+    deletion_supported: bool
+    count: int
+    files: int
+    size_bytes: int
+    deletable_count: int
+    blocked_count: int
+    reclaimable_files: int
+    reclaimable_bytes: int
+
+
+class ProjectRetentionOverview(BaseModel):
+    """Read-only live-computed PROJECT retention inventory (M72): the
+    whole deletion surface in ONE view — per family (canonical
+    order: models, datasets, tokenizers, workflow recipes, gate
+    policies, probe suites, then the model-owned record families
+    training_run/checkpoint/workflow/evaluation/comparison/gate and
+    the root-level record families suite_run/sample/sample_quality)
+    the aggregate counts/storage/deletability, plus project totals.
+    Every number is derived from the EXISTING analyses (the ONE M63
+    physical storage walk for the true totals — family sizes never
+    double-count, they come from the ONE retention views; the ONE
+    M62/M65/M66/M67/M68/M69/M70/M71 views per artifact) — no second
+    scanner, nothing persisted. ``reclaimable_files``/``bytes`` are
+    the EXACT result of deleting every currently-deletable artifact
+    (deletable models contribute their WHOLE directory, which
+    subsumes their records; blocked models contribute only their own
+    deletable records). Zero storage, zero mutation, deterministic,
+    byte-identical over unchanged state."""
+
+    families: list[ProjectFamilyRetention] = Field(default_factory=list)
+    total_count: int
+    total_files: int
+    total_size_bytes: int
+    total_deletable: int
+    total_blocked: int
+    reclaimable_files: int
+    reclaimable_bytes: int
+
+
 class ModelDeletionBlocker(BaseModel):
     """Why ONE model may not be deleted (M67 reference safety): ONE
     persisted EXTERNAL reference that would be orphaned by the

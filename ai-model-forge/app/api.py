@@ -43,6 +43,7 @@ from .schemas import (
     DefinitionDeletionBlocked,
     DefinitionDeletionResult,
     DefinitionRetentionOverview,
+    ProjectRetentionOverview,
     ModelDeletionBlocked,
     ModelDeletionResult,
     ModelRecord,
@@ -1119,6 +1120,19 @@ def index() -> HTMLResponse:
         untouched M67 model guard can let a blocked model go. No
         cascade, no force, no bulk, no automatic cleanup.</li>
 
+      <li><b>M72 project retention inventory</b> — the capstone
+        read-only view: <code>GET /project/retention</code> rolls the
+        WHOLE deletion surface into ONE inventory — per family
+        (models, datasets, tokenizers, recipes, policies, suites,
+        the record families) the counts, the family's own storage,
+        the currently deletable vs blocked counts and the
+        reclaimable files/bytes, plus project totals (TRUE storage
+        from the ONE M63 walk) and the EXACT reclaimable result of
+        deleting every currently-deletable artifact (a deletable
+        model's whole directory subsumes its records). Every number
+        is read from the existing M62–M71 analyses — no second
+        scanner, nothing persisted, nothing deleted.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -1161,6 +1175,7 @@ def index() -> HTMLResponse:
     <ul>
       <li><code>GET   {prefix}/project</code> — project info &amp; artifact counts</li>
       <li><code>GET   {prefix}/project/storage</code> — read-only PHYSICAL storage overview of the whole project: totals, category partition (no double counting) and per-model rows with the M62 retention aggregates (M63)</li>
+      <li><code>GET   {prefix}/project/retention</code> — read-only PROJECT retention inventory: per-family counts/storage/deletability/reclaimable + true totals (M72)</li>
       <li><code>GET   {prefix}/datasets/&#123;id&#125;/usage</code> — read-only usage overview of one dataset: every referencing record by category (training runs, workflows, evaluations, comparisons, suite runs, tokenizer training, tokenized versions; M64)</li>
       <li><code>GET   {prefix}/tokenizers/&#123;id&#125;/usage</code> — read-only usage overview of one tokenizer: every referencing record by category (training runs, workflows, evaluations, comparisons, suite runs, samples, sample quality, tokenized datasets; M64)</li>
       <li><code>GET   {prefix}/datasets/&#123;id&#125;/retention</code> — read-only deletion-readiness view of one dataset: artifact files/bytes, integrity outcome, deletable + ordered blockers (M65)</li>
@@ -1298,6 +1313,33 @@ def project_storage_overview() -> ProjectStorageOverview:
     state; an empty project reports zeroed totals with an empty model
     collection."""
     return _forge().project_storage_overview()
+
+
+@api.get("/project/retention",
+         response_model=ProjectRetentionOverview, tags=["meta"])
+def project_retention_overview() -> ProjectRetentionOverview:
+    """Read-only PROJECT RETENTION INVENTORY (M72): the whole deletion
+    surface in ONE view — per family in canonical order (models,
+    datasets, tokenizers, workflow recipes, gate policies, probe
+    suites, then the model-owned record families training_run/
+    checkpoint/workflow/evaluation/comparison/gate and the
+    root-level suite_run/sample/sample_quality) the artifact count,
+    the family's OWN storage, the currently deletable vs blocked
+    counts and the family's reclaimable files/bytes; plus project
+    totals — TRUE storage from the ONE M63 physical walk (family
+    sizes overlap by ownership and never sum into it) and the EXACT
+    reclaimable if every currently-deletable artifact were deleted
+    (a deletable model contributes its WHOLE directory, subsuming
+    its records). Every number comes from the EXISTING M62/M63/M65/
+    M67/M68/M69/M70/M71 analyses — no second scanner, nothing
+    persisted, no cleanup policy: this view deletes NOTHING, it
+    only reports what the verified deletion guards would refuse or
+    allow. Zero storage, zero mutation, deterministic; an empty
+    project reports zeroed families and counts."""
+    try:
+        return _forge().project_retention_overview()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @api.get("/system", response_model=dict, tags=["meta"])

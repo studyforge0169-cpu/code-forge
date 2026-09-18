@@ -850,11 +850,12 @@ def test_m71_api_lifecycle_and_openapi(api_client):
     assert c.get("/api/v1/workflows/recipes"
                  ).json().count("m71api-tampered") == 0
 
-    # OpenAPI: 104 paths; three NEW GET-only retention paths; the
+    # OpenAPI: 105 paths (M72 adds /project/retention); three NEW GET-only
+    # retention paths; the
     # three DELETEs are new OPERATIONS on the EXISTING GET-one paths;
     # the delete-operation set is exactly 14
     spec = c.get("/openapi.json").json()
-    assert len(spec["paths"]) == 104
+    assert len(spec["paths"]) == 105
     for path in ("/api/v1/workflows/recipes/{recipe_id}",
                  "/api/v1/policies/{policy_id}",
                  "/api/v1/probe-suites/{suite_id}"):

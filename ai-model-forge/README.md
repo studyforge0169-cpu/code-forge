@@ -2200,6 +2200,39 @@ from model-owned records to shared definitions:
   the referencing recipe first — protection is live, never cached;
   no cascade, no force, no bulk, no automatic cleanup
 
+### Milestone 72 — PROJECT retention inventory
+  (`GET /project/retention`)
+
+The capstone read-only view: the WHOLE deletion surface in ONE
+inventory. Per family, in canonical order — models, datasets,
+tokenizers, workflow recipes, gate policies, probe suites, then
+the model-owned record families (training_run / checkpoint /
+workflow / evaluation / comparison / gate) and the root-level
+record families (suite_run / sample / sample_quality) — the
+artifact count, the family's OWN storage, the currently deletable
+vs blocked counts ("blocked" = held by references or failed
+integrity) and the family's reclaimable files/bytes:
+
+- **one aggregation, no second scanner**: every per-family number
+  is the SUM of the EXISTING per-artifact retention views (M62
+  checkpoints, M65 datasets/tokenizers, M67 models, M68 root-level
+  records, M70 records, M71 definitions) and the project totals
+  come from the ONE M63 physical storage walk — the TRUE storage
+  (family sizes overlap by ownership — the model family INCLUDES
+  its owned records — and never sum into it)
+- **exact reclaimable**: `reclaimable_files`/`bytes` are the exact
+  result of deleting every currently-deletable artifact — a
+  deletable MODEL contributes its WHOLE directory (subsuming its
+  records); a blocked model contributes only its own deletable
+  records
+- `training_run` is the ONE family without a deletion lifecycle
+  (`deletion_supported: false`): the model manifest's own run
+  provenance is ownership — it contributes counts, never
+  deletable/blocked/storage numbers
+- read-only by design: zero storage, zero mutation,
+  deterministic; the inventory deletes NOTHING — it reports what
+  the verified deletion guards would refuse or allow
+
 ### Milestone 69 — model-owned record USAGE OVERVIEW
   (`GET /models/{model_id}/records/usage`)
 - **concept**: the M66 pattern one level down — for every model-OWNED
@@ -2915,7 +2948,7 @@ from model-owned records to shared definitions:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 656 tests
+pytest                       # 660 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3424,7 +3457,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 656 tests across 29 suites
+  tests/               # 660 tests across 30 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

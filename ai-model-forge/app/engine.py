@@ -43,6 +43,8 @@ from .schemas import (
     GateDecisionResult,
     ModelCreateRequest,
     DefinitionDeletionBlocker,
+    ProjectFamilyRetention,
+    ProjectRetentionOverview,
     DefinitionDeletionResult,
     DefinitionRetentionOverview,
     ModelDeletionBlocker,
@@ -1785,6 +1787,189 @@ class ModelForge:
         return DefinitionDeletionResult(
             family=family, definition_id=definition_id,
             files_removed=files, bytes_reclaimed=nbytes)
+
+    # The canonical M72 project retention family order: every
+    # persistable family in the deletion lifecycle matrix, plus the
+    # ONE record family without a lifecycle (training_run — the
+    # model manifest's own run provenance: ownership, it goes WITH
+    # the model; deletion_supported=False).
+    PROJECT_RETENTION_FAMILIES = (
+        "model",              # M67 (size includes owned records)
+        "dataset",            # M65 (includes its tokenized versions)
+        "tokenizer",          # M65
+        "workflow_recipe",    # M71
+        "gate_policy",        # M71
+        "probe_suite",        # M71
+        "training_run",       # count-only (no deletion lifecycle)
+        "checkpoint",         # M61/M62
+        "workflow",           # M70
+        "evaluation",         # M70
+        "comparison",         # M70
+        "gate",               # M70
+        "suite_run",          # M68 (root-level)
+        "sample",             # M68 (root-level)
+        "sample_quality",     # M68 (root-level)
+    )
+
+    def project_retention_overview(self) -> ProjectRetentionOverview:
+        """Read-only live-computed PROJECT retention inventory (M72):
+        the whole deletion surface in ONE view. Per family, in the
+        canonical ``PROJECT_RETENTION_FAMILIES`` order: the artifact
+        count, the family's OWN storage (files/bytes from the ONE
+        retention views — the model family's size INCLUDES its owned
+        records, the M67 ownership semantics), the currently
+        deletable vs not-deletable counts (``blocked`` = held by
+        references or failed integrity) and what deleting every
+        currently-deletable artifact of the family would reclaim.
+        Project totals: ``total_files``/``total_size_bytes`` come
+        from the ONE M63 physical storage walk (the TRUE storage —
+        family sizes overlap by ownership and never sum into it),
+        ``total_count``/``total_deletable``/``total_blocked`` are
+        deterministic sums over the families (training_run
+        contributes counts only), and ``reclaimable_files``/
+        ``bytes`` are the EXACT result of deleting every
+        currently-deletable artifact: a deletable MODEL contributes
+        its WHOLE directory (subsuming its records); a blocked model
+        contributes only its own deletable records. Every number is
+        read from the EXISTING M62/M63/M65/M67/M68/M69/M70/M71
+        analyses — no second scanner, nothing persisted, zero
+        mutation, byte-identical over unchanged state."""
+        agg = {f: dict(count=0, files=0, size=0, deletable=0,
+                       rfiles=0, rbytes=0)
+               for f in self.PROJECT_RETENTION_FAMILIES}
+
+        def add(family, files: int, size: int, deletable: bool):
+            d = agg[family]
+            d["count"] += 1
+            d["files"] += files
+            d["size"] += size
+            if deletable:
+                d["deletable"] += 1
+                d["rfiles"] += files
+                d["rbytes"] += size
+
+        # root-level data artifacts + definitions (global registries)
+        for d in self.datasets.list():
+            v = self.dataset_retention_overview(d.id)
+            add("dataset", len(v.files), v.size_bytes, v.deletable)
+        for t in self.tokenizers.list():
+            v = self.tokenizer_retention_overview(t.id)
+            add("tokenizer", len(v.files), v.size_bytes, v.deletable)
+        for r in self.recipes.list():
+            v = self.definition_retention_overview(
+                "workflow_recipe", r.recipe_id)
+            add("workflow_recipe", len(v.files), v.size_bytes,
+                v.deletable)
+        for pol in self.policies.list_policies():
+            v = self.definition_retention_overview(
+                "gate_policy", pol.policy_id)
+            add("gate_policy", len(v.files), v.size_bytes, v.deletable)
+        for s in self.policies.list_suites():
+            v = self.definition_retention_overview(
+                "probe_suite", s.suite_id)
+            add("probe_suite", len(v.files), v.size_bytes, v.deletable)
+
+        # per model: the model itself + its owned records (the ONE
+        # M69 usage listing enumerates the record ids; the ONE M62/
+        # M70 views carry the deletion-readiness)
+        reclaimable_files = reclaimable_bytes = 0
+        reclaimable_files += agg["dataset"]["rfiles"] + \
+            agg["tokenizer"]["rfiles"] + agg["workflow_recipe"][
+                "rfiles"] + agg["gate_policy"]["rfiles"] + \
+            agg["probe_suite"]["rfiles"]
+        reclaimable_bytes += agg["dataset"]["rbytes"] + \
+            agg["tokenizer"]["rbytes"] + agg["workflow_recipe"][
+                "rbytes"] + agg["gate_policy"]["rbytes"] + \
+            agg["probe_suite"]["rbytes"]
+        record_families = ("checkpoint", "workflow", "evaluation",
+                           "comparison", "gate")
+        for m in self.list_models():
+            v = self.model_retention_overview(m.id)
+            add("model", len(v.files), v.size_bytes, v.deletable)
+            # this model's OWN record reclaim, isolated via before/
+            # after snapshots of the cumulative record-family sums
+            pre_rf = sum(agg[f]["rfiles"] for f in record_families)
+            pre_rb = sum(agg[f]["rbytes"] for f in record_families)
+            usage = self.model_records_usage_overview(m.id)
+            cats = {c.category: c.records for c in usage.categories}
+            agg["training_run"]["count"] += len(
+                cats.get("training_run", []))
+            ck = self.checkpoint_retention_overview(m.id)
+            d = agg["checkpoint"]
+            d["count"] += ck.total_checkpoints
+            d["files"] += sum(e.files for e in ck.checkpoints)
+            d["size"] += ck.total_checkpoint_bytes
+            d["deletable"] += ck.deletable_checkpoints
+            d["rbytes"] += ck.reclaimable_checkpoint_bytes
+            d["rfiles"] += sum(e.files for e in ck.checkpoints
+                               if e.deletable)
+            for category in ("workflow", "evaluation", "comparison",
+                             "gate"):
+                for r in cats.get(category, []):
+                    rv = self.model_record_retention_overview(
+                        m.id, category, r.record_id)
+                    add(category, len(rv.files), rv.size_bytes,
+                        rv.deletable)
+            # root-level M68 records of this model
+            for sr in self.list_suite_runs(m.id):
+                rv = self.suite_run_retention_overview(
+                    m.id, sr.suite_run_id)
+                add("suite_run", len(rv.files), rv.size_bytes,
+                    rv.deletable)
+            for s in self.list_samples(m.id):
+                rv = self.sample_retention_overview(m.id, s.sample_id)
+                add("sample", len(rv.files), rv.size_bytes,
+                    rv.deletable)
+            for q in self.list_sample_evaluations(m.id):
+                rv = self.sample_evaluation_retention_overview(
+                    m.id, q.evaluation_id)
+                add("sample_quality", len(rv.files), rv.size_bytes,
+                    rv.deletable)
+            # the EXACT model/record overlap rule: a deletable model
+            # contributes its WHOLE directory (its records go with
+            # it); a blocked model contributes only its own
+            # deletable records
+            if v.deletable:
+                reclaimable_files += len(v.files)
+                reclaimable_bytes += v.size_bytes
+            else:
+                reclaimable_files += sum(
+                    agg[f]["rfiles"] for f in record_families) - pre_rf
+                reclaimable_bytes += sum(
+                    agg[f]["rbytes"] for f in record_families) - pre_rb
+        # root-level M68 records live OUTSIDE models/ — always add
+        reclaimable_files += sum(agg[f]["rfiles"] for f in
+                                 ("suite_run", "sample",
+                                  "sample_quality"))
+        reclaimable_bytes += sum(agg[f]["rbytes"] for f in
+                                 ("suite_run", "sample",
+                                  "sample_quality"))
+
+        families = []
+        for family in self.PROJECT_RETENTION_FAMILIES:
+            d = agg[family]
+            supported = family != "training_run"
+            families.append(ProjectFamilyRetention(
+                family=family,
+                deletion_supported=supported,
+                count=d["count"],
+                files=d["files"],
+                size_bytes=d["size"],
+                deletable_count=d["deletable"] if supported else 0,
+                blocked_count=(d["count"] - d["deletable"])
+                if supported else 0,
+                reclaimable_files=d["rfiles"] if supported else 0,
+                reclaimable_bytes=d["rbytes"] if supported else 0))
+        storage = self.project_storage_overview()
+        return ProjectRetentionOverview(
+            families=families,
+            total_count=sum(f.count for f in families),
+            total_files=storage.total_files,
+            total_size_bytes=storage.total_bytes,
+            total_deletable=sum(f.deletable_count for f in families),
+            total_blocked=sum(f.blocked_count for f in families),
+            reclaimable_files=reclaimable_files,
+            reclaimable_bytes=reclaimable_bytes)
 
     def _recipe_model_ids(self, recipe) -> set[str]:
         """Model ids DIRECTLY named by ONE workflow recipe's stage

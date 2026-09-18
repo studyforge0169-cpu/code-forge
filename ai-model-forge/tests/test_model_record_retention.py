@@ -670,11 +670,11 @@ def test_m70_api_lifecycle(api_client):
         assert r1.status_code == 404, path
         assert api_client.get(path + "/retention").status_code == 404, path
 
-    # OpenAPI: 104 paths; the four DELETEs are new OPERATIONS on the
+    # OpenAPI: 105 paths; the four DELETEs are new OPERATIONS on the
     # EXISTING GET-one paths; four new GET-only retention paths; the
     # delete-operation set is exactly 14
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 104
+    assert len(spec["paths"]) == 105
     for path in ("/api/v1/models/{model_id}/workflows/{workflow_id}",
                  "/api/v1/models/{model_id}/evaluations/{eval_id}",
                  "/api/v1/models/{model_id}/comparisons/"
