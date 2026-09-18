@@ -45,6 +45,9 @@ from .schemas import (
     ModelRecord,
     ModelRetentionOverview,
     ModelRecordsUsageOverview,
+    ModelRecordDeletionBlocked,
+    ModelRecordDeletionResult,
+    ModelRecordRetentionOverview,
     ModelUsageOverview,
     ProjectInfo,
     ProjectStorageOverview,
@@ -1069,6 +1072,30 @@ def index() -> HTMLResponse:
         need. Computed live from the ONE listings; visibility only —
         no per-record deletion exists here.</li>
 
+      <li><b>M70 explicit model-owned record retention</b> — the four
+        directory-backed evidence families get VERIFIED deletions
+        (the M61/M65/M67/M68 pattern) with the M69 analysis as the
+        ONE blocker source: <code>DELETE
+        /models/&#123;id&#125;/workflows/&#123;wf&#125;</code>,
+        <code>DELETE .../evaluations/&#123;eval&#125;</code>,
+        <code>DELETE .../comparisons/&#123;comp&#125;</code> and
+        <code>DELETE .../gates/decisions/&#123;gate&#125;</code> —
+        each: scope (unknown/registry-invisible -> 404), INTEGRITY
+        FIRST (the persisted result_hash must reproduce; tampered ->
+        409, never deletable), then the M69 non-lineage references as
+        ordered typed blockers (409) — a record is blocked by every
+        persisted DEPENDENT that would be orphaned (comparison/gate
+        sides and suite-run probe results referencing an evaluation;
+        gate decisions referencing their comparison; workflow stage
+        artifacts referencing their targets; workflows and gates are
+        leaves) — then ONE atomic removal with exact files/bytes.
+        The M61 LINEAGE edges (checkpoint parents, run provenance)
+        never block. Read-only retention views
+        (<code>.../retention</code>) expose the same decision. No
+        cascade — referencing records are protected BY the guard;
+        checkpoints keep M61; training runs stay manifest entries;
+        M67 model deletion and every M68 surface are untouched.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -1126,6 +1153,10 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/usage</code> — read-only model usage overview: every referencing record by category (internal families + external root-level suite runs / samples / sample quality / recipes / policies; M66)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/retention</code> — read-only deletion-readiness view (integrity, deletable, ordered blockers; M67)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/records/usage</code> — read-only usage overview of every model-OWNED record (runs/checkpoints/workflows/evaluations/comparisons/gates): persisted references by category, internal vs external split (M69)</li>
+      <li><code>DELETE {prefix}/models/&#123;id&#125;/workflows/&#123;wf&#125;</code> · <code>GET .../retention</code> — explicit verified workflow-record deletion + retention view (leaf records; M70)</li>
+      <li><code>DELETE {prefix}/models/&#123;id&#125;/evaluations/&#123;eval&#125;</code> · <code>GET .../retention</code> — explicit verified evaluation deletion + retention view (blocked by comparison/gate sides, workflow artifacts, suite-run probes; M70)</li>
+      <li><code>DELETE {prefix}/models/&#123;id&#125;/comparisons/&#123;comp&#125;</code> · <code>GET .../retention</code> — explicit verified comparison deletion + retention view (blocked by gate decisions / workflow artifacts; M70)</li>
+      <li><code>DELETE {prefix}/models/&#123;id&#125;/gates/decisions/&#123;gate&#125;</code> · <code>GET .../retention</code> — explicit verified gate-decision deletion + retention view (leaf records; M70)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints</code> — immutable checkpoint store</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/by-run/&#123;run&#125;</code> — checkpoints of one training run (provenance-validated, M46)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best</code> — deterministic selection by MINIMUM persisted validation loss (read-only, criterion explicit, M52)</li>
@@ -2204,6 +2235,70 @@ def list_evaluations_by_seed(model_id: str,
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.delete("/models/{model_id}/evaluations/{eval_id}",
+            response_model=ModelRecordDeletionResult, tags=["evaluation"],
+            responses={409: {"model": ModelRecordDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (the M69 non-lineage reference "
+                             "categories) — or integrity refusal"}})
+def delete_evaluation(model_id: str, eval_id: str
+                      ) -> ModelRecordDeletionResult:
+    """Explicit VERIFIED evaluation record retention (M70): delete exactly ONE
+    evaluation record of ONE model — only with live proof that nothing depends
+    on it.
+
+    The guard: scope through the family getter (unknown or
+    registry-invisible record -> 404, nothing deleted); INTEGRITY
+    FIRST (the record's persisted result_hash must reproduce; a
+    tampered record -> 409, never deletable, no force); then the ONE
+    M69 dependency analysis — ANY persisted non-lineage reference
+    (comparison/gate sides, workflow stage artifacts, suite-run probe
+    results — whatever actually references this record; the M61
+    lineage edges never block) -> 409 with the ordered typed blocker
+    list, the SAME categories and ids the M69 records-usage overview
+    reports. Then ONE atomic removal of the record's own directory.
+    No cascade, no force, no bulk mode."""
+    try:
+        return _forge().delete_model_record(model_id, "evaluation",
+                                            eval_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # protection rejection: re-derive the ordered blocker list for
+        # a structured 409 detail (the M65/M67/M68 pattern)
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().model_record_deletion_blockers(
+                            model_id, "evaluation", eval_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "model_id": model_id,
+                    "category": "evaluation", "record_id": eval_id,
+                    "protected": True, "blockers": blockers}) from exc
+
+
+@api.get("/models/{model_id}/evaluations/{eval_id}/retention",
+         response_model=ModelRecordRetentionOverview, tags=["evaluation"])
+def evaluation_retention(model_id: str, eval_id: str
+                         ) -> ModelRecordRetentionOverview:
+    """Read-only retention overview of ONE evaluation record (M70): the
+    deletion-readiness view — identity, the ordered artifact files +
+    total bytes of the record's OWN directory, the record's
+    result-hash integrity outcome, ``deletable`` and the ordered
+    blockers (the SAME list the DELETE guard refuses on — exactly the
+    M69-visible non-lineage references). A tampered record is never
+    deletable. Zero storage, zero mutation."""
+    try:
+        return _forge().model_record_retention_overview(
+            model_id, "evaluation", eval_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/evaluations/{eval_id}", response_model=EvaluationRecord,
          tags=["evaluation"])
 def get_evaluation(model_id: str, eval_id: str) -> EvaluationRecord:
@@ -2487,6 +2582,70 @@ def list_comparisons_by_seed(model_id: str,
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.delete("/models/{model_id}/comparisons/{comparison_id}",
+            response_model=ModelRecordDeletionResult, tags=["comparison"],
+            responses={409: {"model": ModelRecordDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (the M69 non-lineage reference "
+                             "categories) — or integrity refusal"}})
+def delete_comparison(model_id: str, comparison_id: str
+                      ) -> ModelRecordDeletionResult:
+    """Explicit VERIFIED comparison record retention (M70): delete exactly ONE
+    comparison record of ONE model — only with live proof that nothing depends
+    on it.
+
+    The guard: scope through the family getter (unknown or
+    registry-invisible record -> 404, nothing deleted); INTEGRITY
+    FIRST (the record's persisted result_hash must reproduce; a
+    tampered record -> 409, never deletable, no force); then the ONE
+    M69 dependency analysis — ANY persisted non-lineage reference
+    (comparison/gate sides, workflow stage artifacts, suite-run probe
+    results — whatever actually references this record; the M61
+    lineage edges never block) -> 409 with the ordered typed blocker
+    list, the SAME categories and ids the M69 records-usage overview
+    reports. Then ONE atomic removal of the record's own directory.
+    No cascade, no force, no bulk mode."""
+    try:
+        return _forge().delete_model_record(model_id, "comparison",
+                                            comparison_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # protection rejection: re-derive the ordered blocker list for
+        # a structured 409 detail (the M65/M67/M68 pattern)
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().model_record_deletion_blockers(
+                            model_id, "comparison", comparison_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "model_id": model_id,
+                    "category": "comparison", "record_id": comparison_id,
+                    "protected": True, "blockers": blockers}) from exc
+
+
+@api.get("/models/{model_id}/comparisons/{comparison_id}/retention",
+         response_model=ModelRecordRetentionOverview, tags=["comparison"])
+def comparison_retention(model_id: str, comparison_id: str
+                         ) -> ModelRecordRetentionOverview:
+    """Read-only retention overview of ONE comparison record (M70): the
+    deletion-readiness view — identity, the ordered artifact files +
+    total bytes of the record's OWN directory, the record's
+    result-hash integrity outcome, ``deletable`` and the ordered
+    blockers (the SAME list the DELETE guard refuses on — exactly the
+    M69-visible non-lineage references). A tampered record is never
+    deletable. Zero storage, zero mutation."""
+    try:
+        return _forge().model_record_retention_overview(
+            model_id, "comparison", comparison_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/comparisons/{comparison_id}", response_model=ComparisonRecord,
          tags=["comparison"])
 def get_comparison(model_id: str, comparison_id: str) -> ComparisonRecord:
@@ -2711,6 +2870,70 @@ def list_gate_decisions_by_baseline_type(model_id: str,
     try:
         return _forge().list_gate_decisions_for_baseline_type(
             model_id, baseline_type)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.delete("/models/{model_id}/gates/decisions/{decision_id}",
+            response_model=ModelRecordDeletionResult, tags=["gates"],
+            responses={409: {"model": ModelRecordDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (the M69 non-lineage reference "
+                             "categories) — or integrity refusal"}})
+def delete_gate(model_id: str, decision_id: str
+                      ) -> ModelRecordDeletionResult:
+    """Explicit VERIFIED gate decision retention (M70): delete exactly ONE
+    gate decision of ONE model — only with live proof that nothing depends
+    on it.
+
+    The guard: scope through the family getter (unknown or
+    registry-invisible record -> 404, nothing deleted); INTEGRITY
+    FIRST (the record's persisted result_hash must reproduce; a
+    tampered record -> 409, never deletable, no force); then the ONE
+    M69 dependency analysis — ANY persisted non-lineage reference
+    (comparison/gate sides, workflow stage artifacts, suite-run probe
+    results — whatever actually references this record; the M61
+    lineage edges never block) -> 409 with the ordered typed blocker
+    list, the SAME categories and ids the M69 records-usage overview
+    reports. Then ONE atomic removal of the record's own directory.
+    No cascade, no force, no bulk mode."""
+    try:
+        return _forge().delete_model_record(model_id, "gate",
+                                            decision_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # protection rejection: re-derive the ordered blocker list for
+        # a structured 409 detail (the M65/M67/M68 pattern)
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().model_record_deletion_blockers(
+                            model_id, "gate", decision_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "model_id": model_id,
+                    "category": "gate", "record_id": decision_id,
+                    "protected": True, "blockers": blockers}) from exc
+
+
+@api.get("/models/{model_id}/gates/decisions/{decision_id}/retention",
+         response_model=ModelRecordRetentionOverview, tags=["gates"])
+def gate_retention(model_id: str, decision_id: str
+                         ) -> ModelRecordRetentionOverview:
+    """Read-only retention overview of ONE gate decision (M70): the
+    deletion-readiness view — identity, the ordered artifact files +
+    total bytes of the record's OWN directory, the record's
+    result-hash integrity outcome, ``deletable`` and the ordered
+    blockers (the SAME list the DELETE guard refuses on — exactly the
+    M69-visible non-lineage references). A tampered record is never
+    deletable. Zero storage, zero mutation."""
+    try:
+        return _forge().model_record_retention_overview(
+            model_id, "gate", decision_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -3102,6 +3325,70 @@ def list_workflows_by_status(model_id: str, status: WorkflowStatus
     is not a workflow id.)"""
     try:
         return _forge().list_workflows_for_status(model_id, status)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.delete("/models/{model_id}/workflows/{workflow_id}",
+            response_model=ModelRecordDeletionResult, tags=["workflows"],
+            responses={409: {"model": ModelRecordDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (the M69 non-lineage reference "
+                             "categories) — or integrity refusal"}})
+def delete_workflow(model_id: str, workflow_id: str
+                      ) -> ModelRecordDeletionResult:
+    """Explicit VERIFIED workflow record retention (M70): delete exactly ONE
+    workflow record of ONE model — only with live proof that nothing depends
+    on it.
+
+    The guard: scope through the family getter (unknown or
+    registry-invisible record -> 404, nothing deleted); INTEGRITY
+    FIRST (the record's persisted result_hash must reproduce; a
+    tampered record -> 409, never deletable, no force); then the ONE
+    M69 dependency analysis — ANY persisted non-lineage reference
+    (comparison/gate sides, workflow stage artifacts, suite-run probe
+    results — whatever actually references this record; the M61
+    lineage edges never block) -> 409 with the ordered typed blocker
+    list, the SAME categories and ids the M69 records-usage overview
+    reports. Then ONE atomic removal of the record's own directory.
+    No cascade, no force, no bulk mode."""
+    try:
+        return _forge().delete_model_record(model_id, "workflow",
+                                            workflow_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # protection rejection: re-derive the ordered blocker list for
+        # a structured 409 detail (the M65/M67/M68 pattern)
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().model_record_deletion_blockers(
+                            model_id, "workflow", workflow_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "model_id": model_id,
+                    "category": "workflow", "record_id": workflow_id,
+                    "protected": True, "blockers": blockers}) from exc
+
+
+@api.get("/models/{model_id}/workflows/{workflow_id}/retention",
+         response_model=ModelRecordRetentionOverview, tags=["workflows"])
+def workflow_retention(model_id: str, workflow_id: str
+                         ) -> ModelRecordRetentionOverview:
+    """Read-only retention overview of ONE workflow record (M70): the
+    deletion-readiness view — identity, the ordered artifact files +
+    total bytes of the record's OWN directory, the record's
+    result-hash integrity outcome, ``deletable`` and the ordered
+    blockers (the SAME list the DELETE guard refuses on — exactly the
+    M69-visible non-lineage references). A tampered record is never
+    deletable. Zero storage, zero mutation."""
+    try:
+        return _forge().model_record_retention_overview(
+            model_id, "workflow", workflow_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

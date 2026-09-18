@@ -736,14 +736,14 @@ def test_m69_api_records_usage(api_client):
     assert api_client.get(
         "/api/v1/models/no-m69/records/usage").status_code == 404
 
-    # OpenAPI: 97 paths, GET-only, delete set unchanged (7)
+    # OpenAPI: 101 paths, GET-only, delete set grew to 11 with M70
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 97
+    assert len(spec["paths"]) == 101
     NEW = "/api/v1/models/{model_id}/records/usage"
     assert set(spec["paths"][NEW].keys()) == {"get"}
     deletes = sorted(p for p, ops in spec["paths"].items()
                      if "delete" in ops)
-    assert len(deletes) == 7
+    assert len(deletes) == 11
     for s in ("RecordReference", "ModelOwnedRecordUsage",
               "ModelOwnedRecordCategory", "ModelRecordsUsageOverview"):
         assert s in spec["components"]["schemas"], s

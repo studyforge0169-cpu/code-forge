@@ -42,6 +42,9 @@ from .schemas import (
     ModelDeletionBlocker,
     ModelDeletionResult,
     ModelOwnedRecordCategory,
+    ModelRecordDeletionBlocker,
+    ModelRecordDeletionResult,
+    ModelRecordRetentionOverview,
     ModelOwnedRecordUsage,
     ModelRecordsUsageOverview,
     ModelRecord,
@@ -1351,6 +1354,185 @@ class ModelForge:
             internal_references=internal_refs,
             external_references=external_refs,
             categories=categories)
+
+    # The M70 deletable model-owned record families: the four
+    # directory-backed evidence records. Checkpoints keep their M61
+    # guard; training runs are manifest entries (not individually
+    # deletable records) — both deliberately OUT OF M70 SCOPE.
+    MODEL_RECORD_DELETABLE_CATEGORIES = ("workflow", "evaluation",
+                                         "comparison", "gate")
+
+    def _deletable_record_scope(self, model_id: str, category: str,
+                                record_id: str):
+        """Resolve ONE deletable model-owned record (M70 scope step):
+        validate the category against the M70 deletable families
+        (ValueError otherwise — checkpoints and training runs are out
+        of scope), then scope through the family's authoritative
+        getter (unknown model, unknown record, or registry-invisible
+        (unparseable manifest) record -> FileNotFoundError, nothing
+        deleted). Returns (record, family_engine, record_dir,
+        result_hash_checker)."""
+        if category == "workflow":
+            getter = lambda rid: self.workflows.get_workflow(  # noqa: E731
+                model_id, rid)
+            engine, rdir = self.workflows, self.workflows._workflow_dir(
+                model_id, record_id)
+            check = self.workflows.result_hash
+        elif category == "evaluation":
+            getter = lambda rid: self.evaluation.get_evaluation(  # noqa: E731
+                model_id, rid)
+            engine, rdir = self.evaluation, self.evaluation._eval_dir(
+                model_id, record_id)
+            check = self.evaluation.result_hash
+        elif category == "comparison":
+            getter = lambda rid: self.comparison.get_comparison(  # noqa: E731
+                model_id, rid)
+            engine, rdir = self.comparison, self.comparison._comp_dir(
+                model_id, record_id)
+            check = self.comparison.result_hash
+        elif category == "gate":
+            getter = lambda rid: self.gates.get_decision(  # noqa: E731
+                model_id, rid)
+            engine, rdir = self.gates, self.gates._gate_dir(
+                model_id, record_id)
+            check = self.gates.result_hash
+        else:
+            raise ValueError(
+                f"record family '{category}' has no M70 deletion "
+                f"(deletable families: "
+                f"{', '.join(self.MODEL_RECORD_DELETABLE_CATEGORIES)})")
+        record = self._scope_data_artifact(getter, record_id, category)
+        return record, engine, rdir, check
+
+    def model_record_deletion_blockers(
+            self, model_id: str, category: str, record_id: str
+    ) -> list[ModelRecordDeletionBlocker]:
+        """The M70 deletion guard's ordered blocker list: EXACTLY the
+        NON-LINEAGE persisted references of the ONE M69 usage
+        analysis — the same categories, the same reference ids, the
+        same canonical order (category order, then sorted reference
+        ids). The M61-classified LINEAGE edges (checkpoint parents,
+        run provenance) never block (and never point at the four M70
+        families anyway — they target checkpoints); every other
+        reference the M69 overview reports for the record is ONE
+        typed blocker: a record is blocked by every persisted
+        DEPENDENT that would be orphaned (comparison/gate sides and
+        suite-run probe results referencing an evaluation; gate
+        decisions and workflow stage artifacts referencing their
+        targets). Nothing protected that is not shown, nothing shown
+        that is not protected. Zero storage, zero mutation."""
+        record, _, _, _ = self._deletable_record_scope(
+            model_id, category, record_id)
+        overview = self.model_records_usage_overview(model_id)
+        entry = next(
+            (r for c in overview.categories if c.category == category
+             for r in c.records if r.record_id == record_id), None)
+        blockers: list[ModelRecordDeletionBlocker] = []
+        if entry is not None:
+            for ref in entry.references:
+                if ref.category in self.RECORD_REFERENCE_LINEAGE:
+                    continue  # M61 informational lineage never blocks
+                blockers.append(ModelRecordDeletionBlocker(
+                    category=ref.category,
+                    reference_id=ref.reference_id,
+                    detail=self._record_blocker_detail(ref.category,
+                                                       ref.reference_id)))
+        return blockers
+
+    @staticmethod
+    def _record_blocker_detail(category: str, ref_id: str) -> str:
+        """Short authoritative identifying detail for ONE M70 blocker
+        (the referencing record's family, M67 pattern)."""
+        return {
+            "model": "model manifest pointer",
+            "checkpoint": f"checkpoint '{ref_id}'",
+            "run_provenance": "run provenance",
+            "workflow": f"workflow '{ref_id}' stage artifact",
+            "evaluation": f"evaluation '{ref_id}'",
+            "comparison": f"comparison '{ref_id}'",
+            "gate": f"gate decision '{ref_id}'",
+            "suite_run": f"suite run '{ref_id}'",
+            "sample": f"sample '{ref_id}'",
+            "sample_quality": f"sample-quality measurement '{ref_id}'",
+        }.get(category, f"record '{ref_id}'")
+
+    def model_record_retention_overview(
+            self, model_id: str, category: str,
+            record_id: str) -> ModelRecordRetentionOverview:
+        """Read-only live-computed retention overview of ONE
+        model-owned record (M70): the deletion-readiness view —
+        identity, the ordered artifact files + total bytes of the
+        record's OWN directory, the record's result-hash integrity
+        outcome, ``deletable`` (True iff integrity passes AND the ONE
+        M69 analysis finds no non-lineage reference) and the ordered
+        blockers (the SAME list the DELETE guard refuses on). A
+        tampered record is never deletable; an unknown or
+        registry-invisible (unparseable manifest) record ->
+        FileNotFoundError (404 at the API). Zero storage, zero
+        mutation, byte-identical over unchanged state."""
+        record, _, rdir, check = self._deletable_record_scope(
+            model_id, category, record_id)
+        files, nbytes = self._artifact_files(rdir)
+        integrity_verified = check(record) == record.result_hash
+        blockers = self.model_record_deletion_blockers(
+            model_id, category, record_id)
+        return ModelRecordRetentionOverview(
+            model_id=model_id,
+            category=category,
+            record_id=record_id,
+            created_at=record.created_at,
+            files=files,
+            size_bytes=nbytes,
+            integrity_verified=integrity_verified,
+            deletable=integrity_verified and not blockers,
+            blockers=blockers)
+
+    def delete_model_record(self, model_id: str, category: str,
+                            record_id: str) -> ModelRecordDeletionResult:
+        """Explicit VERIFIED model-owned record retention (M70):
+        remove ONE workflow / evaluation / comparison / gate decision
+        — only after proving, live, that nothing depends on it. The
+        full guard, in order: (1) scope through the family getter
+        (unknown model, unknown record, or registry-invisible
+        (unparseable manifest) record -> FileNotFoundError, nothing
+        deleted); (2) INTEGRITY FIRST (the M61/M65/M67/M68 ordering):
+        the record's persisted ``result_hash`` must reproduce from its
+        semantic payload — a tampered/corrupt record is REFUSED with
+        RuntimeError (409), never deletable, no force flag; (3) the
+        LIVE dependency analysis (``model_record_deletion_blockers``
+        — EXACTLY the NON-LINEAGE references of the ONE M69 usage
+        overview: comparison/gate sides, workflow stage artifacts and
+        suite-run probe results referencing the record; ANY reference
+        -> ValueError listing the ordered typed blockers, so deletion
+        can never orphan a persisted dependent. The M61 LINEAGE edges
+        never block); (4) ATOMIC removal of the record's own
+        directory only (the family engine's ``delete`` — measure +
+        ``atomic_delete_dir``, the ``DatasetEngine.delete`` pattern).
+        No cascade, no force, no bulk mode — exactly the one
+        explicitly requested record. Checkpoints keep their M61
+        guard; training runs are manifest entries; model deletion
+        (M67) and every M68 surface are untouched."""
+        record, engine, rdir, check = self._deletable_record_scope(
+            model_id, category, record_id)
+        if check(record) != record.result_hash:
+            raise RuntimeError(
+                f"{category} '{record_id}' of model '{model_id}' "
+                f"failed integrity verification — refusing to delete "
+                f"corrupted storage")
+        blockers = self.model_record_deletion_blockers(
+            model_id, category, record_id)
+        if blockers:
+            summary = "; ".join(f"{b.category}: {b.reference_id}"
+                                for b in blockers)
+            raise ValueError(
+                f"{category} '{record_id}' of model '{model_id}' is "
+                f"referenced and cannot be deleted — {summary}")
+        files, nbytes = engine.delete(model_id, record_id)
+        log.info("M70 verified %s deletion %s/%s (%d files, %d bytes)",
+                 category, model_id, record_id, files, nbytes)
+        return ModelRecordDeletionResult(
+            model_id=model_id, category=category, record_id=record_id,
+            files_removed=files, bytes_reclaimed=nbytes)
 
     @staticmethod
     def _recipe_model_ids(recipe) -> set[str]:

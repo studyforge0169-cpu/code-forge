@@ -58,7 +58,8 @@ from .schemas import (
     EvaluationSplit,
     ModelRecord,
 )
-from .storage import Storage, atomic_write_json, read_json
+from .storage import (Storage, atomic_delete_dir,
+                       atomic_write_json, read_json)
 from .tokenizer import TokenizerEngine
 from .training import TrainingEngine, open_bin
 
@@ -600,6 +601,25 @@ class EvaluationEngine:
     # ------------------------------------------------------------------ #
     # Deterministic result hash + persistence
     # ------------------------------------------------------------------ #
+
+    def delete(self, model_id: str, eval_id: str) -> tuple[int, int]:
+        """Remove ONE evaluation record's directory ATOMICALLY (M70
+        low-level primitive, the ``DatasetEngine.delete`` pattern): the
+        record's own single-manifest directory disappears in ONE
+        ``os.rename`` to a hidden ``.tmp-delete-*`` sibling the
+        registry scans skip. Returns ``(files_removed,
+        bytes_reclaimed)`` measured from the files as they existed
+        immediately before removal. The CALLER (the forge facade)
+        owns the safety decision — scope, the result-hash integrity
+        verification and the M69 reference guard must have passed
+        before this is called (comparisons, gates, workflow stage
+        artifacts and suite-run probe results may reference an
+        evaluation)."""
+        edir = self._eval_dir(model_id, eval_id)
+        files = sorted(p for p in edir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(edir)
+        return len(files), nbytes
 
     @staticmethod
     def result_hash(record: EvaluationRecord) -> str:

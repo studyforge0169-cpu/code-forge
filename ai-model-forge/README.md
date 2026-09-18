@@ -2094,6 +2094,58 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 70 — model-owned record RETENTION & DELETION
+  (`DELETE /models/{id}/workflows/{workflow_id}` +
+  `DELETE /models/{id}/evaluations/{eval_id}` +
+  `DELETE /models/{id}/comparisons/{comparison_id}` +
+  `DELETE /models/{id}/gates/decisions/{decision_id}` + the four
+  family retention views `GET /models/{id}/workflows/{workflow_id}/retention`,
+  `GET /models/{id}/evaluations/{eval_id}/retention`,
+  `GET /models/{id}/comparisons/{comparison_id}/retention`,
+  `GET /models/{id}/gates/decisions/{decision_id}/retention`)
+- **concept**: the four model-owned EVIDENCE families (the M7
+  workflows, M4 evaluations, M5 comparisons, M6 gate decisions) get
+  explicit VERIFIED per-record deletion — the M61/M65/M67/M68 pattern,
+  with the M69 usage overview as the ONE canonical blocker source (no
+  second scanner anywhere). Out of scope by design: checkpoints (M61
+  keeps them) and training runs (manifest entries stay); `delete`
+  with any other category raises `ValueError`, unknown records 404
+- **the guard, per record** (the exact M68 order): SCOPE (unknown
+  model / unknown record -> 404, nothing touched) -> INTEGRITY FIRST
+  (the persisted `result_hash` must reproduce from the semantic
+  payload; tampered or corrupt -> 409, never deletable, no force
+  flag) -> BLOCKERS (the M69 view filtered to the NON-LINEAGE
+  reference categories — `model`, `checkpoint`-parent and
+  `run_provenance` edges are informational history and NEVER block;
+  the persisted DEPENDENTS that would be orphaned DO: comparison
+  sides and gate sides -> their evaluation, gate `comparison_id` ->
+  its comparison, workflow stage artifacts -> their run / evaluation /
+  comparison / gate targets, suite-run probe results and
+  sample / sample-quality checkpoints -> their evaluations, all
+  EXTERNAL) -> ONE atomic removal (`atomic_delete_dir`) with the
+  deterministic `{model_id, category, record_id, files_removed,
+  bytes_reclaimed}` result; no cascade, no force, no bulk, no repair
+- **leaf status (explicit, from inspection)**: WORKFLOWS and GATES
+  are leaves — nothing persists a workflow id or a decision id;
+  evaluations and comparisons are interior nodes held by the families
+  above; deleting a gate unblocks its comparison (and then its side
+  evaluations), deleting a comparison unblocks its side evaluations,
+  deleting a workflow unblocks its stage-artifact targets, and an M68
+  suite-run deletion unblocks its probe evaluations from OUTSIDE
+- **retention views (M70 delta)**: per record — identity, ordered
+  artifact files + total bytes, the integrity outcome,
+  `created_at`, `deletable`, ordered blockers — computed live with
+  zero storage; the required invariant holds by construction:
+  `retention.blockers` == the DELETE 409 blockers == the M69
+  non-lineage references (same categories, ids, order) and
+  `retention.deletable` == DELETE would succeed (both directions
+  proven in tests and live); the 409 body is the typed
+  `{message, model_id, category, record_id, protected: true,
+  blockers}` shape (integrity refusals keep the plain-string detail)
+- OpenAPI: path count 97 -> 101 (the four M70 DELETEs are new
+  operations on the EXISTING family resource paths; the four
+  retention views are new GET-only paths)
+
 ### Milestone 69 — model-owned record USAGE OVERVIEW
   (`GET /models/{model_id}/records/usage`)
 - **concept**: the M66 pattern one level down — for every model-OWNED

@@ -63,7 +63,8 @@ from .schemas import (
     EvaluationSplit,
     ModelRecord,
 )
-from .storage import Storage, atomic_write_json, read_json
+from .storage import (Storage, atomic_delete_dir,
+                       atomic_write_json, read_json)
 from .tokenizer import TokenizerEngine
 from .training import TrainingEngine
 
@@ -702,6 +703,25 @@ class ComparisonEngine:
     # ------------------------------------------------------------------ #
     # Deterministic result hash + persistence
     # ------------------------------------------------------------------ #
+
+    def delete(self, model_id: str, comparison_id: str
+               ) -> tuple[int, int]:
+        """Remove ONE comparison record's directory ATOMICALLY (M70
+        low-level primitive, the ``DatasetEngine.delete`` pattern): the
+        record's own single-manifest directory disappears in ONE
+        ``os.rename`` to a hidden ``.tmp-delete-*`` sibling the
+        registry scans skip. Returns ``(files_removed,
+        bytes_reclaimed)`` measured from the files as they existed
+        immediately before removal. The CALLER (the forge facade)
+        owns the safety decision — scope, the result-hash integrity
+        verification and the M69 reference guard must have passed
+        before this is called (gate decisions may persist a
+        comparison_id)."""
+        cdir = self._comp_dir(model_id, comparison_id)
+        files = sorted(p for p in cdir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(cdir)
+        return len(files), nbytes
 
     @staticmethod
     def result_hash(record: ComparisonRecord) -> str:

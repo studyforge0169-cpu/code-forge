@@ -71,7 +71,8 @@ from .schemas import (
     GateRequest,
     ModelRecord,
 )
-from .storage import Storage, atomic_write_json, read_json
+from .storage import (Storage, atomic_delete_dir,
+                       atomic_write_json, read_json)
 from .training import TrainingEngine
 
 log = forge_cfg.get_logger("gates")
@@ -640,6 +641,24 @@ class GateEngine:
             perplexity=rec.perplexity,
             token_count=rec.token_count,
         )
+
+    def delete(self, model_id: str, decision_id: str) -> tuple[int, int]:
+        """Remove ONE gate decision's directory ATOMICALLY (M70
+        low-level primitive, the ``DatasetEngine.delete`` pattern): the
+        record's own single-manifest directory disappears in ONE
+        ``os.rename`` to a hidden ``.tmp-delete-*`` sibling the
+        registry scans skip. Returns ``(files_removed,
+        bytes_reclaimed)`` measured from the files as they existed
+        immediately before removal. The CALLER (the forge facade)
+        owns the safety decision — scope, the result-hash integrity
+        verification and the M69 reference guard must have passed
+        before this is called. A gate decision is a LEAF record:
+        nothing persists a decision_id."""
+        gdir = self._gate_dir(model_id, decision_id)
+        files = sorted(p for p in gdir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(gdir)
+        return len(files), nbytes
 
     @staticmethod
     def result_hash(record: GateDecision) -> str:

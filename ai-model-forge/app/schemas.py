@@ -1158,6 +1158,81 @@ class ModelRecordsUsageOverview(BaseModel):
     categories: list[ModelOwnedRecordCategory] = Field(default_factory=list)
 
 
+class ModelRecordDeletionBlocker(BaseModel):
+    """Why ONE model-owned record may not be deleted (M70 reference
+    safety): ONE persisted NON-LINEAGE reference that would be
+    orphaned by the deletion.
+
+    ``category`` is the referencing family's stable name from the
+    canonical M69 reference-category order; ``reference_id`` is the
+    SAME persisted record id the M69 usage overview reports;
+    ``detail`` carries short authoritative identifying information.
+    The M61-classified LINEAGE edges (a surviving checkpoint's
+    ``parent_checkpoint_id``, the manifest's run-provenance pointers)
+    NEVER appear here — informational history, exactly the M61/M69
+    classification. Computed LIVE from the ONE M69 analysis — never
+    stored, never a second scanner. The guard refuses on EXACTLY the
+    M69-visible non-lineage references: nothing protected that is not
+    shown, nothing shown that is not protected."""
+
+    category: str
+    reference_id: str
+    detail: str
+
+
+class ModelRecordDeletionResult(BaseModel):
+    """Deterministic result of ONE explicit verified model-owned
+    record deletion (M70): what was removed and how much storage it
+    held. The record's own single-manifest directory (workflow /
+    evaluation / comparison / gate decision) is gone atomically;
+    every other family's records are untouched (they were protected
+    BY the guard)."""
+
+    model_id: str
+    category: str
+    record_id: str
+    files_removed: int
+    bytes_reclaimed: int
+
+
+class ModelRecordDeletionBlocked(BaseModel):
+    """The structured 409 detail of a REFUSED model-owned record
+    deletion (M70): the ordered typed blocker list — the SAME
+    categories and reference ids the M69 usage overview reports — so
+    a client can render exactly what protects the record."""
+
+    message: str
+    model_id: str
+    category: str
+    record_id: str
+    protected: bool = True
+    blockers: list[ModelRecordDeletionBlocker] = Field(default_factory=list)
+
+
+class ModelRecordRetentionOverview(BaseModel):
+    """Read-only live-computed retention overview of ONE model-owned
+    record (M70): the deletion-readiness view for a workflow /
+    evaluation / comparison / gate decision — identity, the ordered
+    artifact files + total bytes of the record's OWN directory, the
+    record's result-hash integrity outcome, ``deletable`` (True iff
+    integrity passes AND the ONE M69 analysis finds no non-lineage
+    reference) and the ordered blockers (the SAME list the DELETE
+    guard refuses on). A tampered record is never deletable; an
+    unknown or registry-invisible (unparseable manifest) record ->
+    FileNotFoundError (404 at the API). Zero storage, zero mutation,
+    byte-identical over unchanged state."""
+
+    model_id: str
+    category: str
+    record_id: str
+    created_at: datetime
+    files: list[str] = Field(default_factory=list)
+    size_bytes: int
+    integrity_verified: bool
+    deletable: bool
+    blockers: list[ModelRecordDeletionBlocker] = Field(default_factory=list)
+
+
 class ModelDeletionBlocker(BaseModel):
     """Why ONE model may not be deleted (M67 reference safety): ONE
     persisted EXTERNAL reference that would be orphaned by the

@@ -632,7 +632,7 @@ def test_m68_api_lifecycle(api_client):
     # EXISTING resource paths; the three M68-delta retention views are
     # new GET-only paths); delete set == 7 (unchanged by the delta)
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 97
+    assert len(spec["paths"]) == 101
     for path, get_and_delete in (
             ("/api/v1/models/{model_id}/suite-runs/{suite_run_id}", True),
             ("/api/v1/models/{model_id}/samples/{sample_id}", True),
@@ -647,9 +647,13 @@ def test_m68_api_lifecycle(api_client):
         "/api/v1/datasets/{dataset_id}",
         "/api/v1/models/{model_id}",
         "/api/v1/models/{model_id}/checkpoints/{checkpoint_id}",
+        "/api/v1/models/{model_id}/comparisons/{comparison_id}",
+        "/api/v1/models/{model_id}/evaluations/{eval_id}",
+        "/api/v1/models/{model_id}/gates/decisions/{decision_id}",
         "/api/v1/models/{model_id}/sample-quality/{evaluation_id}",
         "/api/v1/models/{model_id}/samples/{sample_id}",
         "/api/v1/models/{model_id}/suite-runs/{suite_run_id}",
+        "/api/v1/models/{model_id}/workflows/{workflow_id}",
         "/api/v1/tokenizers/{tokenizer_id}",
     ]
     for s in ("SuiteRunDeletionResult", "SampleDeletionResult",
