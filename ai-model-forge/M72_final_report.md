@@ -55,7 +55,7 @@ green at that tree; OpenAPI 104/14; production 52 files /
 
 ## 3. Tests
 
-`tests/test_project_retention.py` (NEW, 4 tests, 566 lines):
+`tests/test_project_retention.py` (NEW, 4 tests, 515 lines):
 
 * **Oracles**: per-family numbers == the SUM of the per-item views
   (the aggregation source) AND raw filesystem walks for the
@@ -119,6 +119,22 @@ The inventory reports it exactly: 34 artifacts across 15 families,
 artifact sets), 15 blocked, 6,323,505 B reclaimable through the
 existing verified deletion routes — reported, never executed.
 
+**Post-delivery audit addendum (next turn)**: the sandbox was RESET
+after M72's delivery (fresh clone at `f86b670`; the workspace files
+persisted untracked; the remote already contained `191b157`,
+`a448bbe`, `725f2b5`, `cb1056a`). The audit verified the worktree
+delta == exactly the M72 commits' file list, resynced the branch to
+`cb1056a`, and independently re-ran: pyflakes/compileall clean, the
+full suite **660 ×2 green** on a rebuilt venv, OpenAPI 105/14 with
+the GET-only route and 15 families, README counts 660/30, and
+`m72_pre.sha256` == `m71_pre.sha256`. **The production root
+`/home/user/ai-model-forge-data` no longer exists in the reset
+sandbox** — the 52/52 byte-identity above is the DELIVERY-TIME
+certification (recorded in §4 and in `m72_pre.sha256`) and cannot
+be re-verified physically here; future live smokes need the root
+restored or a fresh baseline initialized (a user decision — see
+§9).
+
 ## 6. Git
 
 §13 first: the M71 turn ended with both commits UNPUSHED (sandbox
@@ -131,6 +147,11 @@ updated test files, `tests/test_project_retention.py`, README
 counts + the M72 section, `smoke_m72_live.py`, this report) and the
 inventory commit (`m72_pre.sha256`, 52/52 == `m71_pre`). Both
 pushed; remote HEAD == local HEAD verified after the push.
+
+**Audit delta (next turn)**: one report correction (the test-file
+line count above, 566 -> 515) + the §5 audit addendum + the §9
+production-availability pre-step, committed and pushed after the
+re-verification; remote HEAD == local HEAD re-verified.
 
 ## 7. Limitations
 
@@ -175,5 +196,18 @@ deterministic) the artifacts that BECOME deletable as a result —
 every step derived from the EXISTING M61–M72 analyses recomputed on
 a throwaway in-memory shadow (never mutating storage), with the
 exact files/bytes that would become reclaimable (the M72 overlap
-rule). Read-only, zero mutation, full suite ×2, live smoke once,
-9 sections, inventory `m73_pre.sha256` == `m72_pre.sha256`.
+rule). Read-only, zero mutation, full suite ×2, 9 sections.
+
+**§0 pre-step (added by the audit — the sandbox reset destroyed the
+production root)**: before anything else, determine whether
+`/home/user/ai-model-forge-data` exists. If it does (restored by
+the user), capture `m73_pre.sha256` and require it ==
+`m72_pre.sha256` (52/52), then run the live smoke exactly once as
+usual. If it does NOT, the live certification runs against a
+DESIGNATED BASELINE copy built once from the documented exercise
+path (a fresh root exercising every family, disclosed as a NEW
+baseline with its own `m73_pre.sha256` — never presented as the
+old production), OR the user explicitly restores the original root
+first. Never manufacture production resources silently; the choice
+is recorded in §4 of the M73 report either way.
+
