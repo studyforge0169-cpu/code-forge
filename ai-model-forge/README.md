@@ -2861,7 +2861,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 649 tests
+pytest                       # 652 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3370,7 +3370,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 649 tests across 27 suites
+  tests/               # 652 tests across 28 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
