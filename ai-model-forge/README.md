@@ -2094,6 +2094,47 @@ generation never trains, evaluates, scores, ranks or judges output.
   automatic stopping, no convergence detection, no repetition selection
 - OpenAPI: path count 84 -> 85 (exactly this one new read-only route)
 
+### Milestone 69 — model-owned record USAGE OVERVIEW
+  (`GET /models/{model_id}/records/usage`)
+- **concept**: the M66 pattern one level down — for every model-OWNED
+  record (the six model-scoped families: `training_run` (the
+  manifest's run provenance), `checkpoint`, `workflow`, `evaluation`,
+  `comparison`, `gate`), what persisted records currently reference
+  it. Read-only discovery, preparatory for a future per-record
+  lifecycle milestone; no per-record deletion exists here
+- **reference categories (canonical order)**: the REFERENCING
+  families — `model` (the manifest's own `latest_checkpoint` /
+  `best_checkpoint` pointers), `checkpoint` (a surviving checkpoint's
+  `parent_checkpoint_id` — LINEAGE), `run_provenance` (the manifest's
+  provenance checkpoint pointers — LINEAGE), `workflow` (M7 stage
+  artifacts chain run/evaluation/comparison/decision ids + train-stage
+  final checkpoints + suggestions), `evaluation` / `comparison` /
+  `gate` (the M4/M5/M6 evidence records: measured checkpoints,
+  comparison sides' evaluation + checkpoint ids, gate sides and
+  `comparison_id`) — all INTERNAL to `models/{id}/` — plus the
+  EXTERNAL root-level families whose records persist model-owned
+  record ids OUTSIDE the model directory: `suite_run` (evaluated
+  state checkpoint + probe evaluation ids), `sample` (the generating
+  checkpoint), `sample_quality` (the measured checkpoint) — exactly
+  the edges that would survive model-record deletion
+- **lineage classification (the M61 analysis preserved)**: the
+  `checkpoint` (parent) and `run_provenance` edges are informational
+  history — nothing loads state through them, and M61 checkpoint
+  deletion deliberately never blocks on them; they are reported under
+  their own categories so the future per-record blocker surface stays
+  obvious (everything EXCEPT those two edge kinds). The one M61
+  blocker not visible here is the live M52 best selection, which is
+  computed, not persisted
+- **semantics**: unique `(category, reference-id)` pairs per record
+  (a record referencing the same target through several fields counts
+  once), canonical category order then sorted ids, records sorted by
+  id, exact per-record and aggregate `internal_references` /
+  `external_references` splits; record sets == the ONE public
+  listings (M66 agreement); computed live, zero storage, zero
+  mutation, byte-identical over unchanged state; unknown or
+  registry-invisible (unparseable manifest) model -> 404
+- OpenAPI: path count 96 -> 97 (exactly this one new read-only route)
+
 ### Milestone 68 — explicit SUITE-RUN & SAMPLE LIFECYCLE
   (`DELETE /models/{id}/suite-runs/{run}` + `DELETE /models/{id}/samples/{sample}`
   + `DELETE /models/{id}/sample-quality/{eval}`)
@@ -2768,7 +2809,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 646 tests
+pytest                       # 649 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3277,7 +3318,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 646 tests across 26 suites
+  tests/               # 649 tests across 27 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

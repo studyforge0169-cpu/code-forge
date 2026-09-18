@@ -44,6 +44,7 @@ from .schemas import (
     ModelDeletionResult,
     ModelRecord,
     ModelRetentionOverview,
+    ModelRecordsUsageOverview,
     ModelUsageOverview,
     ProjectInfo,
     ProjectStorageOverview,
@@ -1048,6 +1049,26 @@ def index() -> HTMLResponse:
         files/bytes, integrity, <code>deletable</code>, ordered
         blockers — the SAME list the DELETE guard refuses on).</li>
 
+      <li><b>M69 model-owned record usage overview</b> —
+        <code>GET /models/&#123;id&#125;/records/usage</code> answers
+        "what persisted records currently reference each model-OWNED
+        record?" — the reference topology one level below the M66
+        model usage: for every training run, checkpoint, workflow,
+        evaluation, comparison and gate decision of ONE model, its
+        persisted references by category (the model manifest's own
+        pointers; checkpoint parent and run-provenance lineage —
+        informational history per the M61 analysis; workflow stage
+        artifacts; evaluation / comparison / gate evidence records —
+        all internal to <code>models/&#123;id&#125;/</code> — plus
+        the EXTERNAL root-level references that survive model-record
+        deletion: suite-run states and probe results, samples,
+        sample-quality measurements). Unique (category,
+        reference-id) pairs, canonical category order, sorted ids,
+        deterministic internal/external splits and totals — the
+        exact surface a future per-record lifecycle milestone would
+        need. Computed live from the ONE listings; visibility only —
+        no per-record deletion exists here.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -1104,6 +1125,7 @@ def index() -> HTMLResponse:
       <li><code>POST  {prefix}/training/run</code> — train (CPT/SFT), synchronous; optional <code>resume_from_checkpoint_id</code> initializes the run from an immutable checkpoint without publishing it (M54)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/usage</code> — read-only model usage overview: every referencing record by category (internal families + external root-level suite runs / samples / sample quality / recipes / policies; M66)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/retention</code> — read-only deletion-readiness view (integrity, deletable, ordered blockers; M67)</li>
+      <li><code>GET   {prefix}/models/&#123;id&#125;/records/usage</code> — read-only usage overview of every model-OWNED record (runs/checkpoints/workflows/evaluations/comparisons/gates): persisted references by category, internal vs external split (M69)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints</code> — immutable checkpoint store</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/by-run/&#123;run&#125;</code> — checkpoints of one training run (provenance-validated, M46)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/checkpoints/best</code> — deterministic selection by MINIMUM persisted validation loss (read-only, criterion explicit, M52)</li>
@@ -1289,6 +1311,30 @@ def model_usage(model_id: str) -> ModelUsageOverview:
     Visibility only — no deletion semantics exist or change here."""
     try:
         return _forge().model_usage_overview(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/records/usage",
+         response_model=ModelRecordsUsageOverview, tags=["models"])
+def model_records_usage(model_id: str) -> ModelRecordsUsageOverview:
+    """Read-only usage overview of ONE model's OWNED records (M69):
+    for every record of the six model-scoped families (training
+    runs, checkpoints, workflows, evaluations, comparisons, gate
+    decisions) every persisted record that references it — internal
+    references (the model manifest's pointers, checkpoint and
+    run-provenance lineage, workflow stage artifacts, evaluation /
+    comparison / gate evidence records) plus the EXTERNAL root-level
+    references that survive model-record deletion (suite-run states
+    and probe results, samples, sample-quality measurements — the
+    future per-record blocker surface). Unique (category,
+    reference-id) pairs in canonical category order then id order;
+    records sorted by id; deterministic counts and internal/external
+    splits. Computed live from the ONE authoritative listings (never
+    a second scanner). Visibility only — no per-record deletion
+    exists or changes here."""
+    try:
+        return _forge().model_records_usage_overview(model_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

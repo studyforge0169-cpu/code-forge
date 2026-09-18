@@ -1085,6 +1085,79 @@ class ModelUsageOverview(BaseModel):
     categories: list[ModelUsageCategory] = Field(default_factory=list)
 
 
+class RecordReference(BaseModel):
+    """ONE persisted reference TO a model-owned record (M69): the
+    referencing record's family (``category`` — a stable name from
+    the canonical reference-category order), its persisted record id
+    (``reference_id``) and whether that referencing record lives
+    OUTSIDE the model's own directory (``external`` — the root-level
+    families suite_run / sample / sample_quality; everything else is
+    internal to ``models/{id}/`` and goes with the model). Computed
+    live from the ONE authoritative listings — never stored, never a
+    second scanner."""
+
+    category: str
+    reference_id: str
+    external: bool
+
+
+class ModelOwnedRecordUsage(BaseModel):
+    """The M69 usage of ONE model-owned record: every persisted
+    record that references it. ``references`` is ordered by the
+    canonical reference-category order then reference id (unique
+    (category, reference_id) pairs — a record referencing the same
+    target through several fields counts ONCE); the counts are exact
+    sums. Read-only, zero storage."""
+
+    record_id: str
+    references: list[RecordReference] = Field(default_factory=list)
+    total_references: int
+    internal_references: int
+    external_references: int
+
+
+class ModelOwnedRecordCategory(BaseModel):
+    """ONE model-owned record family of the M69 usage overview: the
+    family's records (sorted by record id), each with its persisted
+    references. The six families are the model-scoped INTERNAL
+    categories of the M66 model usage — training_run (the manifest's
+    own run provenance), checkpoint, workflow, evaluation,
+    comparison, gate — all persisted inside ``models/{id}/``."""
+
+    category: str
+    records: list[ModelOwnedRecordUsage] = Field(default_factory=list)
+
+
+class ModelRecordsUsageOverview(BaseModel):
+    """Read-only live-computed usage overview of ONE model's OWNED
+    records (M69): for every record of the six model-scoped families,
+    what persisted records reference it — the reference topology a
+    future per-record lifecycle milestone needs. Reference categories
+    name the REFERENCING family (model manifest pointers, checkpoint
+    lineage, run-provenance lineage, workflow stage artifacts,
+    evaluation / comparison / gate records — internal; suite runs,
+    samples, sample-quality measurements — EXTERNAL root-level
+    records that survive model-record deletion). Lineage edges
+    (a surviving checkpoint's ``parent_checkpoint_id`` and the
+    manifest's run-provenance checkpoint pointers) are reported under
+    their own categories (``checkpoint`` / ``run_provenance``) and
+    are INFORMATIONAL history per the M61 analysis — nothing loads
+    state through them, so they are exactly the edges a future
+    per-record guard would NOT block on. The one M61 blocker NOT
+    visible here is the live M52 best selection, which is computed,
+    not persisted. Zero storage, zero mutation, byte-identical over
+    unchanged state; unknown or registry-invisible (unparseable
+    manifest) model -> FileNotFoundError (404 at the API)."""
+
+    model_id: str
+    name: str
+    total_records: int
+    total_references: int
+    internal_references: int
+    external_references: int
+    categories: list[ModelOwnedRecordCategory] = Field(default_factory=list)
+
+
 class ModelDeletionBlocker(BaseModel):
     """Why ONE model may not be deleted (M67 reference safety): ONE
     persisted EXTERNAL reference that would be orphaned by the

@@ -27,6 +27,7 @@ from .schemas import (
     CheckpointDeletionBlocker,
     CheckpointDeletionResult,
     ArtifactDeletionBlocker,
+    ArtifactKind,
     ArtifactUsageCategory,
     CheckpointRetentionEntry,
     CheckpointRetentionOverview,
@@ -40,7 +41,11 @@ from .schemas import (
     ModelCreateRequest,
     ModelDeletionBlocker,
     ModelDeletionResult,
+    ModelOwnedRecordCategory,
+    ModelOwnedRecordUsage,
+    ModelRecordsUsageOverview,
     ModelRecord,
+    RecordReference,
     ModelRetentionOverview,
     ModelUsageCategory,
     ModelUsageOverview,
@@ -1142,6 +1147,210 @@ class ModelForge:
         "policy",            # policies/<id> registry policy (root)
     )
     MODEL_USAGE_INTERNAL_CATEGORIES = frozenset(MODEL_USAGE_CATEGORIES[:6])
+
+    # Canonical M69 model-owned record families (the six INTERNAL
+    # model-scoped categories of the M66 usage) and the canonical
+    # REFERENCING-family order. "model" = the model manifest's own
+    # persisted pointers (latest_checkpoint / best_checkpoint);
+    # "checkpoint" = a surviving checkpoint's parent_checkpoint_id
+    # (LINEAGE); "run_provenance" = the manifest's run-provenance
+    # checkpoint pointers (LINEAGE); "workflow" = M7 stage artifacts
+    # and suggestions; evaluation/comparison/gate = the M4/M5/M6
+    # evidence records; suite_run/sample/sample_quality = the
+    # ROOT-LEVEL families whose records persist model-owned record
+    # ids OUTSIDE models/<id>/ (external — they survive model-record
+    # deletion, exactly the future per-record blocker surface).
+    MODEL_RECORD_CATEGORIES = (
+        "training_run",      # the model manifest's own RunProvenance
+        "checkpoint",        # models/<id>/checkpoints/
+        "workflow",          # models/<id>/workflows/
+        "evaluation",        # models/<id>/evaluations/
+        "comparison",        # models/<id>/comparisons/
+        "gate",              # models/<id>/gates/
+    )
+    RECORD_REFERENCE_CATEGORIES = (
+        "model",
+        "checkpoint",
+        "run_provenance",
+        "workflow",
+        "evaluation",
+        "comparison",
+        "gate",
+        "suite_run",
+        "sample",
+        "sample_quality",
+    )
+    RECORD_REFERENCE_EXTERNAL = frozenset(
+        ("suite_run", "sample", "sample_quality"))
+    # The M61-classified LINEAGE edges: informational history that
+    # never blocks checkpoint deletion (nothing loads state through
+    # them) — reported by M69 under their own categories so the
+    # future per-record blocker surface stays obvious.
+    RECORD_REFERENCE_LINEAGE = frozenset(
+        (("checkpoint", "checkpoint"),     # parent_checkpoint_id
+         ("run_provenance", "checkpoint")))  # provenance pointers
+
+    def model_records_usage_overview(
+            self, model_id: str) -> ModelRecordsUsageOverview:
+        """Read-only live-computed usage overview of ONE model's
+        OWNED records (M69): for every record of the six model-scoped
+        families (training runs, checkpoints, workflows, evaluations,
+        comparisons, gate decisions) every persisted record that
+        references it — internal references (the model manifest's
+        pointers, checkpoint lineage, run-provenance lineage,
+        workflow stage artifacts, and the evaluation / comparison /
+        gate evidence records, all inside models/<id>/) plus the
+        EXTERNAL root-level references that survive model-record
+        deletion (suite-run states and probe results, samples,
+        sample-quality measurements — the future per-record blocker
+        surface). Computed from the ONE authoritative listings on
+        every call (no stored index, no second scanner); references
+        are unique (category, reference_id) pairs in the canonical
+        category order then id order; records are sorted by id.
+        Zero storage, zero mutation, byte-identical over unchanged
+        state; unknown or registry-invisible (unparseable manifest)
+        model -> FileNotFoundError (404 at the API)."""
+        record = self._scope_data_artifact(self.storage.load_record,
+                                           model_id, "model")
+        refs: dict[tuple[str, str], set[tuple[str, str]]] = {}
+
+        def add(family: str, rid: str, category: str,
+                ref_id: str) -> None:
+            refs.setdefault((family, rid), set()).add((category, ref_id))
+
+        # the model manifest's own persisted pointers
+        if record.latest_checkpoint:
+            add("checkpoint", record.latest_checkpoint, "model", model_id)
+        if record.best_checkpoint:
+            add("checkpoint", record.best_checkpoint, "model", model_id)
+        # run-provenance LINEAGE pointers (informational, M61)
+        for p in record.training_provenance:
+            for cid in (p.parent_checkpoint_id,
+                        p.initial_checkpoint_id,
+                        p.final_checkpoint_id,
+                        p.rolled_back_to):
+                if cid:
+                    add("checkpoint", cid, "run_provenance", model_id)
+        # checkpoints: run origin + parent LINEAGE
+        for c in self.training.list_checkpoints(model_id):
+            add("training_run", c.run_id, "checkpoint", c.checkpoint_id)
+            if c.parent_checkpoint_id:
+                add("checkpoint", c.parent_checkpoint_id,
+                    "checkpoint", c.checkpoint_id)
+        # evaluations: the measured checkpoint state
+        for e in self.list_evaluations(model_id):
+            if e.checkpoint_id:
+                add("checkpoint", e.checkpoint_id,
+                    "evaluation", e.eval_id)
+        # comparisons: both sides' checkpoint + evaluation ids
+        for c in self.list_comparisons(model_id):
+            for side in (c.state_a, c.state_b):
+                if side.checkpoint_id:
+                    add("checkpoint", side.checkpoint_id,
+                        "comparison", c.comparison_id)
+                add("evaluation", side.evaluation_id,
+                    "comparison", c.comparison_id)
+        # gates: candidate/baseline sides + the compared comparison
+        for g in self.list_gate_decisions(model_id):
+            for side in (g.candidate, g.baseline):
+                if side is not None:
+                    if side.checkpoint_id:
+                        add("checkpoint", side.checkpoint_id,
+                            "gate", g.decision_id)
+                    add("evaluation", side.evaluation_id,
+                        "gate", g.decision_id)
+            if g.comparison_id:
+                add("comparison", g.comparison_id,
+                    "gate", g.decision_id)
+        # workflows: stage artifacts chain the underlying records
+        for w in self.list_workflows(model_id):
+            for st in w.stages:
+                art = st.artifact
+                if art is None:
+                    continue
+                if art.kind == ArtifactKind.TRAINING_REPORT:
+                    add("training_run", art.artifact_id,
+                        "workflow", w.workflow_id)
+                elif art.kind == ArtifactKind.EVALUATION:
+                    add("evaluation", art.artifact_id,
+                        "workflow", w.workflow_id)
+                elif art.kind == ArtifactKind.COMPARISON:
+                    add("comparison", art.artifact_id,
+                        "workflow", w.workflow_id)
+                elif art.kind == ArtifactKind.GATE_DECISION:
+                    add("gate", art.artifact_id,
+                        "workflow", w.workflow_id)
+                if art.checkpoint_id:
+                    add("checkpoint", art.checkpoint_id,
+                        "workflow", w.workflow_id)
+            if w.suggested_checkpoint_id:
+                add("checkpoint", w.suggested_checkpoint_id,
+                    "workflow", w.workflow_id)
+        # suite runs (EXTERNAL): evaluated state + probe evaluations
+        for r in self.list_suite_runs(model_id):
+            if r.state.checkpoint_id:
+                add("checkpoint", r.state.checkpoint_id,
+                    "suite_run", r.suite_run_id)
+            for pr in r.results:
+                if pr.evaluation_id:
+                    add("evaluation", pr.evaluation_id,
+                        "suite_run", r.suite_run_id)
+        # samples (EXTERNAL): the generating checkpoint
+        for s in self.list_samples(model_id):
+            add("checkpoint", s.checkpoint_id, "sample", s.sample_id)
+        # sample-quality measurements (EXTERNAL): the measured state
+        for sq in self.list_sample_evaluations(model_id):
+            add("checkpoint", sq.checkpoint_id,
+                "sample_quality", sq.evaluation_id)
+
+        order = {c: i for i, c in enumerate(self.RECORD_REFERENCE_CATEGORIES)}
+        families = {
+            "training_run": sorted(p.run_id for p in
+                                   record.training_provenance),
+            "checkpoint": sorted(c.checkpoint_id for c in
+                                 self.training.list_checkpoints(model_id)),
+            "workflow": sorted(w.workflow_id for w in
+                               self.list_workflows(model_id)),
+            "evaluation": sorted(e.eval_id for e in
+                                 self.list_evaluations(model_id)),
+            "comparison": sorted(c.comparison_id for c in
+                                 self.list_comparisons(model_id)),
+            "gate": sorted(g.decision_id for g in
+                           self.list_gate_decisions(model_id)),
+        }
+        categories: list[ModelOwnedRecordCategory] = []
+        total_refs = internal_refs = external_refs = 0
+        total_records = 0
+        for family in self.MODEL_RECORD_CATEGORIES:
+            entries: list[ModelOwnedRecordUsage] = []
+            for rid in families[family]:
+                pairs = sorted(refs.get((family, rid), ()),
+                               key=lambda cr: (order[cr[0]], cr[1]))
+                rlist = [RecordReference(
+                    category=cat, reference_id=ref,
+                    external=cat in self.RECORD_REFERENCE_EXTERNAL)
+                    for cat, ref in pairs]
+                ext = sum(1 for r in rlist if r.external)
+                entries.append(ModelOwnedRecordUsage(
+                    record_id=rid,
+                    references=rlist,
+                    total_references=len(rlist),
+                    internal_references=len(rlist) - ext,
+                    external_references=ext))
+                total_refs += len(rlist)
+                internal_refs += len(rlist) - ext
+                external_refs += ext
+            total_records += len(entries)
+            categories.append(ModelOwnedRecordCategory(
+                category=family, records=entries))
+        return ModelRecordsUsageOverview(
+            model_id=model_id,
+            name=record.name,
+            total_records=total_records,
+            total_references=total_refs,
+            internal_references=internal_refs,
+            external_references=external_refs,
+            categories=categories)
 
     @staticmethod
     def _recipe_model_ids(recipe) -> set[str]:
