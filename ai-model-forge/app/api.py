@@ -40,6 +40,9 @@ from .schemas import (
     SuiteRunRecord,
     SuiteRunRequest,
     SuiteRunSummary,
+    DefinitionDeletionBlocked,
+    DefinitionDeletionResult,
+    DefinitionRetentionOverview,
     ModelDeletionBlocked,
     ModelDeletionResult,
     ModelRecord,
@@ -1096,6 +1099,26 @@ def index() -> HTMLResponse:
         checkpoints keep M61; training runs stay manifest entries;
         M67 model deletion and every M68 surface are untouched.</li>
 
+      <li><b>M71 explicit DEFINITION retention</b> — the last
+        lifecycle gap closed: the root-level DEFINITION families get
+        their own verified deletion —
+        <code>DELETE /workflows/recipes/&#123;recipe&#125;</code>,
+        <code>DELETE /policies/&#123;policy&#125;</code> and
+        <code>DELETE /probe-suites/&#123;suite&#125;</code> (+ a
+        read-only <code>.../retention</code> view each): scope
+        (unknown/registry-invisible -> 404, nothing deleted) ->
+        INTEGRITY FIRST (the persisted content hash must reproduce;
+        tampered -> 409, never deletable) -> blockers (a definition
+        is blocked by every persisted record that references it:
+        workflow runs' recipe provenance, composite recipes'
+        composition references, gate decisions' policy provenance,
+        suite runs' suite id -> structured 409, the SAME list the
+        retention view shows) -> ONE atomic removal. Deleting a
+        recipe/policy removes the MODEL external reference it
+        represents — the M66 usage categories shrink LIVE and the
+        untouched M67 model guard can let a blocked model go. No
+        cascade, no force, no bulk, no automatic cleanup.</li>
+
       <li><b>M53 best state references</b> — a workflow stage state
         (<code>StageStateRef</code>: suite-run states, comparison sides,
         gate candidates) may now declare
@@ -1204,8 +1227,10 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/dashboard</code> — read-only history dashboard incl. sample-quality observability (deterministic, no writes)</li>
       <li><code>POST  {prefix}/policies</code> — register an immutable policy definition (idempotent; conflicts 409)</li>
       <li><code>GET   {prefix}/policies</code> / <code>GET {prefix}/policies/&#123;policy_id&#125;</code> — immutable policy definitions</li>
+      <li><code>GET   {prefix}/policies/&#123;policy&#125;/retention</code> / <code>DELETE {prefix}/policies/&#123;policy&#125;</code> — explicit verified policy deletion + read-only readiness view (M71)</li>
       <li><code>POST  {prefix}/probe-suites</code> — register an immutable named probe suite (set of exact M4 probes)</li>
       <li><code>GET   {prefix}/probe-suites</code> / <code>GET {prefix}/probe-suites/&#123;suite_id&#125;</code> — immutable suites</li>
+      <li><code>GET   {prefix}/probe-suites/&#123;suite&#125;/retention</code> / <code>DELETE {prefix}/probe-suites/&#123;suite&#125;</code> — explicit verified suite deletion + read-only readiness view (M71)</li>
       <li><code>POST  {prefix}/suite-runs</code> — execute one named suite against one state (independent M4 evaluations, immutable run record)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs</code> / <code>GET {prefix}/models/&#123;id&#125;/suite-runs/&#123;run&#125;</code> — immutable suite-run history</li>
       <li><code>DELETE {prefix}/models/&#123;id&#125;/suite-runs/&#123;run&#125;</code> — explicit verified suite-run deletion (scope + result-hash integrity + atomic; leaf record, no cascade; M68)</li>
@@ -1216,6 +1241,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/models/&#123;id&#125;/suite-runs/by-reused/&#123;reused_count&#125;</code> — suite runs of ONE model by persisted reuse count (read-only, deterministic, bookkeeping never a score; unmatched -> [], non-integer 422)</li>
       <li><code>POST  {prefix}/workflows/recipes</code> — register an immutable workflow recipe (idempotent; conflicts 409)</li>
       <li><code>GET   {prefix}/workflows/recipes</code> / <code>GET {prefix}/workflows/recipes/&#123;recipe_id&#125;</code> — immutable recipes</li>
+      <li><code>GET   {prefix}/workflows/recipes/&#123;recipe&#125;/retention</code> / <code>DELETE {prefix}/workflows/recipes/&#123;recipe&#125;</code> — explicit verified recipe deletion + read-only readiness view (M71)</li>
       <li><code>GET   {prefix}/models/&#123;id&#125;/workflows/recipes/&#123;recipe&#125;/plan</code> — resolve ONE registered recipe against ONE model WITHOUT executing (read-only preflight: expanded model-bound plan + provenance, zero persistence; M51)</li>
       <li><code>POST  {prefix}/workflows/recipes/&#123;recipe_id&#125;/runs</code> — execute a recipe against one explicit model (existing M7 engine)</li>
       <li><code>GET   {prefix}/workflows/recipes/&#123;recipe_id&#125;/runs</code> — cross-model run lineage of one recipe (read-only; 404 unknown recipe)</li>
@@ -2979,6 +3005,65 @@ def list_policies() -> list[PolicyDefinition]:
     return _forge().list_policies()
 
 
+@api.get("/policies/{policy_id}/retention",
+         response_model=DefinitionRetentionOverview, tags=["policies"])
+def policy_retention(policy_id: str) -> DefinitionRetentionOverview:
+    """Read-only retention overview of ONE registered gate policy
+    (M71): the deletion-readiness view — identity, the policy's
+    target model, the ordered artifact files + bytes of the
+    definition's OWN directory, the config-hash integrity outcome,
+    ``deletable`` and the ordered blockers (gate decisions with this
+    policy's registry provenance; recipes whose gate stage names it —
+    the SAME list the DELETE guard refuses on). Zero storage, zero
+    mutation."""
+    try:
+        return _forge().definition_retention_overview("gate_policy",
+                                                      policy_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.delete("/policies/{policy_id}",
+            response_model=DefinitionDeletionResult, tags=["policies"],
+            responses={409: {"model": DefinitionDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (gate decisions with this "
+                             "policy's provenance; recipes whose "
+                             "gate stage names it) — or integrity "
+                             "refusal"}})
+def delete_policy(policy_id: str) -> DefinitionDeletionResult:
+    """Explicit VERIFIED gate-policy retention (M71): delete exactly
+    ONE registered policy definition — only with live proof that no
+    gate decision carries its registry provenance and no recipe's
+    gate stage structurally names it. Scope (unknown -> 404, nothing
+    deleted) -> INTEGRITY FIRST (the persisted config_hash must
+    reproduce; tampered -> 409, never deletable) -> blockers (ANY
+    referencing gate decision or recipe gate stage -> structured 409 with
+    the ordered typed blocker list) -> ONE atomic removal of the
+    definition's own directory with exact files/bytes. Deleting a
+    policy also removes the MODEL external reference it represents
+    (the M66 ``policy`` category shrinks live). No cascade, no
+    force, no bulk mode."""
+    try:
+        return _forge().delete_definition("gate_policy", policy_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().definition_deletion_blockers(
+                            "gate_policy", policy_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "family": "gate_policy",
+                    "definition_id": policy_id, "protected": True,
+                    "blockers": blockers}) from exc
+
+
 @api.get("/policies/{policy_id}", response_model=PolicyDefinition,
          tags=["policies"])
 def get_policy(policy_id: str) -> PolicyDefinition:
@@ -3011,6 +3096,64 @@ def create_probe_suite(request: ProbeSuiteCreateRequest) -> ProbeSuite:
 def list_probe_suites() -> list[ProbeSuite]:
     """Immutable probe suites, deterministic order (oldest first)."""
     return _forge().list_probe_suites()
+
+
+@api.get("/probe-suites/{suite_id}/retention",
+         response_model=DefinitionRetentionOverview, tags=["policies"])
+def probe_suite_retention(suite_id: str) -> DefinitionRetentionOverview:
+    """Read-only retention overview of ONE registered probe suite
+    (M71): the deletion-readiness view — identity (a suite binds a
+    model only at RUN time, so ``model_ids`` is always empty — the
+    M66 distinction), the ordered artifact files + bytes of the
+    definition's OWN directory, the probes-hash integrity outcome,
+    ``deletable`` and the ordered blockers (suite runs with this
+    suite's id; recipes whose suite-run stage names it — the SAME
+    list the DELETE guard refuses on). Zero storage, zero
+    mutation."""
+    try:
+        return _forge().definition_retention_overview("probe_suite",
+                                                      suite_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.delete("/probe-suites/{suite_id}",
+            response_model=DefinitionDeletionResult, tags=["policies"],
+            responses={409: {"model": DefinitionDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (suite runs with this suite's "
+                             "id; recipes whose suite-run stage names "
+                             "it) — or integrity refusal"}})
+def delete_probe_suite(suite_id: str) -> DefinitionDeletionResult:
+    """Explicit VERIFIED probe-suite retention (M71): delete exactly
+    ONE registered suite definition — only with live proof that no
+    suite run references its id and no recipe's suite-run stage
+    structurally names it. Scope (unknown -> 404, nothing deleted) ->
+    INTEGRITY FIRST (the persisted probes_hash must reproduce;
+    tampered -> 409, never deletable) -> blockers (ANY referencing
+    suite run or recipe suite-run stage -> structured 409 with the ordered typed
+    blocker list) -> ONE atomic removal of the definition's own
+    directory with exact files/bytes. A suite is NOT a model
+    reference (models bind at run time), so no model usage surface
+    changes. No cascade, no force, no bulk mode."""
+    try:
+        return _forge().delete_definition("probe_suite", suite_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().definition_deletion_blockers(
+                            "probe_suite", suite_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "family": "probe_suite",
+                    "definition_id": suite_id, "protected": True,
+                    "blockers": blockers}) from exc
 
 
 @api.get("/probe-suites/{suite_id}", response_model=ProbeSuite,
@@ -3437,6 +3580,70 @@ def create_workflow_recipe(request: WorkflowRecipeCreateRequest) -> WorkflowReci
 def list_workflow_recipes() -> list[WorkflowRecipe]:
     """Immutable workflow recipes, deterministic order (oldest first)."""
     return _forge().list_workflow_recipes()
+
+
+@api.get("/workflows/recipes/{recipe_id}/retention",
+         response_model=DefinitionRetentionOverview,
+         tags=["workflow-recipes"])
+def workflow_recipe_retention(
+        recipe_id: str) -> DefinitionRetentionOverview:
+    """Read-only retention overview of ONE registered workflow
+    recipe (M71): the deletion-readiness view — identity, the models
+    the recipe's stage configs bind (the ONE M66 analysis), the
+    ordered artifact files + bytes of the definition's OWN directory,
+    the config-hash integrity outcome, ``deletable`` and the ordered
+    blockers (workflow runs with this recipe's provenance; composite
+    recipes whose composition references it — the SAME list the
+    DELETE guard refuses on). Zero storage, zero mutation."""
+    try:
+        return _forge().definition_retention_overview("workflow_recipe",
+                                                      recipe_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.delete("/workflows/recipes/{recipe_id}",
+            response_model=DefinitionDeletionResult,
+            tags=["workflow-recipes"],
+            responses={409: {"model": DefinitionDeletionBlocked,
+                             "description": "referenced — ordered "
+                             "blockers (workflow runs with this "
+                             "recipe's provenance; composite recipes "
+                             "referencing it) — or integrity "
+                             "refusal"}})
+def delete_workflow_recipe(recipe_id: str) -> DefinitionDeletionResult:
+    """Explicit VERIFIED workflow-recipe retention (M71): delete
+    exactly ONE registered recipe definition — only with live proof
+    that no workflow run carries its provenance and no composite
+    recipe references it. Scope (unknown -> 404, nothing deleted) ->
+    INTEGRITY FIRST (the persisted config_hash must reproduce —
+    plain recipes over the ordered stages, composites over stages +
+    their recorded composition references; tampered -> 409, never
+    deletable) -> blockers (ANY referencing run or composite ->
+    structured 409 with the ordered typed blocker list) -> ONE
+    atomic removal of the definition's own directory with exact
+    files/bytes. Deleting a recipe also removes the MODEL external
+    reference it represents (the M66 ``workflow_recipe`` category
+    shrinks live — the M67 guard reads that analysis on every call).
+    No cascade, no force, no bulk mode."""
+    try:
+        return _forge().delete_definition("workflow_recipe", recipe_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:  # integrity failure -> refuse (409)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        try:
+            blockers = [b.model_dump() for b in
+                        _forge().definition_deletion_blockers(
+                            "workflow_recipe", recipe_id)]
+        except Exception:
+            blockers = []
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "family": "workflow_recipe",
+                    "definition_id": recipe_id, "protected": True,
+                    "blockers": blockers}) from exc
 
 
 @api.get("/workflows/recipes/{recipe_id}", response_model=WorkflowRecipe,

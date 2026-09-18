@@ -85,7 +85,7 @@ from .schemas import (
     validate_plan_stages,
     utcnow,
 )
-from .storage import atomic_write_json, read_json
+from .storage import atomic_delete_dir, atomic_write_json, read_json
 from .workflows import WorkflowEngine
 
 RECIPES_DIR = "workflow-recipes"
@@ -160,6 +160,24 @@ class RecipeEngine:
     # ------------------------------------------------------------------ #
     # Registration / read (immutable definitions; never mutate)
     # ------------------------------------------------------------------ #
+
+    def delete(self, recipe_id: str) -> tuple[int, int]:
+        """Remove ONE recipe's directory ATOMICALLY (M71 low-level
+        primitive, the ``DatasetEngine.delete`` pattern): the
+        recipe's own single-manifest directory disappears in ONE
+        ``os.rename`` to a hidden ``.tmp-delete-*`` sibling the
+        registry scans skip. Returns ``(files_removed,
+        bytes_reclaimed)`` measured from the files as they existed
+        immediately before removal. The CALLER (the forge facade)
+        owns the safety decision — scope, the config-hash integrity
+        verification and the dependent-record guard (workflow runs
+        with this recipe's provenance; composite recipes referencing
+        it) must have passed before this is called."""
+        rdir = self._recipe_dir(recipe_id)
+        files = sorted(p for p in rdir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(rdir)
+        return len(files), nbytes
 
     def register(self, request: WorkflowRecipeCreateRequest) -> WorkflowRecipe:
         """Register one immutable recipe; idempotent for identical content.

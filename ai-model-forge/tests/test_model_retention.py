@@ -766,7 +766,7 @@ def test_m67_api_model_retention(api_client):
     # on pre-existing resource paths — which is why the set below
     # counts seven; M67 itself changed no delete operation.)
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 101
+    assert len(spec["paths"]) == 104
     assert set(spec["paths"]["/api/v1/models/{model_id}/retention"]
                .keys()) == {"get"}
     assert set(spec["paths"]["/api/v1/models/{model_id}"].keys()) == \
@@ -784,7 +784,10 @@ def test_m67_api_model_retention(api_client):
         "/api/v1/models/{model_id}/samples/{sample_id}",
         "/api/v1/models/{model_id}/suite-runs/{suite_run_id}",
         "/api/v1/models/{model_id}/workflows/{workflow_id}",
+        "/api/v1/policies/{policy_id}",
+        "/api/v1/probe-suites/{suite_id}",
         "/api/v1/tokenizers/{tokenizer_id}",
+        "/api/v1/workflows/recipes/{recipe_id}",
     ]
     for s in ("ModelDeletionResult", "ModelDeletionBlocked",
               "ModelDeletionBlocker", "ModelRetentionOverview"):

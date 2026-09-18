@@ -1158,6 +1158,77 @@ class ModelRecordsUsageOverview(BaseModel):
     categories: list[ModelOwnedRecordCategory] = Field(default_factory=list)
 
 
+class DefinitionDeletionBlocker(BaseModel):
+    """Why ONE root-level definition (M71: workflow recipe / gate
+    policy / probe suite) may not be deleted: ONE persisted record
+    that references it and would be orphaned.
+
+    ``category`` is the referencing family (``workflow`` — a run
+    record's recipe provenance; ``workflow_recipe`` — a COMPOSITE
+    recipe's composition reference; ``gate`` — a gate decision's
+    registry policy provenance; ``suite_run`` — a run record's suite
+    id); ``reference_id`` is that record's persisted id; ``detail``
+    carries short authoritative identifying information. Computed
+    LIVE from the ONE canonical filters — never stored, never a
+    second scanner. The guard refuses on EXACTLY what the retention
+    view shows."""
+
+    category: str
+    reference_id: str
+    detail: str
+
+
+class DefinitionDeletionResult(BaseModel):
+    """Deterministic result of ONE explicit verified definition
+    deletion (M71): what was removed and how much storage it held.
+    The definition's own directory is gone atomically; every other
+    family's records are untouched (they were protected BY the
+    guard)."""
+
+    family: str
+    definition_id: str
+    files_removed: int
+    bytes_reclaimed: int
+
+
+class DefinitionDeletionBlocked(BaseModel):
+    """The structured 409 detail of a REFUSED definition deletion
+    (M71): the ordered typed blocker list — the SAME categories and
+    reference ids the retention view reports."""
+
+    message: str
+    family: str
+    definition_id: str
+    protected: bool = True
+    blockers: list[DefinitionDeletionBlocker] = Field(default_factory=list)
+
+
+class DefinitionRetentionOverview(BaseModel):
+    """Read-only live-computed retention overview of ONE root-level
+    definition (M71): the deletion-readiness view — identity, the
+    definition's bound model ids where applicable (recipes: every
+    model named by stage configs, the ONE M66 analysis; policies:
+    the policy's target model; probe suites: none — a suite binds a
+    model only at run time), the ordered artifact files + total
+    bytes of the definition's OWN directory, the content-hash
+    integrity outcome, ``deletable`` (True iff integrity passes AND
+    no persisted record references the definition) and the ordered
+    blockers (the SAME list the DELETE guard refuses on). Unknown or
+    registry-invisible (unparseable manifest) definition ->
+    FileNotFoundError (404 at the API). Zero storage, zero
+    mutation, byte-identical over unchanged state."""
+
+    family: str
+    definition_id: str
+    created_at: datetime
+    model_ids: list[str] = Field(default_factory=list)
+    files: list[str] = Field(default_factory=list)
+    size_bytes: int
+    integrity_verified: bool
+    deletable: bool
+    blockers: list[DefinitionDeletionBlocker] = Field(default_factory=list)
+
+
 class ModelRecordDeletionBlocker(BaseModel):
     """Why ONE model-owned record may not be deleted (M70 reference
     safety): ONE persisted NON-LINEAGE reference that would be

@@ -670,11 +670,11 @@ def test_m70_api_lifecycle(api_client):
         assert r1.status_code == 404, path
         assert api_client.get(path + "/retention").status_code == 404, path
 
-    # OpenAPI: 101 paths; the four DELETEs are new OPERATIONS on the
+    # OpenAPI: 104 paths; the four DELETEs are new OPERATIONS on the
     # EXISTING GET-one paths; four new GET-only retention paths; the
-    # delete-operation set is exactly 11
+    # delete-operation set is exactly 14
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 101
+    assert len(spec["paths"]) == 104
     for path in ("/api/v1/models/{model_id}/workflows/{workflow_id}",
                  "/api/v1/models/{model_id}/evaluations/{eval_id}",
                  "/api/v1/models/{model_id}/comparisons/"
@@ -684,7 +684,7 @@ def test_m70_api_lifecycle(api_client):
         assert set(spec["paths"][path].keys()) == {"get", "delete"}, path
     deletes = sorted(p for p, ops in spec["paths"].items()
                      if "delete" in ops)
-    assert len(deletes) == 11
+    assert len(deletes) == 14
     for s in ("ModelRecordDeletionResult", "ModelRecordDeletionBlocked",
               "ModelRecordDeletionBlocker", "ModelRecordRetentionOverview"):
         assert s in spec["components"]["schemas"], s

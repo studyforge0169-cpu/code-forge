@@ -48,7 +48,7 @@ from .schemas import (
     SuiteProbe,
     utcnow,
 )
-from .storage import atomic_write_json, read_json
+from .storage import atomic_delete_dir, atomic_write_json, read_json
 
 POLICIES_DIR = "policies"
 SUITES_DIR = "probe-suites"
@@ -100,6 +100,37 @@ class PolicyEngine:
     # ------------------------------------------------------------------ #
     # Policies
     # ------------------------------------------------------------------ #
+
+    def delete_policy(self, policy_id: str) -> tuple[int, int]:
+        """Remove ONE policy definition's directory ATOMICALLY (M71
+        low-level primitive, the ``DatasetEngine.delete`` pattern).
+        Returns ``(files_removed, bytes_reclaimed)`` measured from
+        the files as they existed immediately before removal. The
+        CALLER (the forge facade) owns the safety decision — scope,
+        the config-hash integrity verification and the
+        dependent-record guard (gate decisions with this policy's
+        registry provenance) must have passed before this is
+        called."""
+        pdir = self._policy_dir(policy_id)
+        files = sorted(p for p in pdir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(pdir)
+        return len(files), nbytes
+
+    def delete_suite(self, suite_id: str) -> tuple[int, int]:
+        """Remove ONE probe suite's directory ATOMICALLY (M71
+        low-level primitive, the ``DatasetEngine.delete`` pattern).
+        Returns ``(files_removed, bytes_reclaimed)`` measured from
+        the files as they existed immediately before removal. The
+        CALLER (the forge facade) owns the safety decision — scope,
+        the probes-hash integrity verification and the
+        dependent-record guard (suite runs with this suite's id)
+        must have passed before this is called."""
+        sdir = self._suite_dir(suite_id)
+        files = sorted(p for p in sdir.rglob("*") if p.is_file())
+        nbytes = sum(p.stat().st_size for p in files)
+        atomic_delete_dir(sdir)
+        return len(files), nbytes
 
     def register_policy(self, request: PolicyCreateRequest) -> PolicyDefinition:
         """Register one immutable policy; idempotent for identical content."""

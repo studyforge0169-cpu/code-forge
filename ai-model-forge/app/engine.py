@@ -19,8 +19,11 @@ from .evaluation import EVALUATIONS_DIR, EvaluationEngine
 from .gates import GATES_DIR, GateEngine
 from .hardware import HardwareSpec, detect_hardware
 from .model_builder import build_transformer, content_hash
-from .policies import POLICIES_DIR, SUITES_DIR, PolicyEngine
-from .recipes import RECIPES_DIR, RecipeEngine
+from .policies import (POLICIES_DIR, SUITES_DIR,
+                    PolicyEngine, policy_config_hash,
+                    probes_hash)
+from .recipes import (RECIPES_DIR, RecipeEngine,
+                     recipe_config_hash)
 from .sampling import SAMPLES_DIR, SamplingEngine
 from .sample_quality import SAMPLE_EVALUATIONS_DIR, SampleQualityEngine
 from .schemas import (
@@ -39,6 +42,9 @@ from .schemas import (
     GateBaselineType,
     GateDecisionResult,
     ModelCreateRequest,
+    DefinitionDeletionBlocker,
+    DefinitionDeletionResult,
+    DefinitionRetentionOverview,
     ModelDeletionBlocker,
     ModelDeletionResult,
     ModelOwnedRecordCategory,
@@ -1534,12 +1540,260 @@ class ModelForge:
             model_id=model_id, category=category, record_id=record_id,
             files_removed=files, bytes_reclaimed=nbytes)
 
+    # ------------------------------------------------------------------ #
+    # M71: explicit definition retention (recipes / policies / suites)
+    # ------------------------------------------------------------------ #
+
+    # The M71 definition families (root-level registries) and the
+    # canonical DEPENDENT categories that block deletion: a workflow
+    # run's recipe provenance; a COMPOSITE recipe's composition
+    # reference; a gate decision's registry policy provenance; a
+    # suite run's suite id. Every blocker derivation reuses the ONE
+    # canonical model-scoped filters (M35/M23/M21) plus the recipe
+    # registry listing — never a second scanner.
+    DEFINITION_DELETABLE_FAMILIES = ("workflow_recipe", "gate_policy",
+                                     "probe_suite")
+    DEFINITION_DEPENDENT_CATEGORIES = (
+        ("workflow_recipe", ("workflow", "workflow_recipe")),
+        ("gate_policy", ("gate", "workflow_recipe")),
+        ("probe_suite", ("suite_run", "workflow_recipe")),
+    )
+
+    def _definition_scope(self, family: str, definition_id: str):
+        """M71 scope + integrity resolver: the family's getter through
+        the ``_scope_data_artifact`` convention (unknown or
+        registry-invisible (unparseable manifest) definition ->
+        FileNotFoundError, nothing deleted) plus the record's OWN
+        content-hash check as a callable. Returns (record, rdir,
+        hash_ok)."""
+        if family == "workflow_recipe":
+            record = self._scope_data_artifact(self.recipes.get,
+                                               definition_id, "recipe")
+            rdir = self.recipes._recipe_dir(definition_id)
+
+            def check(r) -> bool:
+                if r.composition:
+                    pairs = [(ref.recipe_id, ref.config_hash)
+                             for ref in r.composition]
+                    deps = [ref.config_hash for ref in r.composition]
+                    return self.recipes._composite_hash(
+                        r.stages, pairs, deps) == r.config_hash
+                return recipe_config_hash(r.stages) == r.config_hash
+            return record, rdir, check
+        if family == "gate_policy":
+            record = self._scope_data_artifact(
+                self.policies.get_policy, definition_id, "policy")
+            rdir = self.policies._policy_dir(definition_id)
+
+            def check(r) -> bool:
+                return policy_config_hash(r.policy) == r.config_hash
+            return record, rdir, check
+        if family == "probe_suite":
+            record = self._scope_data_artifact(
+                self.policies.get_suite, definition_id, "probe suite")
+            rdir = self.policies._suite_dir(definition_id)
+
+            def check(r) -> bool:
+                return probes_hash(r.probes) == r.probes_hash
+            return record, rdir, check
+        raise ValueError(
+            f"family '{family}' has no definition lifecycle (M71 "
+            f"families: {', '.join(self.DEFINITION_DELETABLE_FAMILIES)})")
+
+    def definition_model_ids(self, family: str,
+                             definition_id: str) -> list[str]:
+        """The models ONE definition references (M71): a recipe names
+        every model its stage configs bind (the ONE M66 analysis,
+        ``_recipe_model_ids``); a policy names its target model; a
+        probe suite names NONE (a suite binds a model only at run
+        time — the M66 distinction). Sorted, unique. Read-only."""
+        record, _, check = self._definition_scope(family, definition_id)
+        if family == "workflow_recipe":
+            return sorted(self._recipe_model_ids(record))
+        if family == "gate_policy":
+            return [record.policy.model_id]
+        return []
+
+    def definition_deletion_blockers(
+            self, family: str,
+            definition_id: str) -> list[DefinitionDeletionBlocker]:
+        """The M71 deletion guard's ordered blocker list: every
+        persisted record that references the definition — workflow
+        runs with the recipe's provenance id (the ONE M35
+        ``list_workflows_for_recipe`` filter, across every model),
+        COMPOSITE recipes whose composition references it (the recipe
+        registry listing, the M14 reference set), gate decisions with
+        the policy's registry provenance id (the ONE M23
+        ``list_gate_decisions_for_policy`` filter), suite runs with
+        the suite's id (the ONE M21 ``list_suite_runs_for_suite``
+        filter) and — the STRUCTURAL directions, persisted recipe
+        stage configs — recipes whose gate stage names the policy id
+        or whose suite-run stage names the suite id (deleting the
+        definition would break every future run of that recipe at
+        resolution). Deleting the definition would orphan exactly
+        these records' references, so each is ONE typed blocker.
+        Deterministic (category order, then sorted reference ids);
+        zero storage, zero mutation."""
+        record, _, _ = self._definition_scope(family, definition_id)
+        found: list[tuple[str, str]] = []
+        if family == "workflow_recipe":
+            for model_id in sorted(self.storage.model_ids()):
+                for w in self.list_workflows_for_recipe(
+                        model_id, definition_id):
+                    found.append(("workflow", w.workflow_id))
+            for r in self.recipes.list():
+                if r.recipe_id == definition_id:
+                    continue
+                if r.composition and any(
+                        ref.recipe_id == definition_id
+                        for ref in r.composition):
+                    found.append(("workflow_recipe", r.recipe_id))
+        elif family == "gate_policy":
+            for model_id in sorted(self.storage.model_ids()):
+                for g in self.list_gate_decisions_for_policy(
+                        model_id, definition_id):
+                    found.append(("gate", g.decision_id))
+            for r in self.recipes.list():
+                if r.recipe_id == definition_id:
+                    continue
+                if any(s.type == "gate" and s.gate is not None
+                       and s.gate.policy_id == definition_id
+                       for s in r.stages):
+                    found.append(("workflow_recipe", r.recipe_id))
+        else:  # probe_suite
+            for model_id in sorted(self.storage.model_ids()):
+                for r in self.list_suite_runs_for_suite(
+                        model_id, definition_id):
+                    found.append(("suite_run", r.suite_run_id))
+            for r in self.recipes.list():
+                if r.recipe_id == definition_id:
+                    continue
+                if any(s.type == "suite_run" and s.suite_run is not None
+                       and s.suite_run.suite_id == definition_id
+                       for s in r.stages):
+                    found.append(("workflow_recipe", r.recipe_id))
+        order = {c: i for i, c in enumerate(
+            dict(self.DEFINITION_DEPENDENT_CATEGORIES)[family])}
+        return [DefinitionDeletionBlocker(
+            category=cat, reference_id=rid,
+            detail=self._definition_blocker_detail(family, cat, rid))
+            for cat, rid in sorted(found, key=lambda cr: (
+                order[cr[0]], cr[1]))]
+
     @staticmethod
-    def _recipe_model_ids(recipe) -> set[str]:
+    def _definition_blocker_detail(family: str, category: str,
+                                   ref_id: str) -> str:
+        """Short authoritative identifying detail for ONE M71 blocker
+        (the referencing record's family, the M67/M70 pattern). The
+        ``workflow_recipe`` category detail names the exact structural
+        edge: a COMPOSITE recipe's composition reference (recipes
+        family), a gate stage's policy reference (policies family) or
+        a suite-run stage's suite reference (suites family)."""
+        return {
+            ("workflow_recipe", "workflow"):
+                f"workflow run '{ref_id}' recipe provenance",
+            ("workflow_recipe", "workflow_recipe"):
+                f"composite recipe '{ref_id}' composition",
+            ("gate_policy", "gate"):
+                f"gate decision '{ref_id}' policy provenance",
+            ("gate_policy", "workflow_recipe"):
+                f"recipe '{ref_id}' gate stage policy reference",
+            ("probe_suite", "suite_run"):
+                f"suite run '{ref_id}'",
+            ("probe_suite", "workflow_recipe"):
+                f"recipe '{ref_id}' suite-run stage suite reference",
+        }.get((family, category), f"record '{ref_id}'")
+
+    def definition_retention_overview(
+            self, family: str,
+            definition_id: str) -> DefinitionRetentionOverview:
+        """Read-only live-computed retention overview of ONE root-level
+        definition (M71): the deletion-readiness view — identity, the
+        bound model ids (where applicable), the ordered artifact
+        files + total bytes of the definition's OWN directory, the
+        content-hash integrity outcome, ``deletable`` (True iff
+        integrity passes AND no persisted record references the
+        definition) and the ordered blockers (the SAME list the
+        DELETE guard refuses on). A tampered definition is never
+        deletable; an unknown or registry-invisible definition ->
+        FileNotFoundError (404 at the API). Zero storage, zero
+        mutation, byte-identical over unchanged state."""
+        record, rdir, check = self._definition_scope(family,
+                                                     definition_id)
+        files, nbytes = self._artifact_files(rdir)
+        integrity_verified = check(record)
+        blockers = self.definition_deletion_blockers(family,
+                                                     definition_id)
+        return DefinitionRetentionOverview(
+            family=family,
+            definition_id=definition_id,
+            created_at=record.created_at,
+            model_ids=self.definition_model_ids(family, definition_id),
+            files=files,
+            size_bytes=nbytes,
+            integrity_verified=integrity_verified,
+            deletable=integrity_verified and not blockers,
+            blockers=blockers)
+
+    def delete_definition(self, family: str,
+                          definition_id: str) -> DefinitionDeletionResult:
+        """Explicit VERIFIED definition retention (M71): remove ONE
+        root-level definition — a workflow recipe, a gate policy or a
+        probe suite — only after proving, live, that nothing
+        references it. The full guard, in order: (1) scope through
+        the family getter (unknown or registry-invisible definition
+        -> FileNotFoundError, nothing deleted); (2) INTEGRITY FIRST
+        (the M61/M65/M67/M68/M70 ordering): the definition's
+        persisted content hash (``config_hash`` / ``probes_hash``)
+        must reproduce from its semantic payload — a tampered or
+        corrupt definition is REFUSED with RuntimeError (409), never
+        deletable, no force flag; (3) the LIVE dependent analysis
+        (``definition_deletion_blockers`` — the ONE canonical
+        filters: workflow runs with recipe provenance, composite
+        recipes' composition references, gate decisions with policy
+        provenance, suite runs with the suite id, recipes whose stage
+        configs structurally name the policy/suite; ANY reference ->
+        ValueError listing the ordered typed blockers, so deletion
+        can never orphan a persisted record); (4) ATOMIC removal of
+        the definition's OWN directory only (measure +
+        ``atomic_delete_dir``). No cascade, no force, no bulk mode.
+        Deleting a recipe/policy also removes the MODEL external
+        reference it represents (the M66 ``workflow_recipe`` /
+        ``policy`` categories shrink LIVE — the M67 model guard
+        reads that analysis on every call, no guard code changes)."""
+        record, _, check = self._definition_scope(family, definition_id)
+        if not check(record):
+            raise RuntimeError(
+                f"{family} '{definition_id}' failed integrity "
+                f"verification — refusing to delete corrupted storage")
+        blockers = self.definition_deletion_blockers(family,
+                                                     definition_id)
+        if blockers:
+            summary = "; ".join(f"{b.category}: {b.reference_id}"
+                                for b in blockers)
+            raise ValueError(
+                f"{family} '{definition_id}' is referenced and cannot "
+                f"be deleted — {summary}")
+        if family == "workflow_recipe":
+            files, nbytes = self.recipes.delete(definition_id)
+        elif family == "gate_policy":
+            files, nbytes = self.policies.delete_policy(definition_id)
+        else:
+            files, nbytes = self.policies.delete_suite(definition_id)
+        log.info("M71 verified %s deletion %s (%d files, %d bytes)",
+                 family, definition_id, files, nbytes)
+        return DefinitionDeletionResult(
+            family=family, definition_id=definition_id,
+            files_removed=files, bytes_reclaimed=nbytes)
+
+    def _recipe_model_ids(self, recipe) -> set[str]:
         """Model ids DIRECTLY named by ONE workflow recipe's stage
         configs (train stage configs, evaluate stage configs and gate
-        policies all persist ``model_id``; suite-run/publish/recipe
-        stages never name a model). A recipe is INERT DATA but its
+        policies all persist ``model_id``; a gate stage may name the
+        policy INLINE or by REGISTRY id — the registry form resolves
+        through the ONE policy registry to the policy's target model,
+        the M71-completed analysis; suite-run/publish/recipe stages
+        never name a model). A recipe is INERT DATA but its
         definition is bound to the models it names — deleting such a
         model would leave the recipe unresolvable — so it is a REAL
         persisted external reference. Read-only scan, the M64
@@ -1551,7 +1805,18 @@ class ModelForge:
             if stage.evaluation is not None:
                 ids.add(stage.evaluation.config.model_id)
             if stage.gate is not None:
-                ids.add(stage.gate.policy.model_id)
+                if stage.gate.policy is not None:
+                    ids.add(stage.gate.policy.model_id)
+                elif stage.gate.policy_id is not None:
+                    # REGISTRY policy: the recipe binds the policy's
+                    # target model (the M71 guard keeps this id
+                    # resolvable — a read-only scan stays robust if a
+                    # legacy dangling id ever appears)
+                    try:
+                        ids.add(self.policies.get_policy(
+                            stage.gate.policy_id).policy.model_id)
+                    except FileNotFoundError:
+                        pass
         return ids
 
     def model_usage_overview(self, model_id: str) -> ModelUsageOverview:

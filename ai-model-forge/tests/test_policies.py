@@ -655,9 +655,14 @@ def test_policies_api_crud_conflict_404_422(api_client):
     assert mal.status_code == 422
     # unknown id -> 404
     assert api_client.get(f"{POLICIES}/api9-pol-ghost").status_code == 404
-    # no delete/put/patch endpoints exist
-    assert api_client.delete(f"{POLICIES}/api9-pol-1").status_code == 405
+    # no put/patch endpoints exist; DELETE is the M71 verified
+    # retention — the unreferenced policy deletes atomically
     assert api_client.put(f"{POLICIES}/api9-pol-1").status_code == 405
+    gone = api_client.delete(f"{POLICIES}/api9-pol-1")
+    assert gone.status_code == 200, gone.text
+    assert gone.json()["definition_id"] == "api9-pol-1"
+    assert gone.json()["files_removed"] >= 1
+    assert api_client.get(f"{POLICIES}/api9-pol-1").status_code == 404
 
 
 def test_probe_suites_api_crud_conflict_404_422(api_client):

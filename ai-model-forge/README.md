@@ -2146,6 +2146,60 @@ generation never trains, evaluates, scores, ranks or judges output.
   operations on the EXISTING family resource paths; the four
   retention views are new GET-only paths)
 
+### Milestone 71 — DEFINITION retention & deletion (recipes /
+  policies / probe suites)
+
+The last lifecycle gap closed: the three ROOT-LEVEL DEFINITION
+families — workflow recipes, gate policies and probe suites (one
+`manifest.json` per definition directory, live directory-scan
+listings, no global index) — get their own explicit VERIFIED
+deletion plus a read-only readiness view, the M70 pattern lifted
+from model-owned records to shared definitions:
+
+- **routes**: `DELETE /workflows/recipes/{recipe_id}`,
+  `DELETE /policies/{policy_id}`,
+  `DELETE /probe-suites/{suite_id}` (new DELETE OPERATIONS on the
+  EXISTING GET-one paths) and the GET-only
+  `.../retention` views; the typed result is
+  `{family, definition_id, files_removed, bytes_reclaimed}` and the
+  structured 409 is `{message, family, definition_id, protected:
+  true, blockers}` (integrity refusals keep the plain-string detail)
+- **guard order** (identical to M61/M65/M67/M68/M70): scope through
+  the family getter (unknown OR registry-invisible/unparseable
+  manifest -> 404, nothing deleted) -> INTEGRITY FIRST (the
+  persisted content hash — `config_hash` for recipes (composites
+  hash over stages + their composition references),
+  `policy_config_hash` for policies, `probes_hash` for suites —
+  must reproduce; tampered -> 409, never deletable, no force flag)
+  -> the LIVE dependent analysis -> ONE atomic removal
+  (`atomic_delete_dir`) of the definition's OWN directory with
+  exact files/bytes
+- **blockers (ONE source, proven against a raw-manifest oracle)**:
+  a definition is blocked by EVERY persisted record that references
+  it — workflow runs with the recipe's provenance
+  (`WorkflowRecord.recipe_id`, the M35 filter across ALL models),
+  COMPOSITE recipes' composition references (the M14 reference
+  set), gate decisions with the policy's registry provenance
+  (the M23 filter across all models), suite runs with the suite's
+  id (the M21 filter across all models) and the STRUCTURAL
+  directions: recipes whose gate stage names the policy id or whose
+  suite-run stage names the suite id (deleting the definition would
+  break every future run of that recipe at resolution); ordered by
+  category then reference id, the SAME list the retention view
+  shows and the DELETE 409 refuses on — nothing protected that is
+  not shown, nothing shown that is not protected
+- **model coupling (no guard changes)**: recipes and policies ARE
+  M66 external model references (`workflow_recipe` / `policy`
+  categories); deleting one removes exactly that reference (no
+  other reference vanishes) and the LAST external reference flips
+  the UNTOUCHED M67 model retention state to deletable; probe
+  suites bind models only at RUN time (`model_ids` always empty)
+  and are NOT M64 dataset/tokenizer categories — a suite deletion
+  changes no dataset blocker surface (only suite RUNS, via M68)
+- **unblock chains**: delete the referencing record (M70/M68) or
+  the referencing recipe first — protection is live, never cached;
+  no cascade, no force, no bulk, no automatic cleanup
+
 ### Milestone 69 — model-owned record USAGE OVERVIEW
   (`GET /models/{model_id}/records/usage`)
 - **concept**: the M66 pattern one level down — for every model-OWNED
@@ -2861,7 +2915,7 @@ generation never trains, evaluates, scores, ranks or judges output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 652 tests
+pytest                       # 656 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3370,7 +3424,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 652 tests across 28 suites
+  tests/               # 656 tests across 29 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
