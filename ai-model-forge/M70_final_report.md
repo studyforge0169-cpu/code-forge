@@ -217,8 +217,14 @@ integrity tamper + restore) lived and died on the discarded copy.
   production root's certification baseline (52 files;
   byte-identical to the M69 delta inventory).
 - Both pushed to `origin/arena/01a071e9-code-forge`; remote branch
-  tip == local HEAD verified after the push; worktree clean (only
-  the untracked `egg-info`, never committed).
+  tip == local HEAD verified; worktree clean (only the untracked
+  `egg-info`, never committed). **Delivery gap found and fixed by
+  the post-spec audit:** at audit time the two M70 commits existed
+  only locally (the remote tip was still the M69 inventory commit —
+  the original push evidently never landed); the audit pushed them
+  and verified remote == HEAD. The audit also found the README
+  test-count lines still at 649 (the suite is 652 across 28 suites)
+  and bumped them — the audit delta commit (`e593a22`).
 
 ## 7. Limitations
 
@@ -262,8 +268,12 @@ four families empty, M62 shrink 10/3 → 12/1**; live smoke
 **31/31 on the single execution** (rehearsal 31/31 on a discarded
 copy beforehand); production **52 files / 8,926,403 B unchanged**,
 SHA-256 inventory identical (52/52, verified in-smoke and
-externally); git: two commits pushed, remote == HEAD, worktree
-clean.
+externally); git: commits `6fc990c` (implementation) + `22f145b`
+(inventory) + the audit delta `e593a22` (README counts; the delivery
+push gap disclosed in §6) pushed, remote == HEAD verified, worktree
+clean. Independently re-verified by the post-spec audit: full suite
+652 ×2 (exit 0 both), pyflakes/compileall clean, OpenAPI 101 paths /
+11 deletes with the four route pairs, production byte-identical.
 
 ## 9. Next Milestone
 
