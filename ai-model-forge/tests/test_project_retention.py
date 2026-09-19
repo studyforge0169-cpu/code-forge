@@ -485,9 +485,9 @@ def test_m72_api_and_openapi(api_client):
     # deterministic byte-identical repeat
     assert c.get("/api/v1/project/retention").content == r1.content
 
-    # OpenAPI: 105 paths; the new route is GET-only; schemas present
+    # OpenAPI: 119 paths; the new route is GET-only; schemas present
     spec = c.get("/openapi.json").json()
-    assert len(spec["paths"]) == 105
+    assert len(spec["paths"]) == 119
     assert set(spec["paths"]["/api/v1/project/retention"].keys()) == \
         {"get"}
     for s in ("ProjectFamilyRetention", "ProjectRetentionOverview"):

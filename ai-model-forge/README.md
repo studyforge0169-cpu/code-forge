@@ -2200,6 +2200,64 @@ from model-owned records to shared definitions:
   the referencing recipe first — protection is live, never cached;
   no cascade, no force, no bulk, no automatic cleanup
 
+### Milestone 73 — read-only FIRST-LEVEL deletion impact
+  preview (`GET .../retention/impact` — 14 routes, one per
+  deletable family)
+
+The per-artifact planning view ONE deletion ahead: for ONE selected
+artifact, what its VERIFIED deletion would unblock if performed NOW
+— strictly read-only, first level only, no cascade:
+
+- **routes (14, all GET-only)**: `GET /models/{id}/retention/impact`,
+  `GET /datasets/{id}/retention/impact`, `GET
+  /tokenizers/{id}/retention/impact`, `GET
+  /workflows/recipes/{id}/retention/impact`, `GET
+  /policies/{id}/retention/impact`, `GET
+  /probe-suites/{id}/retention/impact`, `GET
+  /models/{id}/checkpoints/{checkpoint_id}/retention/impact`, `GET
+  /models/{id}/workflows/{workflow_id}/retention/impact`, `GET
+  /models/{id}/evaluations/{eval_id}/retention/impact`, `GET
+  /models/{id}/comparisons/{comparison_id}/retention/impact`, `GET
+  /models/{id}/gates/decisions/{decision_id}/retention/impact`, `GET
+  /models/{id}/suite-runs/{suite_run_id}/retention/impact`, `GET
+  /models/{id}/samples/{sample_id}/retention/impact`, `GET
+  /models/{id}/sample-quality/{evaluation_id}/retention/impact`
+  (`training_run` is lifecycle-less — no preview, exactly as in
+  M68/M70/M72); every route reuses its family's existing tag
+- **section A — current retention state**: the family's EXISTING
+  retention view verbatim (deletable, integrity, files, bytes, a
+  1:1 blocker projection) — never a second blocker engine
+- **section B — immediate dependents**: the artifacts whose CURRENT
+  blocker lists contain the selected artifact (its outbound
+  persisted edges — the same canonical reference analyses, verified
+  per dependent), each with family / artifact id / reference
+  category, in canonical family order; reported for BLOCKED
+  artifacts too (current-state facts)
+- **section C — becomes-deletable (FIRST LEVEL ONLY)**: exactly the
+  dependents whose blocker lists become empty after THIS ONE
+  deletion — a minimal in-memory shadow over the SAME canonical
+  filters (nothing is written, nothing is deleted); dependents of
+  dependents are deliberately absent (deleting A reports B, never
+  C); `executable` is false for a blocked or integrity-failed
+  artifact (the guard would refuse): empty becomes-deletable set,
+  the reclaimable does not move
+- **section D — reclaimable impact**: the artifact's own
+  files/bytes (`immediate_files`/`immediate_bytes`) plus
+  `project_reclaimable_before`/`after`/`delta` from the ONE M72
+  aggregation core re-run over the shadow state — the model/record
+  overlap rule preserved verbatim (deleting a record of a
+  deletable model shrinks that model's whole-directory
+  contribution by exactly the record's own bytes — its newly
+  unblocked records add nothing, no double counting)
+- **guarded semantics**: a REAL-deletion oracle test proves the
+  prediction TRUE (the predicted becomes-deletable artifacts are
+  deletable after the actual verified deletion, the others stay
+  blocked, the M72 reclaimable after equals the predicted after);
+  an independent raw-manifest oracle derives dependents/becomes
+  from the persisted JSON without calling the preview
+- zero storage, zero mutation, deterministic byte-identical
+  repeats; unknown or registry-invisible artifact -> 404
+
 ### Milestone 72 — PROJECT retention inventory
   (`GET /project/retention`)
 
@@ -2948,7 +3006,7 @@ integrity) and the family's reclaimable files/bytes:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 660 tests
+pytest                       # 668 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 ```
 
@@ -3457,7 +3515,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 660 tests across 30 suites
+  tests/               # 668 tests across 31 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

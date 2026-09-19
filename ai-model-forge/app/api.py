@@ -43,6 +43,7 @@ from .schemas import (
     DefinitionDeletionBlocked,
     DefinitionDeletionResult,
     DefinitionRetentionOverview,
+    DeletionImpactPreview,
     ProjectRetentionOverview,
     ModelDeletionBlocked,
     ModelDeletionResult,
@@ -1176,6 +1177,7 @@ def index() -> HTMLResponse:
       <li><code>GET   {prefix}/project</code> — project info &amp; artifact counts</li>
       <li><code>GET   {prefix}/project/storage</code> — read-only PHYSICAL storage overview of the whole project: totals, category partition (no double counting) and per-model rows with the M62 retention aggregates (M63)</li>
       <li><code>GET   {prefix}/project/retention</code> — read-only PROJECT retention inventory: per-family counts/storage/deletability/reclaimable + true totals (M72)</li>
+      <li><code>GET   {prefix}/.../retention/impact</code> (on every deletable family — 14 routes) — read-only FIRST-LEVEL deletion impact preview: current state + immediate dependents + what becomes deletable + reclaimable impact (M73)</li>
       <li><code>GET   {prefix}/datasets/&#123;id&#125;/usage</code> — read-only usage overview of one dataset: every referencing record by category (training runs, workflows, evaluations, comparisons, suite runs, tokenizer training, tokenized versions; M64)</li>
       <li><code>GET   {prefix}/tokenizers/&#123;id&#125;/usage</code> — read-only usage overview of one tokenizer: every referencing record by category (training runs, workflows, evaluations, comparisons, suite runs, samples, sample quality, tokenized datasets; M64)</li>
       <li><code>GET   {prefix}/datasets/&#123;id&#125;/retention</code> — read-only deletion-readiness view of one dataset: artifact files/bytes, integrity outcome, deletable + ordered blockers (M65)</li>
@@ -1438,6 +1440,31 @@ def model_records_usage(model_id: str) -> ModelRecordsUsageOverview:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.get("/models/{model_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["models"])
+def model_deletion_impact(model_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE model
+    (M73): what this model's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M67 model retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — datasets/tokenizers its provenance and records reference), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    model has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("model", model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/retention",
          response_model=ModelRetentionOverview, tags=["models"])
 def model_retention(model_id: str) -> ModelRetentionOverview:
@@ -1607,6 +1634,31 @@ def dataset_usage(dataset_id: str) -> DatasetUsageOverview:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.get("/datasets/{dataset_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["datasets"])
+def dataset_deletion_impact(dataset_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE dataset
+    (M73): what this dataset's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M65 dataset retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — tokenizers whose tokenized versions live under it), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    dataset has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("dataset", dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/datasets/{dataset_id}/retention",
          response_model=DatasetRetentionOverview, tags=["datasets"])
 def dataset_retention(dataset_id: str) -> DatasetRetentionOverview:
@@ -1737,6 +1789,31 @@ def tokenizer_usage(tokenizer_id: str) -> TokenizerUsageOverview:
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:  # malformed manifest -> registry-invisible
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/tokenizers/{tokenizer_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["tokenizers"])
+def tokenizer_deletion_impact(tokenizer_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE tokenizer
+    (M73): what this tokenizer's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M65 tokenizer retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it (a tokenizer is referenced, never referencing — none)), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    tokenizer has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("tokenizer", tokenizer_id)
+    except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
@@ -1937,6 +2014,31 @@ def best_checkpoint_history(model_id: str) -> BestCheckpointHistory:
     """
     try:
         return _forge().best_checkpoint_history(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/checkpoints/{checkpoint_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["training"])
+def checkpoint_deletion_impact(model_id: str, checkpoint_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE checkpoint
+    (M73): what this checkpoint's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M62 checkpoint retention entry verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it (checkpoint lineage never blocks — none)), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    checkpoint has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("checkpoint", checkpoint_id, model_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -2349,6 +2451,31 @@ def delete_evaluation(model_id: str, eval_id: str
                     "protected": True, "blockers": blockers}) from exc
 
 
+@api.get("/models/{model_id}/evaluations/{eval_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["evaluation"])
+def evaluation_deletion_impact(model_id: str, eval_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE evaluation record
+    (M73): what this evaluation record's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M70 record retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — the checkpoint it measured, its dataset/tokenizer), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    evaluation record has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("evaluation", eval_id, model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/evaluations/{eval_id}/retention",
          response_model=ModelRecordRetentionOverview, tags=["evaluation"])
 def evaluation_retention(model_id: str, eval_id: str
@@ -2696,6 +2823,31 @@ def delete_comparison(model_id: str, comparison_id: str
                     "protected": True, "blockers": blockers}) from exc
 
 
+@api.get("/models/{model_id}/comparisons/{comparison_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["comparison"])
+def comparison_deletion_impact(model_id: str, comparison_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE comparison record
+    (M73): what this comparison record's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M70 record retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — its side evaluations, the checkpoints it compared, its dataset/tokenizer), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    comparison record has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("comparison", comparison_id, model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/comparisons/{comparison_id}/retention",
          response_model=ModelRecordRetentionOverview, tags=["comparison"])
 def comparison_retention(model_id: str, comparison_id: str
@@ -2988,6 +3140,31 @@ def delete_gate(model_id: str, decision_id: str
                     "protected": True, "blockers": blockers}) from exc
 
 
+@api.get("/models/{model_id}/gates/decisions/{decision_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["gates"])
+def gate_deletion_impact(model_id: str, decision_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE gate decision
+    (M73): what this gate decision's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M70 record retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — its comparison, side evaluations, measured checkpoints, registry policy, dataset/tokenizer), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    gate decision has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("gate", decision_id, model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/gates/decisions/{decision_id}/retention",
          response_model=ModelRecordRetentionOverview, tags=["gates"])
 def gate_retention(model_id: str, decision_id: str
@@ -3045,6 +3222,31 @@ def create_policy(request: PolicyCreateRequest) -> PolicyDefinition:
 def list_policies() -> list[PolicyDefinition]:
     """Immutable policy definitions, deterministic order (oldest first)."""
     return _forge().list_policies()
+
+
+@api.get("/policies/{policy_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["policies"])
+def policy_deletion_impact(policy_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE gate policy
+    (M73): what this gate policy's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M71 definition retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — the model its policy targets), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    gate policy has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("gate_policy", policy_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @api.get("/policies/{policy_id}/retention",
@@ -3138,6 +3340,31 @@ def create_probe_suite(request: ProbeSuiteCreateRequest) -> ProbeSuite:
 def list_probe_suites() -> list[ProbeSuite]:
     """Immutable probe suites, deterministic order (oldest first)."""
     return _forge().list_probe_suites()
+
+
+@api.get("/probe-suites/{suite_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["policies"])
+def probe_suite_deletion_impact(suite_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE probe suite
+    (M73): what this probe suite's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M71 definition retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it (a suite binds models only at RUN time — none)), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    probe suite has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("probe_suite", suite_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @api.get("/probe-suites/{suite_id}/retention",
@@ -3357,6 +3584,31 @@ def list_suite_runs_by_reused_count(model_id: str,
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.get("/models/{model_id}/suite-runs/{suite_run_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["suite-runs"])
+def suite_run_deletion_impact(model_id: str, suite_run_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE suite run
+    (M73): what this suite run's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M68 suite-run retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — its model, the suite, its probe evaluations, measured checkpoint, datasets/tokenizers), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    suite run has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("suite_run", suite_run_id, model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/suite-runs/{suite_run_id}/retention",
          response_model=SuiteRunRetentionOverview, tags=["suite-runs"])
 def suite_run_retention(model_id: str,
@@ -3560,6 +3812,31 @@ def delete_workflow(model_id: str, workflow_id: str
                     "protected": True, "blockers": blockers}) from exc
 
 
+@api.get("/models/{model_id}/workflows/{workflow_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["workflows"])
+def workflow_deletion_impact(model_id: str, workflow_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE workflow record
+    (M73): what this workflow record's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M70 record retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — its stage-artifact records, held checkpoints, recipe provenance, plan datasets/tokenizers), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    workflow record has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("workflow", workflow_id, model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/workflows/{workflow_id}/retention",
          response_model=ModelRecordRetentionOverview, tags=["workflows"])
 def workflow_retention(model_id: str, workflow_id: str
@@ -3622,6 +3899,31 @@ def create_workflow_recipe(request: WorkflowRecipeCreateRequest) -> WorkflowReci
 def list_workflow_recipes() -> list[WorkflowRecipe]:
     """Immutable workflow recipes, deterministic order (oldest first)."""
     return _forge().list_workflow_recipes()
+
+
+@api.get("/workflows/recipes/{recipe_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["workflow-recipes"])
+def workflow_recipe_deletion_impact(recipe_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE workflow recipe
+    (M73): what this workflow recipe's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M71 definition retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — the models its stage configs name), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    workflow recipe has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("workflow_recipe", recipe_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @api.get("/workflows/recipes/{recipe_id}/retention",
@@ -3935,6 +4237,31 @@ def list_samples_by_strategy(model_id: str, strategy: SampleStrategy
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@api.get("/models/{model_id}/samples/{sample_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["sampling"])
+def sample_deletion_impact(model_id: str, sample_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE sample
+    (M73): what this sample's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M68 sample retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — its model, the checkpoint it sampled, its tokenizer), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    sample has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("sample", sample_id, model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @api.get("/models/{model_id}/samples/{sample_id}/retention",
          response_model=SampleRetentionOverview, tags=["sampling"])
 def sample_retention(model_id: str,
@@ -4165,6 +4492,31 @@ def list_sample_quality_by_tokenizer(model_id: str, tokenizer_id: str
     try:
         return _forge().list_sample_evaluations_for_tokenizer(
             model_id, tokenizer_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/models/{model_id}/sample-quality/{evaluation_id}/retention/impact",
+         response_model=DeletionImpactPreview, tags=["sample-quality"])
+def sample_quality_deletion_impact(model_id: str, evaluation_id: str) -> DeletionImpactPreview:
+    """Read-only FIRST-LEVEL deletion impact preview of ONE sample-quality measurement
+    (M73): what this sample-quality measurement's VERIFIED deletion would unblock if
+    it were performed NOW — the CURRENT retention state (the
+    EXISTING M68 sample-quality retention view verbatim, never a second blocker engine), the
+    IMMEDIATE DEPENDENTS (artifacts whose blocker lists currently
+    contain it — its model, the sample it measured, the checkpoint, its tokenizer), the FIRST-LEVEL becomes-deletable set
+    (the minimal in-memory shadow over the SAME canonical analyses;
+    no recursive cascade — dependents of dependents are deliberately
+    absent) and the RECLAIMABLE impact (its own files/bytes plus the
+    project reclaimable before/after/delta from the ONE M72
+    aggregation re-run over the shadow state — the model/record
+    overlap rule preserved verbatim). A blocked or integrity-failed
+    sample-quality measurement has NO executable deletion (the guard would refuse
+    it): the becomes-deletable set is empty and the project
+    reclaimable does not move. Zero storage, zero mutation,
+    deterministic; unknown or registry-invisible artifact -> 404."""
+    try:
+        return _forge().deletion_impact_preview("sample_quality", evaluation_id, model_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

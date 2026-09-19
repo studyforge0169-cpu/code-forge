@@ -584,7 +584,7 @@ def test_m66_api_model_usage(api_client):
 
     # OpenAPI: exactly one new path (91 -> 92)
     spec = api_client.get("/openapi.json").json()
-    assert len(spec["paths"]) == 105
+    assert len(spec["paths"]) == 119
     NEW = "/api/v1/models/{model_id}/usage"
     assert set(spec["paths"][NEW].keys()) == {"get"}
     for s in ("ModelUsageOverview", "ModelUsageCategory"):

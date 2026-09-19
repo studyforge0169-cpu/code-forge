@@ -1360,6 +1360,105 @@ class ProjectRetentionOverview(BaseModel):
     reclaimable_bytes: int
 
 
+class ImpactBlocker(BaseModel):
+    """ONE blocker of the selected artifact in the M73 read-only
+    deletion impact preview: a 1:1 uniform projection of the family's
+    NATIVE blocker entry (M67/M70/M71 blockers carry
+    ``category``/``reference_id``/``detail`` verbatim; the
+    reason+detail blocker families — M61 checkpoints, M65 data
+    artifacts, M68 root records — map ``reason`` to ``category`` and
+    leave ``reference_id`` unset because their native form joins the
+    ids into ``detail``). Same order, same count, same content as the
+    family's retention view — the preview never re-derives blocker
+    semantics."""
+
+    category: str
+    reference_id: Optional[str] = None
+    detail: str
+
+
+class ImpactDependent(BaseModel):
+    """ONE immediate dependent in the M73 preview: an artifact whose
+    CURRENT blocker list contains the selected artifact (the selected
+    artifact references it — deleting the selected artifact removes
+    exactly that blocker contribution). ``family`` uses the canonical
+    M72 family vocabulary; ``model_id`` is set for model-scoped
+    artifacts; ``reference_category`` is the stable category name
+    under which the selected artifact appears in the dependent's
+    blocker list (the M69/M64/M66 referencing-family category, the
+    M61 ``..._reference`` reason, or the M71/M68 blocker category)."""
+
+    family: str
+    artifact_id: str
+    model_id: Optional[str] = None
+    reference_category: str
+
+
+class ImpactBecomesDeletable(BaseModel):
+    """ONE artifact that transitions blocked -> deletable in the M73
+    preview's FIRST-LEVEL shadow analysis: the selected artifact's
+    deletion removes its last blocker contribution, the remaining
+    blocker list is empty and integrity passes. FIRST LEVEL ONLY —
+    artifacts that would only become deletable after FURTHER
+    deletions (the dependents of these) are deliberately NOT
+    reported. ``files``/``size_bytes`` are the artifact's own storage
+    (from its existing retention view)."""
+
+    family: str
+    artifact_id: str
+    model_id: Optional[str] = None
+    files: int
+    size_bytes: int
+
+
+class DeletionImpactPreview(BaseModel):
+    """Read-only live-computed FIRST-LEVEL deletion impact preview of
+    ONE artifact (M73) — the forward complement of the retention
+    view: what the artifact's VERIFIED deletion would unblock if it
+    were performed NOW. ``current`` state: ``deletable`` /
+    ``integrity_verified`` / ``blockers`` (the 1:1 projection) /
+    ``files`` / ``size_bytes`` — identical to the family's existing
+    retention view (the SAME analysis, never a second blocker
+    engine). ``executable`` is exactly the retention view's
+    ``deletable`` (integrity passes AND no blockers) — a blocked or
+    integrity-failed artifact has NO executable deletion, so its
+    ``becomes_deletable`` set is empty and the project reclaimable
+    does not move (the honest §8 semantics). For an executable
+    artifact: ``immediate_dependents`` (artifacts it currently
+    blocks), ``becomes_deletable`` (the first-level shadow result),
+    ``immediate_files``/``immediate_bytes`` (the artifact's own
+    storage — what its deletion would remove) and the project
+    reclaimable before/after/delta computed by re-running the ONE
+    M72 aggregation over a shadow state (the selected artifact
+    skipped, its model's storage shrunk when it is model-owned, the
+    newly-deletable artifacts flipped) — the M72 overlap rule
+    preserved verbatim (a deletable model contributes its WHOLE
+    directory, subsuming its records). Zero storage, zero mutation,
+    no cascade, no recursion, deterministic byte-identical output;
+    unknown or registry-invisible artifact -> FileNotFoundError (404
+    at the API)."""
+
+    family: str
+    artifact_id: str
+    model_id: Optional[str] = None
+    deletion_supported: bool = True
+    deletable: bool
+    integrity_verified: bool
+    blockers: list[ImpactBlocker] = Field(default_factory=list)
+    files: int
+    size_bytes: int
+    executable: bool
+    immediate_dependents: list[ImpactDependent] = Field(
+        default_factory=list)
+    becomes_deletable: list[ImpactBecomesDeletable] = Field(
+        default_factory=list)
+    immediate_files: int
+    immediate_bytes: int
+    project_reclaimable_before: int
+    project_reclaimable_after: int
+    project_reclaimable_delta: int
+
+
 class ModelDeletionBlocker(BaseModel):
     """Why ONE model may not be deleted (M67 reference safety): ONE
     persisted EXTERNAL reference that would be orphaned by the

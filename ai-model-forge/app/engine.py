@@ -42,7 +42,11 @@ from .schemas import (
     GateBaselineType,
     GateDecisionResult,
     ModelCreateRequest,
+    DeletionImpactPreview,
     DefinitionDeletionBlocker,
+    ImpactBecomesDeletable,
+    ImpactBlocker,
+    ImpactDependent,
     ProjectFamilyRetention,
     ProjectRetentionOverview,
     DefinitionDeletionResult,
@@ -1811,6 +1815,173 @@ class ModelForge:
         "sample_quality",     # M68 (root-level)
     )
 
+    def _project_retention_core(self, skip=frozenset(),
+                                deletable_override=None,
+                                model_storage_delta=None):
+        """The ONE M72 project-retention aggregation over the
+        existing per-artifact views (M62/M65/M67/M68/M69/M70/M71),
+        parameterized for the M73 impact preview's SHADOW state:
+        ``skip`` = (family, artifact_id) keys treated as already
+        deleted; ``deletable_override`` = keys flipped to deletable
+        (the M73 first-level shadow result); ``model_storage_delta``
+        = model_id -> (files, bytes) subtracted from a model's own
+        storage when one of its owned artifacts is skipped (the
+        record/checkpoint directory is part of the model's). With
+        all parameters empty this is EXACTLY the M72 overview
+        computation — the public overview and the M73 impact preview
+        share ONE code path, ONE scanner and ONE overlap rule; the
+        shadow never touches the filesystem. Returns
+        (agg, reclaimable_files, reclaimable_bytes)."""
+        deletable_override = deletable_override or {}
+        model_storage_delta = model_storage_delta or {}
+
+        agg = {f: dict(count=0, files=0, size=0, deletable=0,
+                       rfiles=0, rbytes=0)
+               for f in self.PROJECT_RETENTION_FAMILIES}
+
+        def add(family, key, files: int, size: int, deletable: bool):
+            d = agg[family]
+            d["count"] += 1
+            d["files"] += files
+            d["size"] += size
+            if deletable:
+                d["deletable"] += 1
+                d["rfiles"] += files
+                d["rbytes"] += size
+
+        # root-level data artifacts + definitions (global registries)
+        for d in self.datasets.list():
+            if ("dataset", d.id) in skip:
+                continue
+            v = self.dataset_retention_overview(d.id)
+            add("dataset", d.id, len(v.files), v.size_bytes,
+                v.deletable or ("dataset", d.id) in deletable_override)
+        for t in self.tokenizers.list():
+            if ("tokenizer", t.id) in skip:
+                continue
+            v = self.tokenizer_retention_overview(t.id)
+            add("tokenizer", t.id, len(v.files), v.size_bytes,
+                v.deletable or ("tokenizer", t.id) in deletable_override)
+        for r in self.recipes.list():
+            if ("workflow_recipe", r.recipe_id) in skip:
+                continue
+            v = self.definition_retention_overview(
+                "workflow_recipe", r.recipe_id)
+            add("workflow_recipe", r.recipe_id, len(v.files), v.size_bytes,
+                v.deletable or ("workflow_recipe", r.recipe_id)
+                in deletable_override)
+        for pol in self.policies.list_policies():
+            if ("gate_policy", pol.policy_id) in skip:
+                continue
+            v = self.definition_retention_overview(
+                "gate_policy", pol.policy_id)
+            add("gate_policy", pol.policy_id, len(v.files), v.size_bytes,
+                v.deletable or ("gate_policy", pol.policy_id)
+                in deletable_override)
+        for s in self.policies.list_suites():
+            if ("probe_suite", s.suite_id) in skip:
+                continue
+            v = self.definition_retention_overview(
+                "probe_suite", s.suite_id)
+            add("probe_suite", s.suite_id, len(v.files), v.size_bytes,
+                v.deletable or ("probe_suite", s.suite_id)
+                in deletable_override)
+
+        # per model: the model itself + its owned records (the ONE
+        # M69 usage listing enumerates the record ids; the ONE M62/
+        # M70 views carry the deletion-readiness)
+        reclaimable_files = reclaimable_bytes = 0
+        reclaimable_files += agg["dataset"]["rfiles"] + \
+            agg["tokenizer"]["rfiles"] + agg["workflow_recipe"][
+                "rfiles"] + agg["gate_policy"]["rfiles"] + \
+            agg["probe_suite"]["rfiles"]
+        reclaimable_bytes += agg["dataset"]["rbytes"] + \
+            agg["tokenizer"]["rbytes"] + agg["workflow_recipe"][
+                "rbytes"] + agg["gate_policy"]["rbytes"] + \
+            agg["probe_suite"]["rbytes"]
+        record_families = ("checkpoint", "workflow", "evaluation",
+                           "comparison", "gate")
+        for m in self.list_models():
+            if ("model", m.id) in skip:
+                continue  # the whole model directory is shadow-gone
+            v = self.model_retention_overview(m.id)
+            d_files, d_bytes = model_storage_delta.get(m.id, (0, 0))
+            m_deletable = v.deletable or ("model", m.id) \
+                in deletable_override
+            add("model", m.id, len(v.files) - d_files,
+                v.size_bytes - d_bytes, m_deletable)
+            # this model's OWN record reclaim, isolated via before/
+            # after snapshots of the cumulative record-family sums
+            pre_rf = sum(agg[f]["rfiles"] for f in record_families)
+            pre_rb = sum(agg[f]["rbytes"] for f in record_families)
+            usage = self.model_records_usage_overview(m.id)
+            cats = {c.category: c.records for c in usage.categories}
+            agg["training_run"]["count"] += len(
+                cats.get("training_run", []))
+            ck = self.checkpoint_retention_overview(m.id)
+            for e in ck.checkpoints:
+                if ("checkpoint", e.checkpoint_id) in skip:
+                    continue
+                add("checkpoint", e.checkpoint_id, e.files, e.size_bytes,
+                    e.deletable or ("checkpoint", e.checkpoint_id)
+                    in deletable_override)
+            for category in ("workflow", "evaluation", "comparison",
+                             "gate"):
+                for r in cats.get(category, []):
+                    if (category, r.record_id) in skip:
+                        continue
+                    rv = self.model_record_retention_overview(
+                        m.id, category, r.record_id)
+                    add(category, r.record_id, len(rv.files),
+                        rv.size_bytes, rv.deletable
+                        or (category, r.record_id) in deletable_override)
+            # root-level M68 records of this model
+            for sr in self.list_suite_runs(m.id):
+                if ("suite_run", sr.suite_run_id) in skip:
+                    continue
+                rv = self.suite_run_retention_overview(
+                    m.id, sr.suite_run_id)
+                add("suite_run", sr.suite_run_id, len(rv.files),
+                    rv.size_bytes, rv.deletable
+                    or ("suite_run", sr.suite_run_id) in deletable_override)
+            for s in self.list_samples(m.id):
+                if ("sample", s.sample_id) in skip:
+                    continue
+                rv = self.sample_retention_overview(m.id, s.sample_id)
+                add("sample", s.sample_id, len(rv.files), rv.size_bytes,
+                    rv.deletable or ("sample", s.sample_id)
+                    in deletable_override)
+            for q in self.list_sample_evaluations(m.id):
+                if ("sample_quality", q.evaluation_id) in skip:
+                    continue
+                rv = self.sample_evaluation_retention_overview(
+                    m.id, q.evaluation_id)
+                add("sample_quality", q.evaluation_id, len(rv.files),
+                    rv.size_bytes, rv.deletable
+                    or ("sample_quality", q.evaluation_id)
+                    in deletable_override)
+            # the EXACT model/record overlap rule: a deletable model
+            # contributes its WHOLE directory (its records go with
+            # it); a blocked model contributes only its own
+            # deletable records
+            if m_deletable:
+                reclaimable_files += len(v.files) - d_files
+                reclaimable_bytes += v.size_bytes - d_bytes
+            else:
+                reclaimable_files += sum(
+                    agg[f]["rfiles"] for f in record_families) - pre_rf
+                reclaimable_bytes += sum(
+                    agg[f]["rbytes"] for f in record_families) - pre_rb
+        # root-level M68 records live OUTSIDE models/ — always add
+        reclaimable_files += sum(agg[f]["rfiles"] for f in
+                                 ("suite_run", "sample",
+                                  "sample_quality"))
+        reclaimable_bytes += sum(agg[f]["rbytes"] for f in
+                                 ("suite_run", "sample",
+                                  "sample_quality"))
+
+        return agg, reclaimable_files, reclaimable_bytes
+
     def project_retention_overview(self) -> ProjectRetentionOverview:
         """Read-only live-computed PROJECT retention inventory (M72):
         the whole deletion surface in ONE view. Per family, in the
@@ -1834,116 +2005,9 @@ class ModelForge:
         read from the EXISTING M62/M63/M65/M67/M68/M69/M70/M71
         analyses — no second scanner, nothing persisted, zero
         mutation, byte-identical over unchanged state."""
-        agg = {f: dict(count=0, files=0, size=0, deletable=0,
-                       rfiles=0, rbytes=0)
-               for f in self.PROJECT_RETENTION_FAMILIES}
+        agg, reclaimable_files, reclaimable_bytes = \
+            self._project_retention_core()
 
-        def add(family, files: int, size: int, deletable: bool):
-            d = agg[family]
-            d["count"] += 1
-            d["files"] += files
-            d["size"] += size
-            if deletable:
-                d["deletable"] += 1
-                d["rfiles"] += files
-                d["rbytes"] += size
-
-        # root-level data artifacts + definitions (global registries)
-        for d in self.datasets.list():
-            v = self.dataset_retention_overview(d.id)
-            add("dataset", len(v.files), v.size_bytes, v.deletable)
-        for t in self.tokenizers.list():
-            v = self.tokenizer_retention_overview(t.id)
-            add("tokenizer", len(v.files), v.size_bytes, v.deletable)
-        for r in self.recipes.list():
-            v = self.definition_retention_overview(
-                "workflow_recipe", r.recipe_id)
-            add("workflow_recipe", len(v.files), v.size_bytes,
-                v.deletable)
-        for pol in self.policies.list_policies():
-            v = self.definition_retention_overview(
-                "gate_policy", pol.policy_id)
-            add("gate_policy", len(v.files), v.size_bytes, v.deletable)
-        for s in self.policies.list_suites():
-            v = self.definition_retention_overview(
-                "probe_suite", s.suite_id)
-            add("probe_suite", len(v.files), v.size_bytes, v.deletable)
-
-        # per model: the model itself + its owned records (the ONE
-        # M69 usage listing enumerates the record ids; the ONE M62/
-        # M70 views carry the deletion-readiness)
-        reclaimable_files = reclaimable_bytes = 0
-        reclaimable_files += agg["dataset"]["rfiles"] + \
-            agg["tokenizer"]["rfiles"] + agg["workflow_recipe"][
-                "rfiles"] + agg["gate_policy"]["rfiles"] + \
-            agg["probe_suite"]["rfiles"]
-        reclaimable_bytes += agg["dataset"]["rbytes"] + \
-            agg["tokenizer"]["rbytes"] + agg["workflow_recipe"][
-                "rbytes"] + agg["gate_policy"]["rbytes"] + \
-            agg["probe_suite"]["rbytes"]
-        record_families = ("checkpoint", "workflow", "evaluation",
-                           "comparison", "gate")
-        for m in self.list_models():
-            v = self.model_retention_overview(m.id)
-            add("model", len(v.files), v.size_bytes, v.deletable)
-            # this model's OWN record reclaim, isolated via before/
-            # after snapshots of the cumulative record-family sums
-            pre_rf = sum(agg[f]["rfiles"] for f in record_families)
-            pre_rb = sum(agg[f]["rbytes"] for f in record_families)
-            usage = self.model_records_usage_overview(m.id)
-            cats = {c.category: c.records for c in usage.categories}
-            agg["training_run"]["count"] += len(
-                cats.get("training_run", []))
-            ck = self.checkpoint_retention_overview(m.id)
-            d = agg["checkpoint"]
-            d["count"] += ck.total_checkpoints
-            d["files"] += sum(e.files for e in ck.checkpoints)
-            d["size"] += ck.total_checkpoint_bytes
-            d["deletable"] += ck.deletable_checkpoints
-            d["rbytes"] += ck.reclaimable_checkpoint_bytes
-            d["rfiles"] += sum(e.files for e in ck.checkpoints
-                               if e.deletable)
-            for category in ("workflow", "evaluation", "comparison",
-                             "gate"):
-                for r in cats.get(category, []):
-                    rv = self.model_record_retention_overview(
-                        m.id, category, r.record_id)
-                    add(category, len(rv.files), rv.size_bytes,
-                        rv.deletable)
-            # root-level M68 records of this model
-            for sr in self.list_suite_runs(m.id):
-                rv = self.suite_run_retention_overview(
-                    m.id, sr.suite_run_id)
-                add("suite_run", len(rv.files), rv.size_bytes,
-                    rv.deletable)
-            for s in self.list_samples(m.id):
-                rv = self.sample_retention_overview(m.id, s.sample_id)
-                add("sample", len(rv.files), rv.size_bytes,
-                    rv.deletable)
-            for q in self.list_sample_evaluations(m.id):
-                rv = self.sample_evaluation_retention_overview(
-                    m.id, q.evaluation_id)
-                add("sample_quality", len(rv.files), rv.size_bytes,
-                    rv.deletable)
-            # the EXACT model/record overlap rule: a deletable model
-            # contributes its WHOLE directory (its records go with
-            # it); a blocked model contributes only its own
-            # deletable records
-            if v.deletable:
-                reclaimable_files += len(v.files)
-                reclaimable_bytes += v.size_bytes
-            else:
-                reclaimable_files += sum(
-                    agg[f]["rfiles"] for f in record_families) - pre_rf
-                reclaimable_bytes += sum(
-                    agg[f]["rbytes"] for f in record_families) - pre_rb
-        # root-level M68 records live OUTSIDE models/ — always add
-        reclaimable_files += sum(agg[f]["rfiles"] for f in
-                                 ("suite_run", "sample",
-                                  "sample_quality"))
-        reclaimable_bytes += sum(agg[f]["rbytes"] for f in
-                                 ("suite_run", "sample",
-                                  "sample_quality"))
 
         families = []
         for family in self.PROJECT_RETENTION_FAMILIES:
@@ -1970,6 +2034,553 @@ class ModelForge:
             total_blocked=sum(f.blocked_count for f in families),
             reclaimable_files=reclaimable_files,
             reclaimable_bytes=reclaimable_bytes)
+
+    # ------------------------------------------------------------------ #
+    # M73: read-only FIRST-LEVEL deletion impact preview
+    # ------------------------------------------------------------------ #
+
+    # The families with a VERIFIED deletion lifecycle (every M72
+    # family except the lifecycle-less training_run). Only these are
+    # eligible for an impact preview; the route layer passes the
+    # family explicitly.
+    IMPACT_FAMILIES = ("model", "dataset", "tokenizer",
+                       "workflow_recipe", "gate_policy", "probe_suite",
+                       "checkpoint", "workflow", "evaluation",
+                       "comparison", "gate", "suite_run", "sample",
+                       "sample_quality")
+    # X family -> the M70 blocker category under which X appears in a
+    # record dependent's blockers (the M69 referencing-family name)
+    IMPACT_RECORD_CATEGORIES = frozenset(
+        ("workflow", "comparison", "gate", "suite_run"))
+
+    def _impact_current(self, family: str, artifact_id: str,
+                        model_id: str | None):
+        """Scope + the family's EXISTING retention view (M73 current
+        state): the ONE per-artifact analysis — never a second
+        retention engine — uniformized to (deletable, integrity,
+        files, size, blockers). Blockers are a 1:1 projection: the
+        M67/M70/M71 families carry (category, reference_id, detail)
+        verbatim; the reason+detail families (M61 checkpoints, M65
+        data artifacts, M68 root records) map reason -> category and
+        leave reference_id unset (their native form joins the ids
+        into detail). Unknown or registry-invisible artifact ->
+        FileNotFoundError (404 at the API)."""
+        def blocked(blockers, reason=False):
+            return [(b.reason if reason else b.category,
+                     None if reason else b.reference_id, b.detail)
+                    for b in blockers]
+        if family == "model":
+            v = self.model_retention_overview(artifact_id)
+            return dict(deletable=v.deletable,
+                        integrity=v.integrity_verified,
+                        files=len(v.files), size=v.size_bytes,
+                        blockers=blocked(v.blockers))
+        if family == "dataset":
+            v = self.dataset_retention_overview(artifact_id)
+            return dict(deletable=v.deletable,
+                        integrity=v.integrity_verified,
+                        files=len(v.files), size=v.size_bytes,
+                        blockers=blocked(v.blockers, reason=True))
+        if family == "tokenizer":
+            v = self.tokenizer_retention_overview(artifact_id)
+            return dict(deletable=v.deletable,
+                        integrity=v.integrity_verified,
+                        files=len(v.files), size=v.size_bytes,
+                        blockers=blocked(v.blockers, reason=True))
+        if family in ("workflow_recipe", "gate_policy", "probe_suite"):
+            v = self.definition_retention_overview(family, artifact_id)
+            return dict(deletable=v.deletable,
+                        integrity=v.integrity_verified,
+                        files=len(v.files), size=v.size_bytes,
+                        blockers=blocked(v.blockers))
+        if family == "checkpoint":
+            ov = self.checkpoint_retention_overview(model_id)
+            entry = next((e for e in ov.checkpoints
+                          if e.checkpoint_id == artifact_id), None)
+            if entry is None:
+                raise FileNotFoundError(
+                    f"checkpoint '{artifact_id}' not found for model "
+                    f"'{model_id}'")
+            return dict(deletable=entry.deletable,
+                        integrity=entry.integrity_verified,
+                        files=entry.files, size=entry.size_bytes,
+                        blockers=blocked(entry.blockers, reason=True))
+        if family in ("workflow", "evaluation", "comparison", "gate"):
+            v = self.model_record_retention_overview(
+                model_id, family, artifact_id)
+            return dict(deletable=v.deletable,
+                        integrity=v.integrity_verified,
+                        files=len(v.files), size=v.size_bytes,
+                        blockers=blocked(v.blockers))
+        if family == "suite_run":
+            v = self.suite_run_retention_overview(model_id, artifact_id)
+            return dict(deletable=v.deletable,
+                        integrity=v.integrity_verified,
+                        files=len(v.files), size=v.size_bytes,
+                        blockers=blocked(v.blockers, reason=True))
+        if family == "sample":
+            v = self.sample_retention_overview(model_id, artifact_id)
+            return dict(deletable=v.deletable,
+                        integrity=v.integrity_verified,
+                        files=len(v.files), size=v.size_bytes,
+                        blockers=blocked(v.blockers, reason=True))
+        v = self.sample_evaluation_retention_overview(model_id,
+                                                      artifact_id)
+        return dict(deletable=v.deletable, integrity=v.integrity_verified,
+                    files=len(v.files), size=v.size_bytes,
+                    blockers=blocked(v.blockers, reason=True))
+
+    def _impact_outbound(self, family: str, artifact_id: str,
+                         model_id: str | None) -> list[tuple]:
+        """The selected artifact's OUTBOUND references — the persisted
+        edges (typed record fields, the ONE M61/M64 helpers) whose
+        targets have the selected artifact in their blocker lists.
+        Returns ordered unique (dep_family, dep_id, dep_model_id,
+        reference_category) candidates; membership is verified per
+        candidate by ``_impact_evaluate_dependent``. Deleting the
+        selected artifact removes exactly these edges from the
+        dependents' blocker analyses. Suite-run STAGE artifacts are
+        deliberately absent: the created suite run is ROOT-LEVEL and
+        survives a workflow deletion; lineage checkpoint parents never
+        block; probe suites bind models only at run time."""
+        out: set[tuple[str, str, str | None, str]] = set()
+
+        def push(dep_family, dep_id, dep_model, cat):
+            out.add((dep_family, dep_id, dep_model, cat))
+
+        if family == "model":
+            m = artifact_id
+            for info in self.datasets.list():
+                u = self.dataset_usage_overview(info.id)
+                for c in u.categories:
+                    if c.category in ("training_run", "workflow",
+                                      "evaluation", "comparison",
+                                      "suite_run") and any(
+                            r.startswith(f"{m}/") for r in c.references):
+                        push("dataset", info.id, None, c.category)
+            for t in self.tokenizers.list():
+                u = self.tokenizer_usage_overview(t.id)
+                for c in u.categories:
+                    if c.category in ("training_run", "workflow",
+                                      "evaluation", "comparison",
+                                      "suite_run", "sample",
+                                      "sample_quality") and any(
+                            r.startswith(f"{m}/") for r in c.references):
+                        push("tokenizer", t.id, None, c.category)
+        elif family == "dataset":
+            u = self.dataset_usage_overview(artifact_id)
+            for c in u.categories:
+                if c.category == "tokenized_version":
+                    for ref in c.references:  # "v{n}/{tokenizer_id}"
+                        push("tokenizer", ref.split("/", 1)[1], None,
+                             "tokenized_dataset")
+        elif family == "workflow_recipe":
+            rec = self._definition_scope("workflow_recipe",
+                                         artifact_id)[0]
+            for m in self._recipe_model_ids(rec):
+                push("model", m, None, "workflow_recipe")
+            # a COMPOSITE recipe's composition refs: the referenced
+            # recipes carry THIS recipe in their blocker lists (the
+            # M71 composition blocker, mirrored here as dependents)
+            for ref in (rec.composition or []):
+                push("workflow_recipe", ref.recipe_id, None,
+                     "workflow_recipe")
+        elif family == "gate_policy":
+            rec = self.policies.get_policy(artifact_id)
+            push("model", rec.policy.model_id, None, "policy")
+        elif family == "workflow":
+            rec = self.workflows.get_workflow(model_id, artifact_id)
+            for st in rec.stages:
+                art = st.artifact
+                if art is None:
+                    continue
+                if art.kind == ArtifactKind.EVALUATION:
+                    push("evaluation", art.artifact_id, model_id,
+                         "workflow")
+                elif art.kind == ArtifactKind.COMPARISON:
+                    push("comparison", art.artifact_id, model_id,
+                         "workflow")
+                elif art.kind == ArtifactKind.GATE_DECISION:
+                    push("gate", art.artifact_id, model_id, "workflow")
+                # SUITE_RUN artifacts are root-level records that
+                # SURVIVE a workflow deletion — not dependents
+            for cid, _where in self._workflow_checkpoint_refs(rec):
+                push("checkpoint", cid, model_id, "workflow")
+            if rec.recipe_id:
+                push("workflow_recipe", rec.recipe_id, None, "workflow")
+            for ds, tok in self._workflow_data_refs(rec.plan):
+                push("dataset", ds, None, "workflow")
+                push("tokenizer", tok, None, "workflow")
+        elif family == "evaluation":
+            rec = self.evaluation.get_evaluation(model_id, artifact_id)
+            if rec.checkpoint_id:
+                push("checkpoint", rec.checkpoint_id, model_id,
+                     "evaluation")
+            push("dataset", rec.dataset_id, None, "evaluation")
+            push("tokenizer", rec.tokenizer_id, None, "evaluation")
+        elif family == "comparison":
+            rec = self.comparison.get_comparison(model_id, artifact_id)
+            for side in (rec.state_a, rec.state_b):
+                push("evaluation", side.evaluation_id, model_id,
+                     "comparison")
+                if side.state_kind == EvalStateKind.CHECKPOINT \
+                        and side.checkpoint_id:
+                    push("checkpoint", side.checkpoint_id, model_id,
+                         "comparison")
+            push("dataset", rec.dataset_id, None, "comparison")
+            push("tokenizer", rec.tokenizer_id, None, "comparison")
+        elif family == "gate":
+            rec = self.gates.get_decision(model_id, artifact_id)
+            if rec.comparison_id:
+                push("comparison", rec.comparison_id, model_id, "gate")
+            for side in (rec.candidate, rec.baseline):
+                if side is None:
+                    continue
+                push("evaluation", side.evaluation_id, model_id, "gate")
+                if side.state_kind == EvalStateKind.CHECKPOINT \
+                        and side.checkpoint_id:
+                    push("checkpoint", side.checkpoint_id, model_id,
+                         "gate")
+            if rec.suggested_checkpoint_id:
+                push("checkpoint", rec.suggested_checkpoint_id, model_id,
+                     "gate")
+            if rec.policy_id:
+                push("gate_policy", rec.policy_id, None, "gate")
+            push("dataset", rec.policy.dataset_id, None, "gate")
+            push("tokenizer", rec.policy.tokenizer_id, None, "gate")
+        elif family == "suite_run":
+            rec = self.get_suite_run(model_id, artifact_id)
+            push("model", model_id, None, "suite_run")
+            push("probe_suite", rec.suite_id, None, "suite_run")
+            if rec.state.state_kind == EvalStateKind.CHECKPOINT \
+                    and rec.state.checkpoint_id:
+                push("checkpoint", rec.state.checkpoint_id, model_id,
+                     "suite_run")
+            for r in rec.results:
+                if r.evaluation_id:
+                    push("evaluation", r.evaluation_id, model_id,
+                         "suite_run")
+                push("dataset", r.probe.dataset_id, None, "suite_run")
+                push("tokenizer", r.probe.tokenizer_id, None,
+                     "suite_run")
+        elif family == "sample":
+            rec = self.get_sample(model_id, artifact_id)
+            push("model", model_id, None, "sample")
+            push("checkpoint", rec.checkpoint_id, model_id, "sample")
+            push("tokenizer", rec.tokenizer_id, None, "sample")
+        elif family == "sample_quality":
+            rec = self.get_sample_evaluation(model_id, artifact_id)
+            push("model", model_id, None, "sample_quality")
+            push("sample", rec.sample_id, model_id, "sample_quality")
+            push("checkpoint", rec.checkpoint_id, model_id,
+                 "sample_quality")
+            push("tokenizer", rec.tokenizer_id, None, "sample_quality")
+        # tokenizer / probe_suite / checkpoint: nothing has them in a
+        # blocker list (a tokenizer is referenced, never referencing;
+        # suites bind at run time; checkpoint lineage never blocks)
+        order = {f: i for i, f in enumerate(
+            self.PROJECT_RETENTION_FAMILIES)}
+        return sorted(out, key=lambda t: (order[t[0]], t[1], t[3]))
+
+    def _impact_evaluate_dependent(
+            self, family: str, artifact_id: str, model_id: str | None,
+            dep_family: str, dep_id: str, dep_model: str | None,
+            ref_category: str):
+        """Verify ONE outbound candidate (is the selected artifact
+        REALLY in the dependent's blocker list?) and compute its
+        FIRST-LEVEL after-state: (is_dependent, becomes_entry | None).
+        The after-state re-evaluates the dependent's blockers over a
+        minimal in-memory shadow — the SAME canonical filters and
+        views the guards use, minus the selected artifact's edges —
+        never touching the filesystem (§7). First level only: a
+        dependent that stays blocked after this ONE deletion is
+        reported as a dependent but never as becoming deletable."""
+        if dep_family in ("workflow", "evaluation", "comparison",
+                          "gate"):
+            v = self.model_record_retention_overview(
+                dep_model, dep_family, dep_id)
+            hits = [b for b in v.blockers
+                    if b.category == family and b.reference_id ==
+                    artifact_id]
+            if not hits:
+                return False, None
+            rest = [b for b in v.blockers
+                    if not (b.category == family
+                            and b.reference_id == artifact_id)]
+            entry = None
+            if not rest and v.integrity_verified:
+                entry = ImpactBecomesDeletable(
+                    family=dep_family, artifact_id=dep_id,
+                    model_id=dep_model, files=len(v.files),
+                    size_bytes=v.size_bytes)
+            return True, entry
+        if dep_family == "checkpoint":
+            ov = self.checkpoint_retention_overview(dep_model)
+            entry = next((e for e in ov.checkpoints
+                          if e.checkpoint_id == dep_id), None)
+            if entry is None:
+                return False, None
+            # §7 shadow over the SAME canonical filters M61 uses,
+            # minus the selected artifact's edges
+            pointers = [b for b in entry.blockers if b.reason in
+                        ("best", "published", "manifest_reference")]
+            evals = {e.eval_id for e in
+                     self.evaluation.list_evaluations_for_checkpoint(
+                         dep_model, dep_id)}
+            comps = {c.comparison_id for c in
+                     self.comparison.list_comparisons_for_checkpoint(
+                         dep_model, dep_id)}
+            gates = set()
+            for g in self.gates.list_decisions(dep_model):
+                for side_name, side in (("candidate", g.candidate),
+                                        ("baseline", g.baseline)):
+                    if (side is not None
+                            and side.state_kind ==
+                            EvalStateKind.CHECKPOINT
+                            and side.checkpoint_id == dep_id):
+                        gates.add(f"{g.decision_id}.{side_name}")
+                if g.suggested_checkpoint_id == dep_id:
+                    gates.add(f"{g.decision_id}.suggested_checkpoint_id")
+            suites = {s.suite_run_id for s in
+                      self.suite_runs.list_suite_runs_for_checkpoint(
+                          dep_model, dep_id)}
+            samples = {s.sample_id for s in
+                       self.samples.list_samples_for_checkpoint(
+                           dep_model, dep_id)}
+            sqs = {q.evaluation_id for q in
+                   self.sample_quality.
+                   list_sample_evaluations_for_checkpoint(
+                       dep_model, dep_id)}
+            wfs = {w.workflow_id for w in
+                   self.workflows.list_workflows(dep_model)
+                   if any(cid == dep_id for cid, _ in
+                          self._workflow_checkpoint_refs(w))}
+            member = False
+            if family == "workflow":
+                member = artifact_id in wfs
+                wfs.discard(artifact_id)
+            elif family == "evaluation":
+                member = artifact_id in evals
+                evals.discard(artifact_id)
+            elif family == "comparison":
+                member = artifact_id in comps
+                comps.discard(artifact_id)
+            elif family == "gate":
+                member = any(g.startswith(f"{artifact_id}.")
+                             for g in gates)
+                gates = {g for g in gates
+                         if not g.startswith(f"{artifact_id}.")}
+            elif family == "suite_run":
+                member = artifact_id in suites
+                suites.discard(artifact_id)
+            elif family == "sample":
+                member = artifact_id in samples
+                samples.discard(artifact_id)
+            else:  # sample_quality
+                member = artifact_id in sqs
+                sqs.discard(artifact_id)
+            if not member:
+                return False, None
+            entry_out = None
+            if (not pointers and not evals and not comps and not gates
+                    and not suites and not samples and not sqs
+                    and not wfs and entry.integrity_verified):
+                entry_out = ImpactBecomesDeletable(
+                    family="checkpoint", artifact_id=dep_id,
+                    model_id=dep_model, files=entry.files,
+                    size_bytes=entry.size_bytes)
+            return True, entry_out
+        if dep_family == "model":
+            v = self.model_retention_overview(dep_id)
+            # the dependent's blocker category is the outbound
+            # reference_category (the M70 name — "policy" for gate
+            # policies, the family name for every other family)
+            hits = [b for b in v.blockers
+                    if b.category == ref_category
+                    and b.reference_id == artifact_id]
+            if not hits:
+                return False, None
+            rest = [b for b in v.blockers
+                    if not (b.category == ref_category
+                            and b.reference_id == artifact_id)]
+            entry = None
+            if not rest and v.integrity_verified:
+                entry = ImpactBecomesDeletable(
+                    family="model", artifact_id=dep_id, model_id=None,
+                    files=len(v.files), size_bytes=v.size_bytes)
+            return True, entry
+        if dep_family in ("dataset", "tokenizer"):
+            usage = (self.dataset_usage_overview(dep_id)
+                     if dep_family == "dataset"
+                     else self.tokenizer_usage_overview(dep_id))
+            if family == "dataset":
+                # X = dataset: the tokenizer's tokenized_dataset refs
+                contributed = [r for c in usage.categories
+                               if c.category == "tokenized_dataset"
+                               for r in c.references
+                               if r.startswith(f"{artifact_id}/")]
+            elif family == "model":
+                contributed = [r for c in usage.categories
+                               for r in c.references
+                               if r.startswith(f"{artifact_id}/")]
+            else:  # a record of model_id: its ONE qualified id in X's
+                   # own category
+                qid = f"{model_id}/{artifact_id}"
+                contributed = [r for c in usage.categories
+                               if c.category == family
+                               for r in c.references if r == qid]
+            if not contributed:
+                return False, None
+            rest = any(
+                len([r for r in c.references
+                     if r not in set(contributed)]) > 0
+                for c in usage.categories)
+            entry = None
+            integrity = (self.dataset_retention_overview(dep_id)
+                         .integrity_verified
+                         if dep_family == "dataset" else
+                         self.tokenizer_retention_overview(dep_id)
+                         .integrity_verified)
+            if not rest and integrity:
+                v = (self.dataset_retention_overview(dep_id)
+                     if dep_family == "dataset"
+                     else self.tokenizer_retention_overview(dep_id))
+                entry = ImpactBecomesDeletable(
+                    family=dep_family, artifact_id=dep_id, model_id=None,
+                    files=len(v.files), size_bytes=v.size_bytes)
+            return True, entry
+        if dep_family in ("workflow_recipe", "gate_policy",
+                          "probe_suite"):
+            v = self.definition_retention_overview(dep_family, dep_id)
+            hits = [b for b in v.blockers if b.category == family
+                    and b.reference_id == artifact_id]
+            if not hits:
+                return False, None
+            rest = [b for b in v.blockers
+                    if not (b.category == family
+                            and b.reference_id == artifact_id)]
+            entry = None
+            if not rest and v.integrity_verified:
+                entry = ImpactBecomesDeletable(
+                    family=dep_family, artifact_id=dep_id,
+                    model_id=None, files=len(v.files),
+                    size_bytes=v.size_bytes)
+            return True, entry
+        # dep_family == "sample": X = sample_quality (the ONE M19
+        # listing is the blocker source — M68)
+        v = self.sample_retention_overview(dep_model, dep_id)
+        listing = [m.evaluation_id for m in
+                   self.sample_quality.list_sample_evaluations_for_sample(
+                       dep_model, dep_id)]
+        if artifact_id not in listing:
+            return False, None
+        rest = [m for m in listing if m != artifact_id]
+        entry = None
+        if not rest and v.integrity_verified:
+            entry = ImpactBecomesDeletable(
+                family="sample", artifact_id=dep_id, model_id=dep_model,
+                files=len(v.files), size_bytes=v.size_bytes)
+        return True, entry
+
+    def deletion_impact_preview(self, family: str, artifact_id: str,
+                                model_id: str | None = None
+                                ) -> DeletionImpactPreview:
+        """Read-only live-computed FIRST-LEVEL deletion impact preview
+        of ONE artifact (M73): what the artifact's VERIFIED deletion
+        would unblock if it were performed NOW. Sections: (A) the
+        CURRENT retention state — the family's EXISTING view verbatim
+        (scope: unknown or registry-invisible artifact ->
+        FileNotFoundError, 404 at the API; the blocker projection is
+        1:1, never a second blocker engine); (B) the IMMEDIATE
+        DEPENDENTS — artifacts whose current blocker lists contain
+        the selected artifact (its outbound persisted edges, verified
+        against each dependent's canonical blockers); (C) the
+        BECOMES-DELETABLE set — FIRST LEVEL ONLY: the dependents
+        whose blocker lists become empty in the minimal in-memory
+        shadow (the SAME canonical filters minus the selected
+        artifact's edges; no recursive cascade — dependents of
+        dependents are deliberately absent); (D) the RECLAIMABLE
+        impact — the artifact's own files/bytes plus the project
+        reclaimable before/after/delta, computed by re-running the
+        ONE M72 aggregation core over the shadow state (the selected
+        artifact skipped, its model's storage shrunk when it is
+        model-owned, the newly-deletable artifacts flipped) so the
+        M72 overlap rule holds verbatim (a deletable model
+        contributes its WHOLE directory, subsuming its records). A
+        blocked or integrity-failed artifact has NO executable
+        deletion (the guard would refuse it): ``executable`` is
+        false, the becomes-deletable set is empty and the project
+        reclaimable does not move — the honest guard semantics,
+        never bypassed. Zero storage, zero mutation, deterministic;
+        the lifecycle-less ``training_run`` family has no preview
+        (ValueError)."""
+        if family not in self.IMPACT_FAMILIES:
+            raise ValueError(
+                f"family '{family}' has no deletion lifecycle (M73 "
+                f"families: {', '.join(self.IMPACT_FAMILIES)})")
+        cur = self._impact_current(family, artifact_id, model_id)
+        before_rb = self._project_retention_core()[2]
+        dependents: list[ImpactDependent] = []
+        becomes: list[ImpactBecomesDeletable] = []
+        # the IMMEDIATE DEPENDENTS are current-state FACTS (who the
+        # selected artifact blocks) — reported for blocked artifacts
+        # too; only the becomes-deletable set and the reclaim
+        # movement are the EXECUTABLE impact, gated on the guard's
+        # own decision (§8: never pretend a refused deletion occurs)
+        for (dep_family, dep_id, dep_model,
+             ref_category) in self._impact_outbound(
+                family, artifact_id, model_id):
+            is_dep, entry = self._impact_evaluate_dependent(
+                family, artifact_id, model_id, dep_family, dep_id,
+                dep_model, ref_category)
+            if not is_dep:
+                continue
+            dependents.append(ImpactDependent(
+                family=dep_family, artifact_id=dep_id,
+                model_id=dep_model, reference_category=ref_category))
+            if cur["deletable"] and entry is not None:
+                becomes.append(entry)
+        # the shadow reclaim: ONE M72 core re-run — the selected
+        # artifact removed + the newly-deletable flipped — gated on
+        # the guard's own decision (a refused deletion moves nothing)
+        if cur["deletable"]:
+            skip = {(family, artifact_id)}
+            override = {(b.family, b.artifact_id) for b in becomes}
+            delta = {}
+            if family in ("checkpoint", "workflow", "evaluation",
+                          "comparison", "gate"):
+                delta[model_id] = (cur["files"], cur["size"])
+            after_rb = self._project_retention_core(
+                skip=skip, deletable_override=override,
+                model_storage_delta=delta)[2]
+        else:
+            after_rb = before_rb
+        order = {f: i for i, f in enumerate(
+            self.PROJECT_RETENTION_FAMILIES)}
+        dependents.sort(key=lambda d: (order[d.family],
+                                       d.artifact_id,
+                                       d.reference_category))
+        becomes.sort(key=lambda b: (order[b.family], b.artifact_id))
+        return DeletionImpactPreview(
+            family=family,
+            artifact_id=artifact_id,
+            model_id=model_id,
+            deletion_supported=True,
+            deletable=cur["deletable"],
+            integrity_verified=cur["integrity"],
+            blockers=[ImpactBlocker(category=c, reference_id=r,
+                                    detail=d)
+                      for c, r, d in cur["blockers"]],
+            files=cur["files"],
+            size_bytes=cur["size"],
+            executable=cur["deletable"],
+            immediate_dependents=dependents,
+            becomes_deletable=becomes,
+            immediate_files=cur["files"],
+            immediate_bytes=cur["size"],
+            project_reclaimable_before=before_rb,
+            project_reclaimable_after=after_rb,
+            project_reclaimable_delta=after_rb - before_rb)
 
     def _recipe_model_ids(self, recipe) -> set[str]:
         """Model ids DIRECTLY named by ONE workflow recipe's stage
