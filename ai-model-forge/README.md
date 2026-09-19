@@ -2200,9 +2200,53 @@ from model-owned records to shared definitions:
   the referencing recipe first — protection is live, never cached;
   no cascade, no force, no bulk, no automatic cleanup
 
-### Milestone 73 — read-only FIRST-LEVEL deletion impact
-  preview (`GET .../retention/impact` — 14 routes, one per
-  deletable family)
+### Milestone 74 — READ-ONLY retention & impact CLI (`forge`)
+
+A thin command-line ADAPTER over the existing surfaces — no second
+scanner, no second blocker engine, no second impact engine, no
+second project-retention implementation: every command calls the
+ONE existing engine facade and formats its Pydantic result.
+Strictly read-only (zero storage, zero mutation, zero deletion
+capability); the OpenAPI surface is untouched (still 119 paths /
+14 DELETEs — M74 adds no routes).
+
+- **installation/invocation**: `pip install -e ".[dev]"` installs
+  the `forge` console script (`forge = "app.cli:main"`, stdlib
+  argparse only); `python -m app.cli` works identically. `FORGE_ROOT`
+  selects the data root exactly as for the API
+- **commands**:
+  `forge retention project [--json]` — the M72 project inventory;
+  `forge retention <family> <id> [--model-id M] [--json]` — the
+  family's EXISTING retention view for every deletable family
+  (model, dataset, tokenizer, workflow_recipe, gate_policy,
+  probe_suite, checkpoint, workflow, evaluation, comparison, gate,
+  suite_run, sample, sample_quality);
+  `forge impact <family> <id> [--model-id M] [--json]` — the M73
+  FIRST-LEVEL deletion impact preview
+- **model-scoped families** (checkpoint, workflow, evaluation,
+  comparison, gate, suite_run, sample, sample_quality) REQUIRE
+  `--model-id` (a missing or stray `--model-id` is a usage error —
+  the id is never guessed and never passed in the artifact
+  position); the other families accept NONE
+- **`--json`** prints exactly the engine model's
+  `model_dump(mode="json")` (sorted keys) — never a second schema;
+  the default output is deterministic human-readable text;
+  repeated runs against the same state are byte-identical
+- **`training_run` remains lifecycle-less** (as in M68/M70/M72/M73):
+  both commands refuse it with the canonical lifecycle error and a
+  non-zero exit — no fabricated retention or impact result
+- **exit codes**: 0 success; 2 usage; 3 unknown/registry-invisible
+  artifact; 4 unknown family; 5 lifecycle-less family; 1 other
+  engine errors (the canonical engine message goes to stderr). A
+  blocked or integrity-failed artifact is NOT a command failure —
+  its view describes the state faithfully and exits 0
+- **single checkpoint retention**: `retention checkpoint <id>
+  --model-id M` prints the M62 overview's entry for that one
+  checkpoint (the M62 view is per-model; the CLI selects the entry,
+  raising the canonical `checkpoint '…' not found for model '…'`
+  for an unknown id)
+
+
 
 The per-artifact planning view ONE deletion ahead: for ONE selected
 artifact, what its VERIFIED deletion would unblock if performed NOW
@@ -3006,8 +3050,9 @@ integrity) and the family's reclaimable files/bytes:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 668 tests
+pytest                       # 680 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
+forge retention project                    # read-only CLI (M74)
 ```
 
 ### Data flow example
@@ -3515,7 +3560,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 668 tests across 31 suites
+  tests/               # 680 tests across 32 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
