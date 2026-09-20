@@ -2246,6 +2246,35 @@ capability); the OpenAPI surface is untouched (still 119 paths /
   raising the canonical `checkpoint '…' not found for model '…'`
   for an unknown id)
 
+### Milestone 75 — READ-ONLY usage & storage CLI commands
+
+The same thin-adapter discipline (M74) extended to the remaining
+read-only surfaces — every command routes to the ONE existing
+facade method and formats its Pydantic result; no second scanner,
+no second usage engine, no second storage walker; OpenAPI
+untouched (still 119 paths / 14 DELETEs):
+
+- `forge storage [--json]` — the M63 PHYSICAL project storage
+  overview (`project_storage_overview`, the ONE storage walk)
+- `forge usage dataset <id> [--json]` /
+  `forge usage tokenizer <id> [--json]` — the M64 usage overviews
+  (`dataset_usage_overview` / `tokenizer_usage_overview`)
+- `forge usage model <id> [--json]` — the model usage overview
+  (`model_usage_overview`)
+- `forge usage records <model_id> [--json]` — the M69 model-owned
+  record usage overview (`model_records_usage_overview`)
+- `forge usage definition <family> <id> [--json]` — the M71
+  definition retention overview (`definition_retention_overview`)
+  for the three definition families (workflow_recipe, gate_policy,
+  probe_suite — validated against the engine's own registry)
+- `--json` prints exactly `model_dump(mode="json")` (sorted keys);
+  human output reuses the M74 deterministic renderer; repeated runs
+  are byte-identical
+- exit codes reuse the M74 contract verbatim (0 success; 2 usage;
+  3 unknown artifact; 4 unknown family; 5 lifecycle-less — e.g.
+  `usage definition training_run`; 1 other engine errors); a
+  referenced or blocked state is a successful view, never an error
+
 
 
 The per-artifact planning view ONE deletion ahead: for ONE selected
@@ -3050,7 +3079,7 @@ integrity) and the family's reclaimable files/bytes:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 680 tests
+pytest                       # 688 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 forge retention project                    # read-only CLI (M74)
 ```
@@ -3560,7 +3589,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 680 tests across 32 suites
+  tests/               # 688 tests across 32 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

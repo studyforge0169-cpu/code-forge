@@ -327,3 +327,187 @@ def test_m74_blocked_artifact_is_not_a_failure(env, ids):
                   "--model-id", ids["sample"][1], "--json"], env.root)
     assert rj.returncode == 0
     assert json.loads(rj.stdout)["deletable"] is False
+
+
+# =========================================================================== #
+# M75: read-only usage & storage commands
+# =========================================================================== #
+
+USAGE_KINDS = ("dataset", "tokenizer", "model", "records", "definition")
+DEFINITION_FAMILIES = ("workflow_recipe", "gate_policy", "probe_suite")
+
+
+def test_m75_help(env):
+    for args in (
+            ["--help"], ["storage", "--help"], ["usage", "--help"],
+            ["usage", "dataset", "--help"],
+            ["usage", "tokenizer", "--help"],
+            ["usage", "model", "--help"], ["usage", "records", "--help"],
+            ["usage", "definition", "--help"]):
+        r = run_cli(args, env.root)
+        assert r.returncode == 0, (args, r.stderr)
+        assert r.stdout.strip(), args
+
+
+def test_m75_malformed_invocations(env):
+    # missing required positionals / subcommands -> argparse exit 2
+    for args in (["usage"], ["usage", "dataset"], ["usage", "model"],
+                 ["usage", "definition"], ["storage", "unexpected-arg"],
+                 ["usage", "bogus", "some-id"]):
+        r = run_cli(args, env.root)
+        assert r.returncode == 2, (args, r.returncode, r.stdout)
+        assert r.stdout == "", args
+    # invalid family routed INTO the definition command -> exit 4
+    r = run_cli(["usage", "definition", "bogus-family", "x"], env.root)
+    assert r.returncode == 4, r.stderr
+    assert "unknown family 'bogus-family'" in r.stderr
+    assert r.stdout == ""
+    # a lifecycle-less family -> the M74 exit-5 semantics
+    r = run_cli(["usage", "definition", "training_run", "x"], env.root)
+    assert r.returncode == 5, r.stderr
+    assert "training_run" in r.stderr and "no deletion lifecycle" \
+        in r.stderr
+    assert r.stdout == ""
+
+
+def test_m75_storage(env):
+    forge = env.forge
+    expected = forge.project_storage_overview().model_dump(mode="json")
+    rj = run_cli(["storage", "--json"], env.root)
+    assert rj.returncode == 0, rj.stderr
+    assert json.loads(rj.stdout) == expected  # the independent oracle
+    rh = run_cli(["storage"], env.root)
+    assert rh.returncode == 0, rh.stderr
+    assert f"total_files: {expected['total_files']}" in rh.stdout
+    assert f"total_bytes: {expected['total_bytes']}" in rh.stdout
+    assert f"model_count: {expected['model_count']}" in rh.stdout
+    # deterministic repeat
+    assert run_cli(["storage"], env.root).stdout == rh.stdout
+    assert run_cli(["storage", "--json"], env.root).stdout == rj.stdout
+
+
+def test_m75_usage_dataset_and_tokenizer(env):
+    forge = env.forge
+    for kind, artifact_id, id_field in (
+            ("dataset", env.ds, "dataset_id"),
+            ("tokenizer", env.tok, "tokenizer_id")):
+        method = (forge.dataset_usage_overview
+                  if kind == "dataset" else forge.tokenizer_usage_overview)
+        expected = method(artifact_id).model_dump(mode="json")
+        rj = run_cli(["usage", kind, artifact_id, "--json"], env.root)
+        assert rj.returncode == 0, (kind, rj.stderr)
+        assert json.loads(rj.stdout) == expected, kind
+        rh = run_cli(["usage", kind, artifact_id], env.root)
+        assert rh.returncode == 0, (kind, rh.stderr)
+        assert f"{id_field}: {artifact_id}" in rh.stdout, kind
+        assert f"total_references: {expected['total_references']}" \
+            in rh.stdout, kind
+        assert run_cli(["usage", kind, artifact_id],
+                       env.root).stdout == rh.stdout, kind
+        # unknown id -> exit 3, canonical error, empty stdout
+        r = run_cli(["usage", kind, "no-such-id"], env.root)
+        assert r.returncode == 3, (kind, r.stderr)
+        assert "no-such-id" in r.stderr and r.stdout == ""
+
+
+def test_m75_usage_model_and_records(env):
+    forge = env.forge
+    expected_model = forge.model_usage_overview(
+        env.model).model_dump(mode="json")
+    rj = run_cli(["usage", "model", env.model, "--json"], env.root)
+    assert rj.returncode == 0, rj.stderr
+    assert json.loads(rj.stdout) == expected_model
+    rh = run_cli(["usage", "model", env.model], env.root)
+    assert rh.returncode == 0, rh.stderr
+    assert f"model_id: {env.model}" in rh.stdout
+    assert f"total_references: {expected_model['total_references']}" \
+        in rh.stdout
+    assert run_cli(["usage", "model", env.model],
+                   env.root).stdout == rh.stdout
+
+    expected_records = forge.model_records_usage_overview(
+        env.model).model_dump(mode="json")
+    rj = run_cli(["usage", "records", env.model, "--json"], env.root)
+    assert rj.returncode == 0, rj.stderr
+    assert json.loads(rj.stdout) == expected_records
+    rh = run_cli(["usage", "records", env.model], env.root)
+    assert rh.returncode == 0, rh.stderr
+    assert f"total_references: {expected_records['total_references']}" \
+        in rh.stdout
+    assert run_cli(["usage", "records", env.model],
+                   env.root).stdout == rh.stdout
+    # the two views are DISTINCT surfaces (no accidental routing)
+    assert run_cli(["usage", "model", env.model], env.root).stdout != \
+        run_cli(["usage", "records", env.model], env.root).stdout
+    # unknown model -> exit 3, canonical error, empty stdout
+    for kind in ("model", "records"):
+        r = run_cli(["usage", kind, "no-such-model"], env.root)
+        assert r.returncode == 3, (kind, r.stderr)
+        assert "no-such-model" in r.stderr and r.stdout == ""
+
+
+def test_m75_usage_definition_every_family(env):
+    forge = env.forge
+    known = {"workflow_recipe": "m73-recipe",
+             "gate_policy": env.policy,
+             "probe_suite": "m73-suite"}
+    assert set(known) == set(forge.DEFINITION_DELETABLE_FAMILIES)
+    for family, definition_id in known.items():
+        expected = forge.definition_retention_overview(
+            family, definition_id).model_dump(mode="json")
+        rj = run_cli(["usage", "definition", family, definition_id,
+                      "--json"], env.root)
+        assert rj.returncode == 0, (family, rj.stderr)
+        assert json.loads(rj.stdout) == expected, family
+        rh = run_cli(["usage", "definition", family, definition_id],
+                     env.root)
+        assert rh.returncode == 0, (family, rh.stderr)
+        assert f"family: {family}" in rh.stdout, family
+        assert f"deletable: {str(expected['deletable']).lower()}" \
+            in rh.stdout, family
+        assert f"size_bytes: {expected['size_bytes']}" in rh.stdout, \
+            family
+        assert run_cli(["usage", "definition", family, definition_id],
+                       env.root).stdout == rh.stdout, family
+        # unknown definition -> exit 3, canonical error, empty stdout
+        r = run_cli(["usage", "definition", family, "no-such-def"],
+                    env.root)
+        assert r.returncode == 3, (family, r.stderr)
+        assert "no-such-def" in r.stderr and r.stdout == "", family
+
+
+def test_m75_swapped_id_positions(env, ids):
+    """The M74 argument-position discipline, M75 edition: an id
+    routed into the WRONG command must FAIL (exit 3), never
+    succeed by accident."""
+    model_a = ids["model"][0]
+    ds = ids["dataset"][0]
+    # a dataset id is not a model / record-owner / definition id
+    for args in (["usage", "model", ds],
+                 ["usage", "records", ds],
+                 ["usage", "definition", "gate_policy", model_a],
+                 ["usage", "dataset", model_a],
+                 ["usage", "tokenizer", model_a]):
+        r = run_cli(args, env.root)
+        assert r.returncode == 3, (args, r.returncode, r.stdout)
+        assert r.stdout == "", args
+
+
+def test_m75_registry_no_drift(env):
+    """The CLI definition surface must track the engine's OWN
+    registry — a missing or extra family is caught here, before any
+    engine call."""
+    forge = env.forge
+    assert set(forge.DEFINITION_DELETABLE_FAMILIES) == \
+        set(DEFINITION_FAMILIES)
+    assert len(DEFINITION_FAMILIES) == 3
+    # every engine definition family is accepted by the CLI (routed
+    # to the real facade — exit 3 on a missing id, never 4)
+    for family in forge.DEFINITION_DELETABLE_FAMILIES:
+        r = run_cli(["usage", "definition", family, "no-such-def"],
+                    env.root)
+        assert r.returncode == 3, family
+    # training_run stays lifecycle-less everywhere (M74 semantics)
+    assert "training_run" in forge.PROJECT_RETENTION_FAMILIES
+    assert "training_run" not in forge.DEFINITION_DELETABLE_FAMILIES
+    assert "training_run" not in forge.IMPACT_FAMILIES

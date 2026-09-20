@@ -20,7 +20,23 @@ API):
     family); the eight model-scoped families require ``--model-id``;
 ``forge impact <family> <id> [--model-id M] [--json]``
     the M73 FIRST-LEVEL deletion impact preview
-    (``deletion_impact_preview``).
+    (``deletion_impact_preview``);
+``forge storage [--json]``
+    the M63 PHYSICAL project storage overview
+    (``project_storage_overview`` — the ONE storage walk);
+``forge usage dataset <id> [--json]`` /
+``forge usage tokenizer <id> [--json]``
+    the M64 usage overviews (``dataset_usage_overview`` /
+    ``tokenizer_usage_overview``);
+``forge usage model <id> [--json]``
+    the model usage overview (``model_usage_overview``);
+``forge usage records <model_id> [--json]``
+    the model-owned-record usage overview
+    (``model_records_usage_overview``);
+``forge usage definition <family> <id> [--json]``
+    the M71 definition retention overview
+    (``definition_retention_overview``) for the three definition
+    families (workflow_recipe / gate_policy / probe_suite).
 
 ``training_run`` remains lifecycle-less (M68/M70/M72/M73): both
 commands refuse it with the canonical lifecycle error and a non-zero
@@ -125,6 +141,52 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true",
         help="machine-readable JSON (the engine model's "
              "model_dump(mode='json')) instead of human text")
+
+    sto = sub.add_parser(
+        "storage", help="read-only PHYSICAL project storage overview "
+                        "(the ONE M63 storage walk)")
+    sto.add_argument(
+        "--json", action="store_true",
+        help="machine-readable JSON (the engine model's "
+             "model_dump(mode='json')) instead of human text")
+
+    # the ONE shared --json flag for every usage subcommand
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--json", action="store_true",
+        help="machine-readable JSON (the engine model's "
+             "model_dump(mode='json')) instead of human text")
+    use = sub.add_parser(
+        "usage", help="read-only usage overviews (M64 dataset/tokenizer, "
+                      "model usage, M69 model-owned records, M71 "
+                      "definitions)")
+    u_sub = use.add_subparsers(dest="kind", required=True)
+    u_sub.add_parser(
+        "dataset", parents=[common],
+        help="M64 dataset usage overview").add_argument(
+            "dataset_id", metavar="id", help="the dataset's id")
+    u_sub.add_parser(
+        "tokenizer", parents=[common],
+        help="M64 tokenizer usage overview").add_argument(
+            "tokenizer_id", metavar="id", help="the tokenizer's id")
+    u_sub.add_parser(
+        "model", parents=[common],
+        help="model usage overview").add_argument(
+            "model_id", metavar="id", help="the model's id")
+    u_sub.add_parser(
+        "records", parents=[common],
+        help="M69 model-owned-record usage overview").add_argument(
+            "model_id", metavar="model_id", help="the owning model's id")
+    udef = u_sub.add_parser(
+        "definition", parents=[common],
+        help="M71 definition retention overview (workflow_recipe / "
+             "gate_policy / probe_suite)")
+    udef.add_argument(
+        "family", metavar="family",
+        help="a definition family (workflow_recipe, gate_policy, "
+             "probe_suite)")
+    udef.add_argument(
+        "definition_id", metavar="id", help="the definition's id")
     return parser
 
 
@@ -205,6 +267,36 @@ def _run_impact(forge, args):
         args.family, args.artifact_id, args.model_id)
 
 
+def _run_storage(forge, args):
+    """Route ONE storage command to the ONE M63 facade
+    (``project_storage_overview``) and return its result unchanged —
+    never a second filesystem walker."""
+    return forge.project_storage_overview()
+
+
+def _run_usage(forge, args):
+    """Route ONE usage command to the EXISTING facade method and
+    return its Pydantic result unchanged. Routing only — no second
+    reference discovery, no second usage aggregation, no second
+    definition dependency scanner."""
+    if args.kind == "dataset":
+        return forge.dataset_usage_overview(args.dataset_id)
+    if args.kind == "tokenizer":
+        return forge.tokenizer_usage_overview(args.tokenizer_id)
+    if args.kind == "model":
+        return forge.model_usage_overview(args.model_id)
+    if args.kind == "records":
+        return forge.model_records_usage_overview(args.model_id)
+    # definition: validated against the engine's OWN registry (a
+    # lifecycle-less family such as training_run is refused with the
+    # M74 semantics; unknown families with the M74 unknown-family
+    # error) — never a fabricated usage result
+    _validate_family(args.family, forge.DEFINITION_DELETABLE_FAMILIES,
+                     forge.PROJECT_RETENTION_FAMILIES)
+    return forge.definition_retention_overview(
+        args.family, args.definition_id)
+
+
 def _render(value, indent: int = 0) -> list[str]:
     """Deterministic human-readable lines for ONE ``model_dump``
     value: fields in the model's declaration order, nested dicts
@@ -266,7 +358,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     from app.engine import get_forge  # deferred: --help stays fast
     try:
-        if args.command == "retention":
+        if args.command == "storage":
+            result = _run_storage(get_forge(), args)
+        elif args.command == "usage":
+            result = _run_usage(get_forge(), args)
+        elif args.command == "retention":
             if args.family is None:
                 raise CliError(
                     "retention requires 'project' or a family and an "
