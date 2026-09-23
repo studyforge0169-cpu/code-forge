@@ -44,6 +44,13 @@ API):
     the M19-M60 by-X history groupings plus the M59 best-checkpoint
     history (family ``best_checkpoint`` — no dimension), ONE facade
     method per (family, dimension) pair, always model-scoped.
+``forge list <family> [--model-id M] [--json]``
+    the existing facade LISTINGS — six global families (models,
+    datasets, tokenizers, recipes, policies, suites) and eight
+    model-scoped families (checkpoints, evaluations, comparisons,
+    gates, workflows, suite_runs, samples, sample_quality);
+    ``--model-id`` exactly where the facade requires it, empty
+    listings are valid successes.
 
 ``training_run`` remains lifecycle-less (M68/M70/M72/M73): both
 commands refuse it with the canonical lifecycle error and a non-zero
@@ -160,6 +167,32 @@ _HISTORY_DISPATCH = {
     "best_checkpoint": {},
 }
 HISTORY_FAMILIES = tuple(_HISTORY_DISPATCH)
+
+# The M77 listing dispatch table: family -> (facade method name,
+# model-scoped). The keys are the repository's family vocabulary in
+# the plural (a LIST command names the collection); every entry is
+# ONE existing ModelForge facade method — the SIX zero-argument
+# global listings and the EIGHT model-scoped record listings. A
+# drift test pins this table to the engine's actual list_* facade
+# set by signature shape (no missing surface, no extra, no wrong
+# scope); the CLI never constructs a listing itself.
+_LIST_DISPATCH = {
+    "models": ("list_models", False),
+    "datasets": ("list_datasets", False),
+    "tokenizers": ("list_tokenizers", False),
+    "recipes": ("list_workflow_recipes", False),
+    "policies": ("list_policies", False),
+    "suites": ("list_probe_suites", False),
+    "checkpoints": ("list_checkpoints", True),
+    "evaluations": ("list_evaluations", True),
+    "comparisons": ("list_comparisons", True),
+    "gates": ("list_gate_decisions", True),
+    "workflows": ("list_workflows", True),
+    "suite_runs": ("list_suite_runs", True),
+    "samples": ("list_samples", True),
+    "sample_quality": ("list_sample_evaluations", True),
+}
+LIST_FAMILIES = tuple(_LIST_DISPATCH)
 
 EXIT_OK = 0
 EXIT_ENGINE_ERROR = 1
@@ -297,6 +330,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--model-id", metavar="M", dest="model_id", required=True,
         help="the owning model's id (every history surface is "
              "model-scoped)")
+    lst = sub.add_parser(
+        "list", parents=[common],
+        help="read-only listings (the existing facade listing "
+             "methods)")
+    lst.add_argument(
+        "family", metavar="family",
+        help="a listing family (" + ", ".join(LIST_FAMILIES) + ")")
+    lst.add_argument(
+        "--model-id", metavar="M", dest="model_id",
+        help="the owning model's id (required for the model-scoped "
+             "families: checkpoints, evaluations, comparisons, "
+             "gates, workflows, suite_runs, samples, "
+             "sample_quality; rejected for the global families)")
     return parser
 
 
@@ -476,6 +522,31 @@ def _run_history(forge, args):
     return getattr(forge, method_name)(args.model_id, value)
 
 
+def _run_list(forge, args):
+    """Route ONE listing command to the EXISTING facade listing
+    method and return its result unchanged. Routing only — never a
+    second listing engine, registry or scanner; empty listings are
+    valid successful results. ``--model-id`` is enforced to match
+    the facade's own signature shape exactly (required for the
+    eight model-scoped families, rejected for the six global ones)
+    and never lands in any other argument position."""
+    _validate_family(args.family, LIST_FAMILIES,
+                     forge.PROJECT_RETENTION_FAMILIES)
+    method_name, scoped = _LIST_DISPATCH[args.family]
+    if scoped and not args.model_id:
+        raise CliError(
+            f"family '{args.family}' is model-scoped: --model-id "
+            f"is required", EXIT_USAGE)
+    if not scoped and args.model_id:
+        raise CliError(
+            f"family '{args.family}' is not model-scoped: "
+            f"--model-id is not accepted", EXIT_USAGE)
+    method = getattr(forge, method_name)
+    if scoped:
+        return method(args.model_id)
+    return method()
+
+
 def _render(value, indent: int = 0) -> list[str]:
     """Deterministic human-readable lines for ONE ``model_dump``
     value: fields in the model's declaration order, nested dicts
@@ -522,7 +593,11 @@ def _emit(result, as_json: bool) -> None:
     ``model_dump(mode='json')`` of the result (an array for lists,
     sorted keys) — never a second schema."""
     if isinstance(result, list):
-        data = [r.model_dump(mode="json") for r in result]
+        # some facade listings (list_datasets / list_tokenizers)
+        # return PRE-SERIALIZED dicts — passed through verbatim,
+        # never a second serialization
+        data = [r.model_dump(mode="json")
+                if hasattr(r, "model_dump") else r for r in result]
         if as_json:
             print(json.dumps(data, indent=2, sort_keys=True))
         else:
@@ -556,6 +631,8 @@ def main(argv: list[str] | None = None) -> int:
             result = _run_dashboard(get_forge(), args)
         elif args.command == "history":
             result = _run_history(get_forge(), args)
+        elif args.command == "list":
+            result = _run_list(get_forge(), args)
         elif args.command == "retention":
             if args.family is None:
                 raise CliError(

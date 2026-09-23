@@ -754,3 +754,150 @@ def test_m76_registry_no_drift(env):
         cli_mod._HISTORY_DISPATCH)
     # best_checkpoint history routes to the M59 facade verbatim
     assert hasattr(ModelForge, "best_checkpoint_history")
+
+
+# =========================================================================== #
+# M77: read-only LISTING CLI
+# =========================================================================== #
+
+M77_GLOBAL = ("models", "datasets", "tokenizers", "recipes",
+              "policies", "suites")
+M77_SCOPED = ("checkpoints", "evaluations", "comparisons", "gates",
+              "workflows", "suite_runs", "samples", "sample_quality")
+
+
+def test_m77_help():
+    r = run_cli(["list", "--help"], "/nonexistent-root")
+    assert r.returncode == 0, r.stderr
+    assert "listing family" in r.stdout
+    for family in M77_GLOBAL + M77_SCOPED:
+        assert family in r.stdout
+
+
+def test_m77_list_every_family(env):
+    """The FULL 14-family matrix against DIRECT facade calls (the
+    independent oracle — the expected values never come from the
+    CLI's own dispatch table)."""
+    forge = env.forge
+    direct_global = {
+        "models": forge.list_models(),
+        "datasets": forge.list_datasets(),
+        "tokenizers": forge.list_tokenizers(),
+        "recipes": forge.list_workflow_recipes(),
+        "policies": forge.list_policies(),
+        "suites": forge.list_probe_suites(),
+    }
+    direct_scoped = {
+        "checkpoints": forge.list_checkpoints(env.model),
+        "evaluations": forge.list_evaluations(env.model),
+        "comparisons": forge.list_comparisons(env.model),
+        "gates": forge.list_gate_decisions(env.model),
+        "workflows": forge.list_workflows(env.model),
+        "suite_runs": forge.list_suite_runs(env.model),
+        "samples": forge.list_samples(env.model),
+        "sample_quality": forge.list_sample_evaluations(env.model),
+    }
+    def _dump(records):
+        # the facade contract is mixed: most listings return
+        # Pydantic records; list_datasets/list_tokenizers return
+        # PRE-serialized dicts (passed through verbatim)
+        return [r.model_dump(mode="json")
+                if hasattr(r, "model_dump") else r for r in records]
+
+    for family, records in direct_global.items():
+        expected = _dump(records)
+        rj = run_cli(["list", family, "--json"], env.root)
+        assert rj.returncode == 0, (family, rj.stderr)
+        assert json.loads(rj.stdout) == expected, family
+        rh = run_cli(["list", family], env.root)
+        assert rh.returncode == 0, family
+        assert f"count: {len(expected)}" in rh.stdout, family
+    for family, records in direct_scoped.items():
+        expected = _dump(records)
+        rj = run_cli(["list", family, "--model-id", env.model,
+                      "--json"], env.root)
+        assert rj.returncode == 0, (family, rj.stderr)
+        assert json.loads(rj.stdout) == expected, family
+        rh = run_cli(["list", family, "--model-id", env.model],
+                     env.root)
+        assert rh.returncode == 0, family
+        assert f"count: {len(expected)}" in rh.stdout, family
+    # an EMPTY listing is a valid success (model D has no samples)
+    r = run_cli(["list", "samples", "--model-id", env.model_d],
+                env.root)
+    assert r.returncode == 0 and "count: 0" in r.stdout
+    rj = run_cli(["list", "samples", "--model-id", env.model_d,
+                  "--json"], env.root)
+    assert rj.returncode == 0 and json.loads(rj.stdout) == []
+
+
+def test_m77_list_errors(env):
+    probes = [
+        (["list", "bogus"], 4),
+        (["list", "training_run"], 5),  # lifecycle-less family
+        (["list", "checkpoints"], 2),  # missing --model-id
+        (["list", "evaluations"], 2),
+        (["list", "models", "--model-id", env.model], 2),  # stray
+        (["list", "recipes", "--model-id", env.model], 2),
+        (["list", "checkpoints", "SOME_ID", "--model-id",
+          env.model], 2),  # misplaced positional
+        (["list", "checkpoints", "--model-id", "no-such"], 3),
+        (["list", "workflows", "--model-id", "no-such"], 3),
+        (["list"], 2),  # missing family
+    ]
+    for args, code in probes:
+        r = run_cli(args, env.root)
+        assert r.returncode == code, (args, r.returncode, r.stderr)
+        assert r.stdout == "", args  # no fabricated results
+
+
+def test_m77_determinism(env):
+    probes = [
+        ["list", "models"],
+        ["list", "models", "--json"],
+        ["list", "policies", "--json"],
+        ["list", "checkpoints", "--model-id", env.model],
+        ["list", "sample_quality", "--model-id", env.model, "--json"],
+        ["list", "samples", "--model-id", env.model_d],
+    ]
+    for args in probes:
+        one = run_cli(args, env.root)
+        two = run_cli(args, env.root)
+        assert one.returncode == two.returncode == 0, args
+        assert one.stdout == two.stdout, args
+        assert one.stderr == two.stderr, args
+
+
+def test_m77_registry_no_drift(env):
+    """The CLI listing table must equal the ENGINE's actual facade
+    listing surface BY SIGNATURE SHAPE: the routed global set IS the
+    set of zero-argument ModelForge.list_* methods, the routed
+    scoped set IS the set of (model_id)-shaped ones — no missing
+    surface, no extra, no renamed method, no wrong scope."""
+    import inspect
+    from app import cli as cli_mod
+    from app.engine import ModelForge
+    zero, one = set(), set()
+    for name in dir(ModelForge):
+        if not name.startswith("list_"):
+            continue
+        params = [p for p in
+                  inspect.signature(getattr(ModelForge, name))
+                  .parameters if p != "self"]
+        if len(params) == 0:
+            zero.add(name)
+        elif params == ["model_id"]:
+            one.add(name)
+    routed_global = {m for m, _s in
+                     cli_mod._LIST_DISPATCH.values() if not _s}
+    routed_scoped = {m for m, s in
+                     cli_mod._LIST_DISPATCH.values() if s}
+    assert routed_global == zero, (routed_global - zero,
+                                   zero - routed_global)
+    assert routed_scoped == one, (routed_scoped - one,
+                                  one - routed_scoped)
+    assert set(cli_mod.LIST_FAMILIES) == set(cli_mod._LIST_DISPATCH)
+    assert len(cli_mod._LIST_DISPATCH) == 14
+    # every routed method exists on the facade (no fictional names)
+    for method, _s in cli_mod._LIST_DISPATCH.values():
+        assert callable(getattr(ModelForge, method, None)), method

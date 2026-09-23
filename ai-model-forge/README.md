@@ -2246,6 +2246,39 @@ capability); the OpenAPI surface is untouched (still 119 paths /
   raising the canonical `checkpoint '…' not found for model '…'`
   for an unknown id)
 
+### Milestone 77 — READ-ONLY listing CLI commands
+
+The adapter layer completed over the existing LISTING surfaces —
+no second listing engine, registry or scanner: every command
+routes to ONE existing ModelForge facade listing method. Strictly
+read-only; OpenAPI untouched (still 119 paths / 14 DELETEs).
+
+- **commands**: `forge list <family> [--model-id M] [--json]` —
+  six GLOBAL families (`models`, `datasets`, `tokenizers`,
+  `recipes`, `policies`, `suites` -> `list_models`,
+  `list_datasets`, `list_tokenizers`, `list_workflow_recipes`,
+  `list_policies`, `list_probe_suites`) and eight MODEL-SCOPED
+  families (`checkpoints`, `evaluations`, `comparisons`, `gates`,
+  `workflows`, `suite_runs`, `samples`, `sample_quality` ->
+  the facade's per-model listings); `--model-id` exactly where
+  the facade requires it (missing for scoped families or stray
+  for global ones -> usage error 2; a misplaced positional is
+  rejected, never routed); unknown family -> 4;
+  `training_run` -> 5 (lifecycle-less); unknown model -> 3
+- **output**: `--json` is the facade result serialized verbatim —
+  an array of per-record `model_dump(mode="json")`; the two
+  facades that already return pre-serialized dicts
+  (`list_datasets` / `list_tokenizers`) pass through unchanged
+  (never a second serialization); human mode is the M76 list
+  renderer (`count: N` + indexed blocks); an EMPTY listing is a
+  valid success (exit 0)
+- **registry drift protection**: a test pins the CLI table to the
+  engine's actual facade surface BY SIGNATURE SHAPE — the routed
+  global set IS the set of zero-argument `ModelForge.list_*`
+  methods and the routed scoped set IS the set of
+  `(model_id)`-shaped ones (no missing surface, no extra, no
+  renamed method, no wrong scope)
+
 ### Milestone 76 — READ-ONLY dashboards & history CLI commands
 
 The M74/M75 adapter discipline over the remaining read-only
@@ -3121,7 +3154,7 @@ integrity) and the family's reclaimable files/bytes:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 695 tests
+pytest                       # 700 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 forge retention project                    # read-only CLI (M74)
 ```
@@ -3631,7 +3664,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 695 tests across 32 suites
+  tests/               # 700 tests across 32 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):
