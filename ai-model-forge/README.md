@@ -2246,6 +2246,37 @@ capability); the OpenAPI surface is untouched (still 119 paths /
   raising the canonical `checkpoint '…' not found for model '…'`
   for an unknown id)
 
+### Milestone 78 — READ-ONLY single-artifact SHOW CLI commands
+
+The adapter layer over the existing per-artifact GETTERS — no
+second record construction: every command routes to ONE existing
+ModelForge getter. Strictly read-only; OpenAPI untouched (still
+119 paths / 14 DELETEs).
+
+- **commands**: `forge show <family> <id> [--model-id M]
+  [--json]` — the SAME 14-family vocabulary as retention/list:
+  six GLOBAL families (`model`, `dataset`, `tokenizer`,
+  `workflow_recipe`, `gate_policy`, `probe_suite` ->
+  `get_model`, `get_dataset`, `get_tokenizer`,
+  `get_workflow_recipe`, `get_policy`, `get_probe_suite`) and
+  eight MODEL-SCOPED families (`checkpoint`, `workflow`,
+  `evaluation`, `comparison`, `gate`, `suite_run`, `sample`,
+  `sample_quality` -> the facade's two-parameter getters);
+  `--model-id` exactly where the getter requires it (missing for
+  scoped families or stray for global ones -> usage error 2);
+  unknown family -> 4; `training_run` -> 5 (lifecycle-less);
+  unknown or registry-invisible artifact or cross-model id -> 3
+- **output**: `--json` is the getter's result serialized verbatim
+  (the dataset getter returns a pre-serialized dict — passed
+  through, never a second serialization); human mode is the
+  standard renderer; a model id in the artifact position is an
+  unknown artifact, never routed to another family's view
+- **registry drift protection**: a test pins the CLI table to the
+  engine's actual getter surface BY SIGNATURE SHAPE — the routed
+  global set IS the single-parameter `get_*` methods (minus
+  `get_dashboard`, routed by `forge dashboard` since M76) and the
+  routed scoped set IS the two-parameter getters
+
 ### Milestone 77 — READ-ONLY listing CLI commands
 
 The adapter layer completed over the existing LISTING surfaces —
@@ -3154,7 +3185,7 @@ integrity) and the family's reclaimable files/bytes:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 700 tests
+pytest                       # 705 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 forge retention project                    # read-only CLI (M74)
 ```
@@ -3664,7 +3695,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 700 tests across 32 suites
+  tests/               # 705 tests across 32 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

@@ -901,3 +901,167 @@ def test_m77_registry_no_drift(env):
     # every routed method exists on the facade (no fictional names)
     for method, _s in cli_mod._LIST_DISPATCH.values():
         assert callable(getattr(ModelForge, method, None)), method
+
+
+# =========================================================================== #
+# M78: read-only single-artifact SHOW CLI
+# =========================================================================== #
+
+def test_m78_help():
+    r = run_cli(["show", "--help"], "/nonexistent-root")
+    assert r.returncode == 0, r.stderr
+    assert "artifact family" in r.stdout
+    for family in ("model", "dataset", "tokenizer", "workflow_recipe",
+                   "gate_policy", "probe_suite", "checkpoint",
+                   "workflow", "evaluation", "comparison", "gate",
+                   "suite_run", "sample", "sample_quality"):
+        assert family in r.stdout
+
+
+def test_m78_show_every_family(env, ids):
+    """The FULL 14-family matrix against DIRECT facade getters (the
+    independent oracle — expected values never come from the CLI's
+    own dispatch table; the dataset getter's pre-serialized dict
+    contract is handled explicitly)."""
+    forge = env.forge
+
+    def _dump(record):
+        return (record.model_dump(mode="json")
+                if hasattr(record, "model_dump") else record)
+
+    direct_global = {
+        "model": forge.get_model(ids["model"][0]),
+        "dataset": forge.get_dataset(ids["dataset"][0]),
+        "tokenizer": forge.get_tokenizer(ids["tokenizer"][0]),
+        "workflow_recipe": forge.get_workflow_recipe(
+            ids["workflow_recipe"][0]),
+        "gate_policy": forge.get_policy(ids["gate_policy"][0]),
+        "probe_suite": forge.get_probe_suite(ids["probe_suite"][0]),
+    }
+    direct_scoped = {
+        "checkpoint": forge.get_checkpoint(
+            ids["checkpoint"][1], ids["checkpoint"][0]),
+        "workflow": forge.get_workflow(
+            ids["workflow"][1], ids["workflow"][0]),
+        "evaluation": forge.get_evaluation(
+            ids["evaluation"][1], ids["evaluation"][0]),
+        "comparison": forge.get_comparison(
+            ids["comparison"][1], ids["comparison"][0]),
+        "gate": forge.get_gate_decision(ids["gate"][1], ids["gate"][0]),
+        "suite_run": forge.get_suite_run(
+            ids["suite_run"][1], ids["suite_run"][0]),
+        "sample": forge.get_sample(ids["sample"][1], ids["sample"][0]),
+        "sample_quality": forge.get_sample_evaluation(
+            ids["sample_quality"][1], ids["sample_quality"][0]),
+    }
+    for family, record in direct_global.items():
+        expected = _dump(record)
+        rj = run_cli(["show", family, ids[family][0], "--json"],
+                     env.root)
+        assert rj.returncode == 0, (family, rj.stderr)
+        assert json.loads(rj.stdout) == expected, family
+        rh = run_cli(["show", family, ids[family][0]], env.root)
+        assert rh.returncode == 0 and rh.stdout.strip(), family
+    for family, record in direct_scoped.items():
+        expected = _dump(record)
+        args = ["show", family, ids[family][0],
+                "--model-id", ids[family][1]]
+        rj = run_cli([*args, "--json"], env.root)
+        assert rj.returncode == 0, (family, rj.stderr)
+        assert json.loads(rj.stdout) == expected, family
+        rh = run_cli(args, env.root)
+        assert rh.returncode == 0 and rh.stdout.strip(), family
+    # the dataset getter's dict result renders (human) too
+    rh = run_cli(["show", "dataset", ids["dataset"][0]], env.root)
+    assert "dataset_id" in rh.stdout
+
+
+def test_m78_show_errors(env, ids):
+    probes = [
+        (["show", "bogus", "x"], 4),
+        (["show", "training_run", "x"], 5),  # lifecycle-less
+        (["show", "checkpoint", "x"], 2),  # missing --model-id
+        (["show", "evaluation", "x"], 2),
+        (["show", "model", "x", "--model-id", env.model], 2),  # stray
+        (["show", "dataset", "x", "--model-id", env.model], 2),
+        (["show", "model", "no-such"], 3),
+        (["show", "dataset", "no-such"], 3),
+        (["show", "tokenizer", "no-such"], 3),
+        (["show", "workflow_recipe", "no-such"], 3),
+        (["show", "gate_policy", "no-such"], 3),
+        (["show", "probe_suite", "no-such"], 3),
+        (["show", "checkpoint", "no-such", "--model-id", env.model], 3),
+        (["show", "workflow", "no-such", "--model-id", env.model], 3),
+        (["show", "suite_run", "no-such", "--model-id", env.model], 3),
+        (["show", "sample", "no-such", "--model-id", env.model], 3),
+        # the model-argument-position bug class: a MODEL id in the
+        # artifact position is an unknown artifact (never routed to
+        # another family's view)
+        (["show", "evaluation", ids["model"][0],
+          "--model-id", ids["model"][0]], 3),
+        # cross-model: model A's checkpoint under model D -> 3
+        (["show", "checkpoint", ids["checkpoint"][0],
+          "--model-id", ids["model_d"]], 3),
+        (["show"], 2),  # missing family
+        (["show", "model"], 2),  # missing id
+    ]
+    for args, code in probes:
+        r = run_cli(args, env.root)
+        assert r.returncode == code, (args, r.returncode, r.stderr)
+        assert r.stdout == "", args  # no fabricated results
+
+
+def test_m78_determinism(env, ids):
+    probes = [
+        ["show", "model", ids["model"][0]],
+        ["show", "model", ids["model"][0], "--json"],
+        ["show", "dataset", ids["dataset"][0], "--json"],
+        ["show", "checkpoint", ids["checkpoint"][0],
+         "--model-id", ids["checkpoint"][1]],
+        ["show", "gate", ids["gate"][0], "--model-id",
+         ids["gate"][1], "--json"],
+        ["show", "sample_quality", ids["sample_quality"][0],
+         "--model-id", ids["sample_quality"][1], "--json"],
+    ]
+    for args in probes:
+        one = run_cli(args, env.root)
+        two = run_cli(args, env.root)
+        assert one.returncode == two.returncode == 0, args
+        assert one.stdout == two.stdout, args
+        assert one.stderr == two.stderr, args
+
+
+def test_m78_registry_no_drift(env):
+    """The CLI show table must equal the ENGINE's actual getter
+    surface BY SIGNATURE SHAPE: the routed global set IS the set of
+    single-parameter ModelForge.get_* methods MINUS get_dashboard
+    (already routed by 'forge dashboard'); the routed scoped set IS
+    the set of (model_id, artifact)-shaped getters — no missing
+    surface, no extra, no renamed method, no wrong scope."""
+    import inspect
+    from app import cli as cli_mod
+    from app.engine import ModelForge
+    one_param, two_param = set(), set()
+    for name in dir(ModelForge):
+        if not name.startswith("get_"):
+            continue
+        params = [p for p in
+                  inspect.signature(getattr(ModelForge, name))
+                  .parameters if p != "self"]
+        if len(params) == 1:
+            one_param.add(name)
+        elif len(params) == 2:
+            two_param.add(name)
+    routed_global = {m for m, _s in
+                     cli_mod._SHOW_DISPATCH.values() if not _s}
+    routed_scoped = {m for m, s in
+                     cli_mod._SHOW_DISPATCH.values() if s}
+    assert routed_global == one_param - {"get_dashboard"}, (
+        routed_global - (one_param - {"get_dashboard"}),
+        (one_param - {"get_dashboard"}) - routed_global)
+    assert routed_scoped == two_param, (
+        routed_scoped - two_param, two_param - routed_scoped)
+    assert set(cli_mod.SHOW_FAMILIES) == set(cli_mod._SHOW_DISPATCH)
+    assert len(cli_mod._SHOW_DISPATCH) == 14
+    for method, _s in cli_mod._SHOW_DISPATCH.values():
+        assert callable(getattr(ModelForge, method, None)), method
