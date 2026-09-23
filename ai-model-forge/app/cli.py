@@ -36,7 +36,14 @@ API):
 ``forge usage definition <family> <id> [--json]``
     the M71 definition retention overview
     (``definition_retention_overview``) for the three definition
-    families (workflow_recipe / gate_policy / probe_suite).
+    families (workflow_recipe / gate_policy / probe_suite);
+``forge dashboard <model_id> [--json]``
+    the ONE dashboard surface (``get_dashboard``);
+``forge history <family> [<dimension> <value>] --model-id M
+[--json]``
+    the M19-M60 by-X history groupings plus the M59 best-checkpoint
+    history (family ``best_checkpoint`` — no dimension), ONE facade
+    method per (family, dimension) pair, always model-scoped.
 
 ``training_run`` remains lifecycle-less (M68/M70/M72/M73): both
 commands refuse it with the canonical lifecycle error and a non-zero
@@ -77,6 +84,82 @@ _RETENTION_DISPATCH = {
 RETENTION_FAMILIES = tuple(_RETENTION_DISPATCH)
 MODEL_SCOPED_FAMILIES = frozenset(
     f for f, (_m, scoped) in _RETENTION_DISPATCH.items() if scoped)
+
+# The M76 history dispatch table: family -> dimension -> (facade
+# method name, value marker). Derived ONE-to-ONE from the engine's
+# own by-X facade methods (the M19-M60 read-only groupings plus the
+# M59 best-checkpoint history); the keys mirror the API's by-<X>
+# segments and the retention family vocabulary. Value markers:
+# "str" (an artifact id), "int", "bool", "enum:<SchemaEnum>" — the
+# CLI only COERCES the argv string and routes; the engine does the
+# canonical validation (unknown ids -> FileNotFoundError -> exit 3).
+# A drift test asserts this table matches the engine facade exactly.
+_HISTORY_DISPATCH = {
+    "checkpoint": {
+        "run": ("list_checkpoints_for_run", "str"),
+    },
+    "evaluation": {
+        "checkpoint": ("list_evaluations_for_checkpoint", "str"),
+        "dataset": ("list_evaluations_for_dataset", "str"),
+        "tokenizer": ("list_evaluations_for_tokenizer", "str"),
+        "split": ("list_evaluations_for_split",
+                  "enum:EvaluationSplit"),
+        "state_kind": ("list_evaluations_for_state_kind",
+                       "enum:EvalStateKind"),
+        "truncated": ("list_evaluations_for_truncated", "bool"),
+        "seed": ("list_evaluations_for_seed", "int"),
+    },
+    "comparison": {
+        "checkpoint": ("list_comparisons_for_checkpoint", "str"),
+        "dataset": ("list_comparisons_for_dataset", "str"),
+        "tokenizer": ("list_comparisons_for_tokenizer", "str"),
+        "split": ("list_comparisons_for_split",
+                  "enum:EvaluationSplit"),
+        "verdict": ("list_comparisons_for_verdict",
+                    "enum:ComparisonVerdict"),
+        "state_kind": ("list_comparisons_for_state_kind",
+                       "enum:EvalStateKind"),
+        "seed": ("list_comparisons_for_seed", "int"),
+    },
+    "gate": {
+        "policy": ("list_gate_decisions_for_policy", "str"),
+        "comparison": ("list_gate_decisions_for_comparison", "str"),
+        "decision": ("list_gate_decisions_for_decision",
+                     "enum:GateDecisionResult"),
+        "verdict": ("list_gate_decisions_for_verdict",
+                    "enum:ComparisonVerdict"),
+        "baseline_type": ("list_gate_decisions_for_baseline_type",
+                          "enum:GateBaselineType"),
+    },
+    "workflow": {
+        "recipe": ("list_workflows_for_recipe", "str"),
+        "status": ("list_workflows_for_status",
+                   "enum:WorkflowStatus"),
+    },
+    "suite_run": {
+        "suite": ("list_suite_runs_for_suite", "str"),
+        "suite_summary": ("list_suite_run_summary_for_suite", "str"),
+        "checkpoint": ("list_suite_runs_for_checkpoint", "str"),
+        "reused_count": ("list_suite_runs_for_reused_count", "int"),
+    },
+    "sample": {
+        "checkpoint": ("list_samples_for_checkpoint", "str"),
+        "tokenizer": ("list_samples_for_tokenizer", "str"),
+        "strategy": ("list_samples_for_strategy",
+                     "enum:SampleStrategy"),
+    },
+    "sample_quality": {
+        "sample": ("list_sample_evaluations_for_sample", "str"),
+        "checkpoint": ("list_sample_evaluations_for_checkpoint",
+                       "str"),
+        "tokenizer": ("list_sample_evaluations_for_tokenizer",
+                      "str"),
+    },
+    # the M59 best-checkpoint selection history: NO dimension — the
+    # model id alone (still --model-id, like every history surface)
+    "best_checkpoint": {},
+}
+HISTORY_FAMILIES = tuple(_HISTORY_DISPATCH)
 
 EXIT_OK = 0
 EXIT_ENGINE_ERROR = 1
@@ -187,6 +270,33 @@ def build_parser() -> argparse.ArgumentParser:
              "probe_suite)")
     udef.add_argument(
         "definition_id", metavar="id", help="the definition's id")
+
+    dash = sub.add_parser(
+        "dashboard", parents=[common],
+        help="read-only model dashboard (the ONE dashboard surface)")
+    dash.add_argument(
+        "model_id", metavar="model_id", help="the model's id")
+
+    hist = sub.add_parser(
+        "history", parents=[common],
+        help="read-only history groupings (the M19-M60 by-X "
+             "surfaces + the M59 best-checkpoint history)")
+    hist.add_argument(
+        "family", metavar="family",
+        help="a history family (" + ", ".join(HISTORY_FAMILIES) + ")")
+    hist.add_argument(
+        "dimension", nargs="?", metavar="dimension",
+        help="the by-X grouping dimension (family-specific; "
+             "run 'forge history --help' per family via the error "
+             "messages)")
+    hist.add_argument(
+        "value", nargs="?", metavar="value",
+        help="the dimension's value (an artifact id, enum name, "
+             "integer or true/false)")
+    hist.add_argument(
+        "--model-id", metavar="M", dest="model_id", required=True,
+        help="the owning model's id (every history surface is "
+             "model-scoped)")
     return parser
 
 
@@ -297,6 +407,75 @@ def _run_usage(forge, args):
         args.family, args.definition_id)
 
 
+def _coerce_history_value(dimension: str, raw: str, marker: str):
+    """Coerce ONE argv string to the facade's exact parameter type
+    (id / int / bool / a schemas enum). Malformed values are USAGE
+    errors raised BEFORE the engine is called — the engine never
+    receives garbage; well-formed but unknown ids stay the engine's
+    own canonical errors (FileNotFoundError -> exit 3)."""
+    if marker == "str":
+        return raw
+    if marker == "int":
+        try:
+            return int(raw)
+        except ValueError:
+            raise CliError(
+                f"invalid integer '{raw}' for dimension "
+                f"'{dimension}'", EXIT_USAGE)
+    if marker == "bool":
+        if raw in ("true", "True"):
+            return True
+        if raw in ("false", "False"):
+            return False
+        raise CliError(
+            f"invalid boolean '{raw}' for dimension '{dimension}' "
+            f"(true/false)", EXIT_USAGE)
+    from app import schemas  # deferred: --help stays fast
+    enum_cls = getattr(schemas, marker.split(":", 1)[1])
+    try:
+        return enum_cls(raw)
+    except ValueError:
+        raise CliError(
+            f"invalid value '{raw}' for dimension '{dimension}' "
+            f"(valid: {', '.join(v.value for v in enum_cls)})",
+            EXIT_USAGE)
+
+
+def _run_dashboard(forge, args):
+    """Route ONE dashboard command to the ONE existing dashboard
+    facade (``get_dashboard``) and return its result unchanged."""
+    return forge.get_dashboard(args.model_id)
+
+
+def _run_history(forge, args):
+    """Route ONE history command to the EXISTING by-X facade method
+    and return its result unchanged. Routing + argv coercion only —
+    no second history engine, no second grouping, no aggregation."""
+    _validate_family(args.family, HISTORY_FAMILIES,
+                     forge.PROJECT_RETENTION_FAMILIES)
+    if args.family == "best_checkpoint":
+        if args.dimension is not None or args.value is not None:
+            raise CliError(
+                "history best_checkpoint takes no dimension or "
+                "value", EXIT_USAGE)
+        return forge.best_checkpoint_history(args.model_id)
+    if args.dimension is None or args.value is None:
+        raise CliError(
+            f"history {args.family} requires a dimension and a "
+            f"value (dimensions: "
+            f"{', '.join(_HISTORY_DISPATCH[args.family])})",
+            EXIT_USAGE)
+    dims = _HISTORY_DISPATCH[args.family]
+    if args.dimension not in dims:
+        raise CliError(
+            f"unsupported dimension '{args.dimension}' for family "
+            f"'{args.family}' (dimensions: {', '.join(dims)})",
+            EXIT_UNKNOWN_FAMILY)
+    method_name, marker = dims[args.dimension]
+    value = _coerce_history_value(args.dimension, args.value, marker)
+    return getattr(forge, method_name)(args.model_id, value)
+
+
 def _render(value, indent: int = 0) -> list[str]:
     """Deterministic human-readable lines for ONE ``model_dump``
     value: fields in the model's declaration order, nested dicts
@@ -337,10 +516,21 @@ def _scalar(value) -> str:
 
 
 def _emit(result, as_json: bool) -> None:
-    """Format ONE engine result to stdout: byte-identical on repeats
-    against the same state. JSON mode is exactly the engine model's
-    ``model_dump(mode='json')`` (sorted keys) — never a second
-    schema."""
+    """Format ONE engine result (a Pydantic model, or a LIST of
+    models — the M76 by-X surfaces) to stdout: byte-identical on
+    repeats against the same state. JSON mode is exactly the
+    ``model_dump(mode='json')`` of the result (an array for lists,
+    sorted keys) — never a second schema."""
+    if isinstance(result, list):
+        data = [r.model_dump(mode="json") for r in result]
+        if as_json:
+            print(json.dumps(data, indent=2, sort_keys=True))
+        else:
+            print(f"count: {len(data)}")
+            for i, item in enumerate(data):
+                print(f"- [{i}]")
+                print("\n".join(_render(item, 1)))
+        return
     data = result.model_dump(mode="json")
     if as_json:
         print(json.dumps(data, indent=2, sort_keys=True))
@@ -362,6 +552,10 @@ def main(argv: list[str] | None = None) -> int:
             result = _run_storage(get_forge(), args)
         elif args.command == "usage":
             result = _run_usage(get_forge(), args)
+        elif args.command == "dashboard":
+            result = _run_dashboard(get_forge(), args)
+        elif args.command == "history":
+            result = _run_history(get_forge(), args)
         elif args.command == "retention":
             if args.family is None:
                 raise CliError(

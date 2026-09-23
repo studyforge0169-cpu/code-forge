@@ -2246,6 +2246,48 @@ capability); the OpenAPI surface is untouched (still 119 paths /
   raising the canonical `checkpoint '…' not found for model '…'`
   for an unknown id)
 
+### Milestone 76 — READ-ONLY dashboards & history CLI commands
+
+The M74/M75 adapter discipline over the remaining read-only
+surfaces — no second dashboard engine, no second history engine,
+no second aggregation: every command routes to ONE existing
+facade method and formats its result. Strictly read-only; the
+OpenAPI surface is untouched (still 119 paths / 14 DELETEs).
+
+- **commands**: `forge dashboard <model_id> [--json]` — the ONE
+  dashboard surface (`get_dashboard`); `forge history <family>
+  [<dimension> <value>] --model-id M [--json]` — the M19–M60 by-X
+  history groupings plus the M59 best-checkpoint history (family
+  `best_checkpoint`, no dimension), always model-scoped. Families
+  and dimensions (33 facade methods, one per pair): checkpoint
+  (`run`), evaluation (`checkpoint`, `dataset`, `tokenizer`,
+  `split`, `state_kind`, `truncated`, `seed`), comparison
+  (`checkpoint`, `dataset`, `tokenizer`, `split`, `verdict`,
+  `state_kind`, `seed`), gate (`policy`, `comparison`, `decision`,
+  `verdict`, `baseline_type`), workflow (`recipe`, `status`),
+  suite_run (`suite`, `suite_summary`, `checkpoint`,
+  `reused_count`), sample (`checkpoint`, `tokenizer`,
+  `strategy`), sample_quality (`sample`, `checkpoint`,
+  `tokenizer`)
+- **values**: artifact ids as-is; enum dimensions take the
+  schema's own value names (`validation` / `checkpoint` /
+  `improved` / `passed` / ... — validated against the real enum;
+  invalid values are usage errors listing the valid set); `seed`
+  and `reused_count` take integers; `truncated` takes true/false
+- **`--json`** prints exactly `model_dump(mode="json")` — a JSON
+  array for the list surfaces, sorted keys, never a second schema;
+  human mode prints a deterministic `count:` header plus one
+  indexed block per record; `best_checkpoint` / `suite_summary` /
+  `dashboard` render like every other single-model result
+- **contract unchanged**: exit codes 0/2/3/4/5/1, canonical
+  engine errors on stderr, empty stdout on failure, `--model-id`
+  REQUIRED for history (every surface is model-scoped — never in
+  the value position); `training_run` has no history surface
+  (lifecycle-less, exit 5); unknown family or unsupported
+  dimension -> exit 4; a registry drift test pins the CLI table to
+  the engine's complete `list_*_for_*` facade set (32 methods)
+  with exact value types
+
 ### Milestone 75 — READ-ONLY usage & storage CLI commands
 
 The same thin-adapter discipline (M74) extended to the remaining
@@ -3079,7 +3121,7 @@ integrity) and the family's reclaimable files/bytes:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 688 tests
+pytest                       # 695 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 forge retention project                    # read-only CLI (M74)
 ```
@@ -3589,7 +3631,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 688 tests across 32 suites
+  tests/               # 695 tests across 32 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

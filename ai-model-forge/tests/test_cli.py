@@ -511,3 +511,246 @@ def test_m75_registry_no_drift(env):
     assert "training_run" in forge.PROJECT_RETENTION_FAMILIES
     assert "training_run" not in forge.DEFINITION_DELETABLE_FAMILIES
     assert "training_run" not in forge.IMPACT_FAMILIES
+
+
+# =========================================================================== #
+# M76: read-only DASHBOARDS & HISTORY CLI
+# =========================================================================== #
+
+HISTORY_DIMENSIONS = {
+    "checkpoint": {"run": "run_id"},
+    "evaluation": {
+        "checkpoint": "ck0", "dataset": "ds", "tokenizer": "tok",
+        "split": "validation", "state_kind": "checkpoint",
+        "truncated": "false", "seed": "2"},
+    "comparison": {
+        "checkpoint": "ck0", "dataset": "ds", "tokenizer": "tok",
+        "split": "validation", "verdict": "improved",
+        "state_kind": "checkpoint", "seed": "2"},
+    "gate": {
+        "policy": "policy_b", "comparison": "comp",
+        "decision": "passed", "verdict": "improved",
+        "baseline_type": "checkpoint"},
+    "workflow": {"recipe": "recipe", "status": "completed"},
+    "suite_run": {
+        "suite": "suite", "suite_summary": "suite",
+        "checkpoint": "ck0", "reused_count": "1"},
+    "sample": {
+        "checkpoint": "ck0", "tokenizer": "tok",
+        "strategy": "greedy"},
+    "sample_quality": {
+        "sample": "sample_id", "checkpoint": "ck0",
+        "tokenizer": "tok"},
+}
+
+
+def _m76_values(env):
+    """One real dimension VALUE per (family, dimension) — ids from
+    the fixture, enum names / ints / bools as strings."""
+    ck = sorted(c.checkpoint_id for c in
+                env.forge.list_checkpoints(env.model))
+    return {
+        "ck0": ck[0], "ds": env.ds, "tok": env.tok,
+        "policy_b": env.policy, "comp": env.cg, "recipe": "m73-recipe",
+        "suite": "m73-suite", "sample_id": env.sample.sample_id,
+        "run_id": env.forge.list_checkpoints(env.model)[0].run_id,
+    }
+
+
+def test_m76_help():
+    for args in (["dashboard", "--help"], ["history", "--help"]):
+        r = run_cli(args, "/nonexistent-root")  # no engine needed
+        assert r.returncode == 0, (args, r.stderr)
+        assert r.stdout.strip()
+
+
+def test_m76_dashboard(env):
+    forge = env.forge
+    expected = forge.get_dashboard(env.model).model_dump(mode="json")
+    rj = run_cli(["dashboard", env.model, "--json"], env.root)
+    assert rj.returncode == 0, rj.stderr
+    assert json.loads(rj.stdout) == expected  # the adapter oracle
+    rh = run_cli(["dashboard", env.model], env.root)
+    assert rh.returncode == 0, rh.stderr
+    assert f"model_id: {env.model}" in rh.stdout
+    # unknown model -> exit 3, canonical error, empty stdout
+    r = run_cli(["dashboard", "no-such-model"], env.root)
+    assert r.returncode == 3 and r.stdout == "" and r.stderr.strip()
+
+
+def test_m76_history_every_family_and_dimension(env):
+    """The FULL matrix: every routed (family, dimension) pair plus
+    best_checkpoint, each against the direct facade result."""
+    from app import cli as cli_mod
+    forge = env.forge
+    vals = _m76_values(env)
+    routed = 0
+    for family, dims in HISTORY_DIMENSIONS.items():
+        for dimension, vkey in dims.items():
+            method, marker = cli_mod._HISTORY_DISPATCH[family][dimension]
+            # the PYTHON value built independently of the CLI (the
+            # oracle must not reuse the CLI's coercion helper)
+            if marker == "str":
+                value = vals[vkey]
+            elif marker == "int":
+                value = int(vkey)
+            elif marker == "bool":
+                value = vkey == "true"
+            else:
+                from app import schemas as _schemas
+                value = getattr(_schemas,
+                                marker.split(":", 1)[1])(vkey)
+            direct = getattr(forge, method)(env.model, value)
+            expected = ([r.model_dump(mode="json") for r in direct]
+                        if isinstance(direct, list)
+                        else direct.model_dump(mode="json"))
+            args = ["history", family, dimension, str(vkey) if
+                    marker != "str" else vals[vkey],
+                    "--model-id", env.model]
+            rj = run_cli([*args, "--json"], env.root)
+            assert rj.returncode == 0, (family, dimension, rj.stderr)
+            assert json.loads(rj.stdout) == expected, (family,
+                                                       dimension)
+            rh = run_cli(args, env.root)
+            assert rh.returncode == 0 and rh.stdout.strip(), \
+                (family, dimension)
+            routed += 1
+    assert routed == 32  # every by-X surface is covered
+    # best_checkpoint (M59): no dimension
+    expected = forge.best_checkpoint_history(
+        env.model).model_dump(mode="json")
+    rj = run_cli(["history", "best_checkpoint", "--model-id",
+                  env.model, "--json"], env.root)
+    assert rj.returncode == 0, rj.stderr
+    assert json.loads(rj.stdout) == expected
+    # a list surface prints its deterministic count line
+    rh = run_cli(["history", "evaluation", "checkpoint", vals["ck0"],
+                  "--model-id", env.model], env.root)
+    assert rh.returncode == 0
+    assert rh.stdout.startswith("count: ")
+
+
+def test_m76_history_errors(env):
+    m = env.model
+    probes = [
+        (["history", "bogus", "x", "y", "--model-id", m], 4),
+        (["history", "training_run", "x", "--model-id", m], 5),
+        (["history", "evaluation", "bogus_dim", "y", "--model-id", m],
+         4),
+        (["history", "evaluation", "checkpoint", "--model-id", m], 2),
+        (["history", "evaluation", "--model-id", m], 2),
+        (["history", "evaluation", "split", "bogus", "--model-id", m],
+         2),
+        (["history", "evaluation", "seed", "abc", "--model-id", m], 2),
+        (["history", "evaluation", "truncated", "yes", "--model-id",
+          m], 2),
+        (["history", "gate", "decision", "bogus", "--model-id", m],
+         2),
+        (["history", "best_checkpoint", "x", "y", "--model-id", m],
+         2),
+        (["history", "evaluation", "split", "validation"], 2),
+        (["history", "evaluation", "checkpoint", "no-such",
+          "--model-id", m], 3),
+        (["history", "evaluation", "dataset", "no-such-ds",
+          "--model-id", m], 3),
+        (["history", "workflow", "recipe", "no-such-recipe",
+          "--model-id", m], 3),
+        (["history", "suite_run", "suite", "no-such-suite",
+          "--model-id", m], 3),
+        (["history", "sample_quality", "sample", "no-such-sample",
+          "--model-id", m], 3),
+        (["history", "checkpoint", "run", "no-such-run",
+          "--model-id", m], 3),
+    ]
+    for args, code in probes:
+        r = run_cli(args, env.root)
+        assert r.returncode == code, (args, r.returncode, r.stderr)
+        assert r.stdout == "", args  # no fabricated results
+
+
+def test_m76_history_id_positions(env, ids):
+    """The model-argument-position bug class: a MODEL id in the
+    value position must fail (or return nothing fabricated), and a
+    checkpoint of ANOTHER model must be rejected by the engine."""
+    # model A's id offered as a checkpoint id under model A -> 404
+    r = run_cli(["history", "evaluation", "checkpoint", ids["model"][0],
+                 "--model-id", ids["model"][0]], env.root)
+    assert r.returncode == 3, (r.returncode, r.stderr)
+    # model A's checkpoint asked under model D -> cross-model 404
+    r = run_cli(["history", "evaluation", "checkpoint",
+                 ids["checkpoint"][0], "--model-id", ids["model_d"]],
+                env.root)
+    assert r.returncode == 3
+    r = run_cli(["history", "sample", "checkpoint",
+                 ids["checkpoint"][0], "--model-id", ids["model_d"]],
+                env.root)
+    assert r.returncode == 3
+    # the CORRECT invocation succeeds (positions verified)
+    r = run_cli(["history", "evaluation", "checkpoint",
+                 ids["checkpoint"][0], "--model-id",
+                 ids["checkpoint"][1]], env.root)
+    assert r.returncode == 0, r.stderr
+
+
+def test_m76_determinism(env):
+    probes = [
+        ["dashboard", env.model],
+        ["dashboard", env.model, "--json"],
+        ["history", "best_checkpoint", "--model-id", env.model],
+        ["history", "evaluation", "checkpoint", env.ck[0],
+         "--model-id", env.model, "--json"],
+        ["history", "suite_run", "suite_summary", "m73-suite",
+         "--model-id", env.model],
+        ["history", "gate", "baseline_type", "checkpoint",
+         "--model-id", env.model, "--json"],
+    ]
+    for args in probes:
+        one = run_cli(args, env.root)
+        two = run_cli(args, env.root)
+        assert one.returncode == two.returncode == 0, args
+        assert one.stdout == two.stdout, args
+        assert one.stderr == two.stderr, args
+
+
+def test_m76_registry_no_drift(env):
+    """The CLI history table must match the ENGINE facade exactly:
+    every routed method exists, the value coercion matches the
+    facade's own parameter annotation, and the routed set IS the
+    complete set of by-X facade methods (no missing surface, no
+    extra)."""
+    import inspect
+    import typing
+    from app import cli as cli_mod
+    from app.engine import ModelForge
+    routed = set()
+    for family, dims in cli_mod._HISTORY_DISPATCH.items():
+        for dimension, (method, marker) in dims.items():
+            assert hasattr(ModelForge, method), (family, dimension)
+            func = getattr(ModelForge, method)
+            sig = inspect.signature(func)
+            params = list(sig.parameters.values())
+            assert len(params) == 3, method  # self, model_id, value
+            # engine.py uses deferred annotations -> resolve them
+            hints = typing.get_type_hints(func)
+            annotation = hints[params[2].name]
+            if marker == "str":
+                assert annotation is str, (method, annotation)
+            elif marker == "int":
+                assert annotation is int, (method, annotation)
+            elif marker == "bool":
+                assert annotation is bool, (method, annotation)
+            else:  # enum:<Name> — the schemas enum class itself
+                from app import schemas
+                assert annotation is getattr(
+                    schemas, marker.split(":", 1)[1]), \
+                    (method, annotation, marker)
+            routed.add(method)
+    facade_by_x = {name for name in dir(ModelForge)
+                   if name.startswith("list_") and "_for_" in name}
+    assert routed == facade_by_x, \
+        (routed - facade_by_x, facade_by_x - routed)
+    assert len(routed) == 32
+    assert set(cli_mod.HISTORY_FAMILIES) == set(
+        cli_mod._HISTORY_DISPATCH)
+    # best_checkpoint history routes to the M59 facade verbatim
+    assert hasattr(ModelForge, "best_checkpoint_history")
