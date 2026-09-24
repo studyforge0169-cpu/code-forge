@@ -1291,8 +1291,158 @@ def test_m79_registry_no_drift():
 
 
 def test_m79_no_mutation(env):
+    """Every CLI command in this module is strictly read-only through
+    M79. The module-end check is ``test_m80_no_mutation``."""
+    assert _inventory(env.root) == env.inventory_before
+    n, nbytes = _bytes_and_count(env.root)
+    assert n == len(env.inventory_before)
+    assert nbytes == sum(
+        (env.root / rel).stat().st_size for rel in env.inventory_before)
+    tmp = env.root / "tmp"
+    assert not (tmp.exists() and any(tmp.iterdir()))
+
+
+_M80_BANNED_HELP = ("storage_usage", "project_info", "hardware_info")
+
+
+def test_m80_help():
+    top = run_cli(["--help"], "/nonexistent-root")
+    assert top.returncode == 0, top.stderr
+    for name in ("project", "hardware", "disk"):
+        assert name in top.stdout
+    for banned in _M80_BANNED_HELP:
+        assert banned not in top.stdout
+    for cmd in ("project", "hardware", "disk"):
+        r = run_cli([cmd, "--help"], "/nonexistent-root")
+        assert r.returncode == 0, r.stderr
+        assert "--json" in r.stdout
+        for banned in _M80_BANNED_HELP:
+            assert banned not in r.stdout, (cmd, banned)
+        assert "--model-id" not in r.stdout
+
+
+def test_m80_project_matches_facade(env):
+    """Oracle is a direct facade call, never the CLI dispatch table."""
+    from app.engine import ModelForge
+
+    expected = ModelForge(env.root).project_info()
+    assert isinstance(expected, dict)
+    r = run_cli(["project", "--json"], env.root)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
+    assert json.loads(r.stdout) == expected
+    human = run_cli(["project"], env.root)
+    assert human.returncode == 0, human.stderr
+    assert f"model_count: {expected['model_count']}" in human.stdout
+    assert f"storage_root: {expected['storage_root']}" in human.stdout
+    again = run_cli(["project", "--json"], env.root)
+    assert again.returncode == 0
+    assert again.stdout == r.stdout
+    assert again.stderr == ""
+
+
+def test_m80_disk_matches_facade(env):
+    """Oracle is a direct facade call, never the CLI dispatch table.
+    ``forge disk`` is storage_usage, not the M63 storage overview."""
+    from app.engine import ModelForge
+
+    forge = ModelForge(env.root)
+    expected = forge.storage_usage()
+    assert isinstance(expected, dict)
+    r = run_cli(["disk", "--json"], env.root)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
+    got = json.loads(r.stdout)
+    assert got == expected
+    assert "categories" not in got
+    human = run_cli(["disk"], env.root)
+    assert human.returncode == 0, human.stderr
+    assert f"bytes: {expected['bytes']}" in human.stdout
+    assert f"models: {expected['models']}" in human.stdout
+    again = run_cli(["disk", "--json"], env.root)
+    assert again.stdout == r.stdout
+    assert again.stderr == ""
+
+
+def test_m80_hardware_oracle(env):
+    """Keys and every stable field match a direct facade call.
+
+    ``disk_free_bytes`` is live free space. ``ram_bytes`` is
+    ``ru_maxrss`` of the detecting process, so the CLI subprocess
+    cannot equal the test process. Exempting it is not a second
+    detector — the CLI still returns the facade dict unchanged.
+    """
+    from app.engine import ModelForge
+
+    expected = ModelForge(env.root).hardware()
+    r = run_cli(["hardware", "--json"], env.root)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
+    got = json.loads(r.stdout)
+    assert set(got) == set(expected)
+    volatile = {"disk_free_bytes", "ram_bytes"}
+    for key in volatile:
+        assert isinstance(got[key], int)
+        assert got[key] >= 0
+    for key, value in expected.items():
+        if key in volatile:
+            continue
+        assert got[key] == value, (key, got[key], value)
+    human = run_cli(["hardware"], env.root)
+    assert human.returncode == 0, human.stderr
+    assert f"device: {expected['device']}" in human.stdout
+    assert "disk_free_bytes:" in human.stdout
+
+
+def test_m80_errors():
+    root = "/nonexistent-root"
+    for cmd in ("project", "hardware", "disk"):
+        extra = run_cli([cmd, "EXTRA"], root)
+        assert extra.returncode == 2, (cmd, extra.returncode, extra.stderr)
+        assert extra.stdout == ""
+        stray = run_cli([cmd, "--model-id", "M"], root)
+        assert stray.returncode == 2, (cmd, stray.returncode, stray.stderr)
+        assert stray.stdout == ""
+
+
+def test_m80_registry_no_drift():
+    """The three commands are exactly the zero-argument ModelForge
+    methods that return a dict. Built from the class, not from a
+    copied table. Unrelated zero-argument surfaces stay unrouted."""
+    import inspect
+    import typing
+
+    from app import cli as cli_mod
+    from app.engine import ModelForge
+
+    zero_arg_dicts = set()
+    for name, func in inspect.getmembers(ModelForge, predicate=inspect.isfunction):
+        if name.startswith("_"):
+            continue
+        params = [p for p in inspect.signature(func).parameters.values()
+                  if p.name != "self"]
+        if params:
+            continue
+        ret = typing.get_type_hints(func).get("return")
+        if typing.get_origin(ret) is dict:
+            zero_arg_dicts.add(name)
+    assert zero_arg_dicts == {"project_info", "hardware", "storage_usage"}
+    assert set(cli_mod._INTROSPECTION_DISPATCH.values()) == zero_arg_dicts
+    assert set(cli_mod._INTROSPECTION_DISPATCH) == {
+        "project", "hardware", "disk"}
+    assert cli_mod._INTROSPECTION_DISPATCH["disk"] == "storage_usage"
+    assert "storage" not in cli_mod._INTROSPECTION_DISPATCH
+    for banned in ("project_storage_overview", "project_retention_overview",
+                   "select_best_checkpoint", "weights_archive_path"):
+        assert banned not in cli_mod._INTROSPECTION_DISPATCH.values()
+    storage_src = inspect.getsource(cli_mod._run_storage)
+    assert "project_storage_overview" in storage_src
+    assert "storage_usage" not in storage_src
+
+
+def test_m80_no_mutation(env):
     """Every CLI command in this module is strictly read-only. Defined
-    last so the module-scoped snapshot covers M74–M79."""
+    last so the module-scoped snapshot covers M74–M80."""
     assert _inventory(env.root) == env.inventory_before
     n, nbytes = _bytes_and_count(env.root)
     assert n == len(env.inventory_before)

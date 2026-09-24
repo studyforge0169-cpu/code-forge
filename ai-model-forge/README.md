@@ -2288,6 +2288,27 @@ OpenAPI surface is untouched (still 119 paths / 14 DELETEs).
   the engine's complete `list_*_for_*` facade set (32 methods)
   with exact value types
 
+### Milestone 80 — READ-ONLY project/system CLI
+
+Three thin adapters over the existing zero-argument dict facade
+methods. No second hardware detector, disk walker, or counter.
+Strictly read-only; OpenAPI untouched (still 119 paths / 14 DELETEs).
+``forge storage`` stays the M63 physical overview and is not aliased.
+
+- **commands**: `forge project [--json]` → `project_info`,
+  `forge hardware [--json]` → `hardware`,
+  `forge disk [--json]` → `storage_usage`. No artifact id, no
+  `--model-id`, no aliases. An extra positional or a stray
+  `--model-id` is argparse usage (exit 2, empty stdout). Each
+  method already returns a dict, passed through the existing
+  emitter (no second `model_dump`). `disk_free_bytes` (live free
+  space) and `ram_bytes` (process RSS) may differ between processes
+  and are not required to match.
+- **registry drift protection**: a test pins the three commands to
+  exactly the zero-argument `ModelForge` methods whose return type
+  is a dict, so a new snapshot cannot be dropped and an unrelated
+  method cannot be swept in by reflection.
+
 ### Milestone 79 — READ-ONLY integrity-verify CLI
 
 The adapter layer over the existing facade integrity checks — no
@@ -3216,7 +3237,7 @@ integrity) and the family's reclaimable files/bytes:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 713 tests
+pytest                       # 720 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 forge retention project                    # read-only CLI (M74)
 ```

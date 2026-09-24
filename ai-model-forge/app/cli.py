@@ -63,6 +63,12 @@ API):
     through verbatim). ``--model-id`` is not accepted. Tokenizer
     and checkpoint verification are not facade methods and are not
     exposed. ``training_run`` stays lifecycle-less (exit 5).
+``forge project [--json]`` / ``forge hardware [--json]`` /
+``forge disk [--json]``
+    the existing zero-argument project/system snapshots. Each
+    already returns a dict (passed through verbatim). No artifact
+    id and no ``--model-id``. ``forge disk`` is the byte/artifact
+    counters; it is NOT ``forge storage`` (the physical overview).
 
 ``training_run`` remains lifecycle-less (M68/M70/M72/M73): retention,
 impact, history, list, show and verify all refuse it with the
@@ -245,6 +251,16 @@ _VERIFY_DISPATCH = {
 }
 VERIFY_FAMILIES = tuple(_VERIFY_DISPATCH)
 
+# M80 project/system commands. An explicit table, not a reflection
+# router: command -> the existing zero-argument dict-returning facade
+# method. ``forge storage`` stays ``project_storage_overview`` and is
+# deliberately absent. No second detector, walker, or counter.
+_INTROSPECTION_DISPATCH = {
+    "project": "project_info",
+    "hardware": "hardware",
+    "disk": "storage_usage",
+}
+
 EXIT_OK = 0
 EXIT_ENGINE_ERROR = 1
 EXIT_USAGE = 2
@@ -421,6 +437,16 @@ def build_parser() -> argparse.ArgumentParser:
     ver.add_argument(
         "--model-id", metavar="M", dest="model_id",
         help="not accepted (neither verify method takes a model id)")
+    sub.add_parser(
+        "project", parents=[common],
+        help="read-only project summary (counts, versions, root)")
+    sub.add_parser(
+        "hardware", parents=[common],
+        help="read-only runtime snapshot (device, memory, cores)")
+    sub.add_parser(
+        "disk", parents=[common],
+        help="read-only byte and artifact counters (not the physical "
+             "storage overview)")
     return parser
 
 
@@ -666,6 +692,14 @@ def _run_verify(forge, args):
     return getattr(forge, _VERIFY_DISPATCH[args.family])(args.artifact_id)
 
 
+def _run_introspection(forge, args):
+    """Route ONE project/system command to the EXISTING facade method
+    and return its dict unchanged. No second detector, walker, or
+    counter. These commands take no id and no ``--model-id`` —
+    argparse rejects both before this runs."""
+    return getattr(forge, _INTROSPECTION_DISPATCH[args.command])()
+
+
 def _render(value, indent: int = 0) -> list[str]:
     """Deterministic human-readable lines for ONE ``model_dump``
     value: fields in the model's declaration order, nested dicts
@@ -761,6 +795,8 @@ def main(argv: list[str] | None = None) -> int:
             result = _run_show(get_forge(), args)
         elif args.command == "verify":
             result = _run_verify(get_forge(), args)
+        elif args.command in _INTROSPECTION_DISPATCH:
+            result = _run_introspection(get_forge(), args)
         elif args.command == "retention":
             if args.family is None:
                 raise CliError(
