@@ -2288,6 +2288,29 @@ OpenAPI surface is untouched (still 119 paths / 14 DELETEs).
   the engine's complete `list_*_for_*` facade set (32 methods)
   with exact value types
 
+### Milestone 79 — READ-ONLY integrity-verify CLI
+
+The adapter layer over the existing facade integrity checks — no
+second hash walk, registry or storage. Strictly read-only; OpenAPI
+untouched (still 119 paths / 14 DELETEs).
+
+- **commands**: `forge verify model <id> [--json]` and
+  `forge verify dataset <id> [--json]` — exactly
+  `ModelForge.verify_model` and `verify_dataset`. Both already
+  return a dict, passed through the existing emitter (no second
+  `model_dump`). `--model-id` is not accepted (usage error 2). An
+  extra positional is argparse usage (exit 2). Unknown id is the
+  facade's `FileNotFoundError` (exit 3) with the engine message
+  unchanged. Unknown verify family (including `tokenizer` and
+  `checkpoint`, which have no facade verify method) → exit 4.
+  `training_run` stays lifecycle-less (exit 5). No aliases. No
+  tokenizer or checkpoint verify command.
+- **registry drift protection**: a test pins the routed methods to
+  exactly the `ModelForge` methods whose names start with
+  `verify_` (signatures and return types), so a new facade verify
+  method cannot be silently dropped and a non-facade verify cannot
+  be routed.
+
 ### Milestone 78 — READ-ONLY single-artifact show CLI
 
 The adapter layer over the existing GETTERS — no second fetcher,
@@ -3193,7 +3216,7 @@ integrity) and the family's reclaimable files/bytes:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 707 tests
+pytest                       # 713 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 forge retention project                    # read-only CLI (M74)
 ```
@@ -3703,7 +3726,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 707 tests across 32 suites
+  tests/               # 713 tests across 32 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

@@ -1170,8 +1170,129 @@ def test_m78_registry_no_drift(env):
 
 
 def test_m78_no_mutation(env):
+    """Every CLI command in this module is strictly read-only through
+    M78. The module-end check is ``test_m79_no_mutation``."""
+    assert _inventory(env.root) == env.inventory_before
+    n, nbytes = _bytes_and_count(env.root)
+    assert n == len(env.inventory_before)
+    assert nbytes == sum(
+        (env.root / rel).stat().st_size for rel in env.inventory_before)
+    tmp = env.root / "tmp"
+    assert not (tmp.exists() and any(tmp.iterdir()))
+
+
+def test_m79_help():
+    r = run_cli(["verify", "--help"], "/nonexistent-root")
+    assert r.returncode == 0, r.stderr
+    assert "model, dataset" in r.stdout
+    for banned in ("tokenizer", "checkpoint", "training_run", "quality"):
+        assert banned not in r.stdout, banned
+    top = run_cli(["--help"], "/nonexistent-root")
+    assert top.returncode == 0
+    assert "verify" in top.stdout
+
+
+def test_m79_verify_matches_facade(env, ids):
+    """Engine-vs-CLI oracle: expected values come from the facade
+    methods directly, never from the CLI dispatch table."""
+    from app.engine import ModelForge
+
+    forge = ModelForge(env.root)
+    probes = (
+        ("model", "verify_model", "model"),
+        ("dataset", "verify_dataset", "dataset"),
+    )
+    for family, method, key in probes:
+        expected = getattr(forge, method)(ids[key][0])
+        assert isinstance(expected, dict)
+        for flag in ([], ["--json"]):
+            r = run_cli(["verify", family, ids[key][0], *flag], env.root)
+            assert r.returncode == 0, (family, r.stderr)
+            assert r.stderr == ""
+            if flag:
+                assert json.loads(r.stdout) == expected
+            elif family == "model":
+                assert f"id: {expected['id']}" in r.stdout
+                assert "integrity: ok" in r.stdout
+            else:
+                assert f"dataset_id: {expected['dataset_id']}" in r.stdout
+                assert f"status: {expected['status']}" in r.stdout
+
+
+def test_m79_errors(env, ids):
+    mid = ids["model"][0]
+    cases = [
+        (["verify", "tokenizer", "x"], 4, "unknown family 'tokenizer'"),
+        (["verify", "checkpoint", "x"], 4, "unknown family 'checkpoint'"),
+        (["verify", "training_run", "x"], 5, "has no deletion lifecycle"),
+        (["verify", "dataset", "no-such-dataset"], 3,
+         "dataset 'no-such-dataset' not found"),
+        (["verify", "model", mid, "--model-id", mid], 2,
+         "verify does not accept --model-id"),
+        (["verify", "model", mid, "extra"], 2, ""),
+        (["verify"], 2, ""),
+        (["verify", "model"], 2, ""),
+    ]
+    for argv, code, needle in cases:
+        r = run_cli(argv, env.root)
+        assert r.returncode == code, (argv, r.returncode, r.stderr)
+        assert r.stdout == "", argv
+        if needle:
+            assert needle in r.stderr, (argv, r.stderr)
+    missing = run_cli(["verify", "model", "no-such-model"], env.root)
+    assert missing.returncode == 3, missing.stderr
+    assert missing.stdout == ""
+    assert missing.stderr.strip() != ""
+
+
+def test_m79_determinism(env, ids):
+    probes = [
+        ["verify", "model", ids["model"][0]],
+        ["verify", "model", ids["model"][0], "--json"],
+        ["verify", "dataset", ids["dataset"][0]],
+        ["verify", "dataset", ids["dataset"][0], "--json"],
+    ]
+    for argv in probes:
+        a = run_cli(argv, env.root)
+        b = run_cli(argv, env.root)
+        assert a.returncode == b.returncode == 0, (argv, a.stderr)
+        assert a.stdout == b.stdout
+        assert a.stderr == b.stderr == ""
+
+
+def test_m79_registry_no_drift():
+    """Routed verify methods == ModelForge methods starting with
+    verify_. Built from the class, not from the CLI table."""
+    import inspect
+    import typing
+
+    from app import cli as cli_mod
+    from app.engine import ModelForge
+
+    verify_methods = set()
+    for name in dir(ModelForge):
+        if not name.startswith("verify_"):
+            continue
+        func = getattr(ModelForge, name)
+        if not callable(func):
+            continue
+        params = [p for p in inspect.signature(func).parameters.values()
+                  if p.name != "self"]
+        hints = typing.get_type_hints(func)
+        assert len(params) == 1, name
+        assert hints[params[0].name] is str, (name, hints)
+        assert typing.get_origin(hints.get("return")) is dict, name
+        verify_methods.add(name)
+    assert verify_methods == {"verify_model", "verify_dataset"}
+    assert set(cli_mod._VERIFY_DISPATCH.values()) == verify_methods
+    assert set(cli_mod.VERIFY_FAMILIES) == {"model", "dataset"}
+    assert "verify_tokenizer" not in dir(ModelForge)
+    assert "verify_checkpoint" not in dir(ModelForge)
+
+
+def test_m79_no_mutation(env):
     """Every CLI command in this module is strictly read-only. Defined
-    last so the module-scoped ``_before`` snapshot covers M74–M78."""
+    last so the module-scoped snapshot covers M74–M79."""
     assert _inventory(env.root) == env.inventory_before
     n, nbytes = _bytes_and_count(env.root)
     assert n == len(env.inventory_before)

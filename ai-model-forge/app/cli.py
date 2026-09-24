@@ -57,10 +57,17 @@ API):
     unknown or registry-invisible artifact -> exit 3; the dataset
     getter returns a pre-serialized dict (passed through verbatim).
     ``get_dashboard`` is NOT re-exposed here (``forge dashboard``).
+``forge verify <family> <id> [--json]``
+    the existing integrity checks — ``verify_model`` and
+    ``verify_dataset`` only. Both already return a dict (passed
+    through verbatim). ``--model-id`` is not accepted. Tokenizer
+    and checkpoint verification are not facade methods and are not
+    exposed. ``training_run`` stays lifecycle-less (exit 5).
 
 ``training_run`` remains lifecycle-less (M68/M70/M72/M73): retention,
-impact, history, list and show all refuse it with the canonical
-lifecycle error and a non-zero exit — no fabricated result. Exit codes:
+impact, history, list, show and verify all refuse it with the
+canonical lifecycle error and a non-zero exit — no fabricated
+result. Exit codes:
 0 success; 2 usage; 3 unknown/registry-invisible artifact; 4
 unknown family; 5 lifecycle-less family; 1 any other engine error.
 A blocked or integrity-failed artifact is NOT a command failure —
@@ -227,6 +234,17 @@ _SHOW_DISPATCH = {
 }
 SHOW_FAMILIES = tuple(_SHOW_DISPATCH)
 
+# The M79 verify dispatch table: family -> facade method. Exactly the
+# ModelForge methods whose names start with ``verify_`` (a drift test
+# pins that). TokenizerEngine.verify and training.verify_checkpoint
+# are NOT facade methods and are not routed. The CLI never recomputes
+# a hash itself.
+_VERIFY_DISPATCH = {
+    "model": "verify_model",
+    "dataset": "verify_dataset",
+}
+VERIFY_FAMILIES = tuple(_VERIFY_DISPATCH)
+
 EXIT_OK = 0
 EXIT_ENGINE_ERROR = 1
 EXIT_USAGE = 2
@@ -391,6 +409,18 @@ def build_parser() -> argparse.ArgumentParser:
              "families: checkpoint, workflow, evaluation, "
              "comparison, gate, suite_run, sample, sample_quality; "
              "rejected for the global families)")
+    ver = sub.add_parser(
+        "verify", parents=[common],
+        help="read-only integrity checks (the existing facade "
+             "verify methods)")
+    ver.add_argument(
+        "family", metavar="family",
+        help="a verify family (" + ", ".join(VERIFY_FAMILIES) + ")")
+    ver.add_argument(
+        "artifact_id", metavar="id", help="the artifact's id")
+    ver.add_argument(
+        "--model-id", metavar="M", dest="model_id",
+        help="not accepted (neither verify method takes a model id)")
     return parser
 
 
@@ -621,6 +651,21 @@ def _run_show(forge, args):
     return method(args.artifact_id)
 
 
+def _run_verify(forge, args):
+    """Route ONE verify command to the EXISTING facade method and
+    return its dict unchanged. Routing only — never a second
+    integrity walk. ``--model-id`` is rejected (neither method takes
+    one). ``training_run`` is the lifecycle-less family (exit 5 via
+    the existing validator). Every other non-verify name, including
+    ``tokenizer``, is an unknown verify family (exit 4) — no
+    tokenizer or checkpoint verify facade is added."""
+    if args.model_id:
+        raise CliError(
+            "verify does not accept --model-id", EXIT_USAGE)
+    _validate_family(args.family, VERIFY_FAMILIES, ("training_run",))
+    return getattr(forge, _VERIFY_DISPATCH[args.family])(args.artifact_id)
+
+
 def _render(value, indent: int = 0) -> list[str]:
     """Deterministic human-readable lines for ONE ``model_dump``
     value: fields in the model's declaration order, nested dicts
@@ -714,6 +759,8 @@ def main(argv: list[str] | None = None) -> int:
             result = _run_list(get_forge(), args)
         elif args.command == "show":
             result = _run_show(get_forge(), args)
+        elif args.command == "verify":
+            result = _run_verify(get_forge(), args)
         elif args.command == "retention":
             if args.family is None:
                 raise CliError(
