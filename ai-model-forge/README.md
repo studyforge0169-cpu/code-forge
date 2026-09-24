@@ -3193,7 +3193,7 @@ integrity) and the family's reclaimable files/bytes:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 701 tests
+pytest                       # 707 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 forge retention project                    # read-only CLI (M74)
 ```
