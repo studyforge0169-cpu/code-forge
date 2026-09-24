@@ -2288,6 +2288,41 @@ OpenAPI surface is untouched (still 119 paths / 14 DELETEs).
   the engine's complete `list_*_for_*` facade set (32 methods)
   with exact value types
 
+### Milestone 78 — READ-ONLY single-artifact show CLI
+
+The adapter layer over the existing GETTERS — no second fetcher,
+registry or record construction: every command routes to ONE
+existing ModelForge getter and formats its result. Strictly
+read-only; OpenAPI untouched (still 119 paths / 14 DELETEs).
+``get_dashboard`` stays on ``forge dashboard`` and is not repeated.
+
+- **commands**: `forge show <family> <id> [--model-id M] [--json]` —
+  the SAME 14 singular families as retention/impact. Six GLOBAL
+  (`model`, `dataset`, `tokenizer`, `workflow_recipe`,
+  `gate_policy`, `probe_suite` -> `get_model`, `get_dataset`,
+  `get_tokenizer`, `get_workflow_recipe`, `get_policy`,
+  `get_probe_suite`) and eight MODEL-SCOPED (`checkpoint`,
+  `workflow`, `evaluation`, `comparison`, `gate`, `suite_run`,
+  `sample`, `sample_quality` -> `get_checkpoint`, `get_workflow`,
+  `get_evaluation`, `get_comparison`, `get_gate_decision`,
+  `get_suite_run`, `get_sample`, `get_sample_evaluation`).
+  `--model-id` exactly where the getter requires it (missing or
+  stray -> usage error 2; a misplaced positional is rejected, never
+  routed). Unknown family -> 4; `training_run` -> 5; unknown,
+  registry-invisible or cross-model artifact -> 3. A model id in
+  the artifact position is an unknown artifact, never rerouted.
+  Aliases (`quality`, `suite-runs`, `models`, `dashboard`) are not
+  exposed
+- **output**: `--json` is the getter result serialized verbatim —
+  `model_dump(mode="json")` for Pydantic records; `get_dataset`'s
+  pre-serialized dict passes through unchanged. Human mode reuses
+  the M74 single-record renderer
+- **registry drift protection**: a test pins the CLI table to the
+  engine's `get_*` facade BY SIGNATURE SHAPE (`get_type_hints`) —
+  routed global getters are the single-argument getters minus
+  `get_dashboard`; routed scoped getters are the two-argument
+  getters
+
 ### Milestone 77 — READ-ONLY listing CLI commands
 
 The adapter layer completed over the existing LISTING surfaces —
@@ -3668,7 +3703,7 @@ ai-model-forge/
                        # + read-only by-sample/by-checkpoint/by-tokenizer grouping (M19/M20/M33)
     engine.py          # facade composing all engines
     api.py             # FastAPI routes (thin)
-  tests/               # 695 tests across 32 suites
+  tests/               # 707 tests across 32 suites
 ```
 
 Forge data lives outside the source tree at `~/ai-model-forge-data` (override `FORGE_ROOT`):

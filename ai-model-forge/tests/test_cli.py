@@ -951,10 +951,227 @@ def test_m77_registry_no_drift(env):
 
 
 def test_m77_no_mutation(env):
-    """Every CLI command in this module — including the M77 listings —
-    is strictly read-only. The module-scoped ``_before`` snapshot was
-    taken before the first test; this test is defined last so it
-    observes the whole module."""
+    """Listings up to this point are read-only. The module-end check
+    is ``test_m78_no_mutation`` (defined last, so it observes every
+    later command too)."""
+    assert _inventory(env.root) == env.inventory_before
+
+
+# =========================================================================== #
+# M78: read-only single-artifact SHOW CLI
+# =========================================================================== #
+
+M78_GLOBAL = ("model", "dataset", "tokenizer", "workflow_recipe",
+              "gate_policy", "probe_suite")
+M78_SCOPED = ("checkpoint", "workflow", "evaluation", "comparison",
+              "gate", "suite_run", "sample", "sample_quality")
+
+
+def _dump_show(record):
+    """Serialize ONE direct getter result the way the CLI must.
+    Pydantic records via model_dump(mode='json'); a pre-serialized
+    dict (get_dataset) passes through. Never the CLI dispatch table."""
+    if hasattr(record, "model_dump"):
+        return record.model_dump(mode="json")
+    return record
+
+
+def test_m78_help():
+    r = run_cli(["show", "--help"], "/nonexistent-root")
+    assert r.returncode == 0, r.stderr
+    assert "artifact family" in r.stdout
+    for family in M78_GLOBAL + M78_SCOPED:
+        assert family in r.stdout
+    for alias in ("suite-runs", "quality", "models", "dashboard"):
+        assert alias not in r.stdout.split()
+
+
+def test_m78_show_every_family(env, ids):
+    """The FULL 14-family matrix against DIRECT getter calls."""
+    forge = env.forge
+    direct = {
+        "model": forge.get_model(ids["model"][0]),
+        "dataset": forge.get_dataset(ids["dataset"][0]),
+        "tokenizer": forge.get_tokenizer(ids["tokenizer"][0]),
+        "workflow_recipe": forge.get_workflow_recipe(
+            ids["workflow_recipe"][0]),
+        "gate_policy": forge.get_policy(ids["gate_policy"][0]),
+        "probe_suite": forge.get_probe_suite(ids["probe_suite"][0]),
+        "checkpoint": forge.get_checkpoint(
+            ids["checkpoint"][1], ids["checkpoint"][0]),
+        "workflow": forge.get_workflow(
+            ids["workflow"][1], ids["workflow"][0]),
+        "evaluation": forge.get_evaluation(
+            ids["evaluation"][1], ids["evaluation"][0]),
+        "comparison": forge.get_comparison(
+            ids["comparison"][1], ids["comparison"][0]),
+        "gate": forge.get_gate_decision(
+            ids["gate"][1], ids["gate"][0]),
+        "suite_run": forge.get_suite_run(
+            ids["suite_run"][1], ids["suite_run"][0]),
+        "sample": forge.get_sample(
+            ids["sample"][1], ids["sample"][0]),
+        "sample_quality": forge.get_sample_evaluation(
+            ids["sample_quality"][1], ids["sample_quality"][0]),
+    }
+    before = _inventory(env.root)
+    n_before, b_before = _bytes_and_count(env.root)
+    for family, record in direct.items():
+        expected = _dump_show(record)
+        artifact_id, model_id = ids[family]
+        args = ["show", family, artifact_id]
+        if model_id is not None:
+            args += ["--model-id", model_id]
+        rj = run_cli([*args, "--json"], env.root)
+        assert rj.returncode == 0, (family, rj.stderr)
+        assert rj.stderr == ""
+        assert json.loads(rj.stdout) == expected, family
+        rh = run_cli(args, env.root)
+        assert rh.returncode == 0, (family, rh.stderr)
+        assert artifact_id in rh.stdout, family
+    assert _inventory(env.root) == before
+    assert _bytes_and_count(env.root) == (n_before, b_before)
+
+
+def test_m78_show_errors(env, ids):
+    m = ids["model"][0]
+    probes = [
+        (["show", "bogus", "x"], 4),
+        (["show", "quality", "x", "--model-id", m], 4),
+        (["show", "suite-runs", "x", "--model-id", m], 4),
+        (["show", "models", "x"], 4),
+        (["show", "dashboard", m], 4),
+        (["show", "training_run", "whatever"], 5),
+        (["show", "checkpoint", ids["checkpoint"][0]], 2),
+        (["show", "evaluation", ids["evaluation"][0]], 2),
+        (["show", "sample_quality", ids["sample_quality"][0]], 2),
+        (["show", "model", m, "--model-id", m], 2),
+        (["show", "dataset", ids["dataset"][0], "--model-id", m], 2),
+        (["show", "workflow_recipe", ids["workflow_recipe"][0],
+          "--model-id", m], 2),
+        (["show", "checkpoint", "SOME_ID", "EXTRA",
+          "--model-id", m], 2),
+        (["show", "model", "no-such-model"], 3),
+        (["show", "dataset", "no-such-ds"], 3),
+        (["show", "tokenizer", "no-such-tok"], 3),
+        (["show", "workflow_recipe", "no-such-recipe"], 3),
+        (["show", "gate_policy", "no-such-pol"], 3),
+        (["show", "probe_suite", "no-such-suite"], 3),
+        (["show", "checkpoint", "no-such", "--model-id", m], 3),
+        (["show", "workflow", "no-such", "--model-id", m], 3),
+        (["show", "evaluation", "no-such", "--model-id", m], 3),
+        (["show", "gate", "no-such", "--model-id", m], 3),
+        (["show", "suite_run", "no-such", "--model-id", m], 3),
+        (["show", "sample", "no-such", "--model-id", m], 3),
+        (["show", "sample_quality", "no-such", "--model-id", m], 3),
+        # a MODEL id in the artifact position is an unknown artifact,
+        # never rerouted to the model view
+        (["show", "evaluation", m, "--model-id", m], 3),
+        (["show", "checkpoint", m, "--model-id", m], 3),
+        # cross-model: model A's checkpoint under model D
+        (["show", "checkpoint", ids["checkpoint"][0],
+          "--model-id", ids["model_d"]], 3),
+        (["show", "evaluation", ids["evaluation"][0],
+          "--model-id", ids["model_d"]], 3),
+        (["show", "sample", ids["sample"][0],
+          "--model-id", ids["model_d"]], 3),
+        (["show"], 2),
+    ]
+    for args, code in probes:
+        r = run_cli(args, env.root)
+        assert r.returncode == code, (args, r.returncode, r.stderr)
+        assert r.stdout == "", args
+        assert r.stderr.strip(), args
+    # the CORRECT invocation still succeeds (positions verified)
+    r = run_cli(["show", "checkpoint", ids["checkpoint"][0],
+                 "--model-id", ids["checkpoint"][1]], env.root)
+    assert r.returncode == 0, r.stderr
+
+
+def test_m78_determinism(env, ids):
+    probes = [
+        ["show", "model", ids["model"][0]],
+        ["show", "model", ids["model"][0], "--json"],
+        ["show", "dataset", ids["dataset"][0], "--json"],
+        ["show", "tokenizer", ids["tokenizer"][0]],
+        ["show", "workflow_recipe", ids["workflow_recipe"][0], "--json"],
+        ["show", "gate_policy", ids["gate_policy"][0]],
+        ["show", "probe_suite", ids["probe_suite"][0], "--json"],
+        ["show", "checkpoint", ids["checkpoint"][0],
+         "--model-id", ids["checkpoint"][1]],
+        ["show", "evaluation", ids["evaluation"][0],
+         "--model-id", ids["evaluation"][1], "--json"],
+        ["show", "comparison", ids["comparison"][0],
+         "--model-id", ids["comparison"][1]],
+        ["show", "gate", ids["gate"][0],
+         "--model-id", ids["gate"][1], "--json"],
+        ["show", "workflow", ids["workflow"][0],
+         "--model-id", ids["workflow"][1]],
+        ["show", "suite_run", ids["suite_run"][0],
+         "--model-id", ids["suite_run"][1], "--json"],
+        ["show", "sample", ids["sample"][0],
+         "--model-id", ids["sample"][1]],
+        ["show", "sample_quality", ids["sample_quality"][0],
+         "--model-id", ids["sample_quality"][1], "--json"],
+    ]
+    for args in probes:
+        one = run_cli(args, env.root)
+        two = run_cli(args, env.root)
+        assert one.returncode == two.returncode == 0, (args, one.stderr)
+        assert one.stdout == two.stdout, args
+        assert one.stderr == two.stderr, args
+
+
+def test_m78_registry_no_drift(env):
+    """Routed global getters == single-argument ModelForge.get_* minus
+    get_dashboard; routed scoped getters == two-argument get_*.
+    Deferred annotations resolved with get_type_hints."""
+    import inspect
+    import typing
+    from app import cli as cli_mod
+    from app.engine import ModelForge
+    one_arg, two_arg = set(), set()
+    for name in dir(ModelForge):
+        if not name.startswith("get_"):
+            continue
+        func = getattr(ModelForge, name)
+        if not callable(func):
+            continue
+        params = [p for p in inspect.signature(func).parameters.values()
+                  if p.name != "self"]
+        hints = typing.get_type_hints(func)
+        if len(params) == 1:
+            assert hints[params[0].name] is str, (name, hints)
+            one_arg.add(name)
+        elif len(params) == 2:
+            assert all(hints[p.name] is str for p in params), (name, hints)
+            two_arg.add(name)
+    routed_global = {m for m, scoped in cli_mod._SHOW_DISPATCH.values()
+                     if not scoped}
+    routed_scoped = {m for m, scoped in cli_mod._SHOW_DISPATCH.values()
+                     if scoped}
+    assert routed_global == one_arg - {"get_dashboard"}, (
+        routed_global - (one_arg - {"get_dashboard"}),
+        (one_arg - {"get_dashboard"}) - routed_global)
+    assert routed_scoped == two_arg, (routed_scoped - two_arg,
+                                      two_arg - routed_scoped)
+    assert "get_dashboard" not in routed_global
+    assert "get_dashboard" not in routed_scoped
+    assert set(cli_mod.SHOW_FAMILIES) == set(cli_mod._SHOW_DISPATCH)
+    assert set(cli_mod.SHOW_FAMILIES) == set(M78_GLOBAL + M78_SCOPED)
+    assert len(cli_mod._SHOW_DISPATCH) == 14
+    for family, (method, scoped) in cli_mod._SHOW_DISPATCH.items():
+        assert callable(getattr(ModelForge, method, None)), method
+        assert scoped is (method in two_arg), (family, method)
+        assert (not scoped) is (method in one_arg), (family, method)
+    for alias in ("quality", "suite-runs", "models", "dashboard",
+                  "suite_runs", "checkpoints", "recipes", "policies"):
+        assert alias not in cli_mod._SHOW_DISPATCH
+
+
+def test_m78_no_mutation(env):
+    """Every CLI command in this module is strictly read-only. Defined
+    last so the module-scoped ``_before`` snapshot covers M74–M78."""
     assert _inventory(env.root) == env.inventory_before
     n, nbytes = _bytes_and_count(env.root)
     assert n == len(env.inventory_before)

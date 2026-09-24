@@ -51,10 +51,16 @@ API):
     gates, workflows, suite_runs, samples, sample_quality);
     ``--model-id`` exactly where the facade requires it, empty
     listings are valid successes.
+``forge show <family> <id> [--model-id M] [--json]``
+    the existing facade GETTERS — one single-artifact view per
+    family (the SAME 14 singular families as retention/impact);
+    unknown or registry-invisible artifact -> exit 3; the dataset
+    getter returns a pre-serialized dict (passed through verbatim).
+    ``get_dashboard`` is NOT re-exposed here (``forge dashboard``).
 
 ``training_run`` remains lifecycle-less (M68/M70/M72/M73): retention,
-impact, history and list all refuse it with the canonical lifecycle
-error and a non-zero exit — no fabricated result. Exit codes:
+impact, history, list and show all refuse it with the canonical
+lifecycle error and a non-zero exit — no fabricated result. Exit codes:
 0 success; 2 usage; 3 unknown/registry-invisible artifact; 4
 unknown family; 5 lifecycle-less family; 1 any other engine error.
 A blocked or integrity-failed artifact is NOT a command failure —
@@ -194,6 +200,32 @@ _LIST_DISPATCH = {
     "sample_quality": ("list_sample_evaluations", True),
 }
 LIST_FAMILIES = tuple(_LIST_DISPATCH)
+
+# The M78 single-artifact dispatch table: family -> (facade getter
+# name, model-scoped). The keys are the repository's retention
+# family vocabulary (the SAME 14 singular families as retention and
+# impact — not the plural listing names). Every entry is ONE existing
+# ModelForge getter. ``get_dashboard`` is deliberately absent: it is
+# already routed by ``forge dashboard``. A drift test pins this table
+# to the engine's actual get_* facade set by signature shape. The CLI
+# never constructs a record itself.
+_SHOW_DISPATCH = {
+    "model": ("get_model", False),
+    "dataset": ("get_dataset", False),
+    "tokenizer": ("get_tokenizer", False),
+    "workflow_recipe": ("get_workflow_recipe", False),
+    "gate_policy": ("get_policy", False),
+    "probe_suite": ("get_probe_suite", False),
+    "checkpoint": ("get_checkpoint", True),
+    "workflow": ("get_workflow", True),
+    "evaluation": ("get_evaluation", True),
+    "comparison": ("get_comparison", True),
+    "gate": ("get_gate_decision", True),
+    "suite_run": ("get_suite_run", True),
+    "sample": ("get_sample", True),
+    "sample_quality": ("get_sample_evaluation", True),
+}
+SHOW_FAMILIES = tuple(_SHOW_DISPATCH)
 
 EXIT_OK = 0
 EXIT_ENGINE_ERROR = 1
@@ -344,6 +376,21 @@ def build_parser() -> argparse.ArgumentParser:
              "families: checkpoints, evaluations, comparisons, "
              "gates, workflows, suite_runs, samples, "
              "sample_quality; rejected for the global families)")
+    sho = sub.add_parser(
+        "show", parents=[common],
+        help="read-only single-artifact views (the existing facade "
+             "getters)")
+    sho.add_argument(
+        "family", metavar="family",
+        help="an artifact family (" + ", ".join(SHOW_FAMILIES) + ")")
+    sho.add_argument(
+        "artifact_id", metavar="id", help="the artifact's id")
+    sho.add_argument(
+        "--model-id", metavar="M", dest="model_id",
+        help="the owning model's id (required for the model-scoped "
+             "families: checkpoint, workflow, evaluation, "
+             "comparison, gate, suite_run, sample, sample_quality; "
+             "rejected for the global families)")
     return parser
 
 
@@ -548,6 +595,32 @@ def _run_list(forge, args):
     return method()
 
 
+def _run_show(forge, args):
+    """Route ONE show command to the EXISTING facade getter and
+    return its result unchanged. Routing only — never a second
+    record construction. The getter's own canonical validation
+    stands (unknown or registry-invisible artifact ->
+    FileNotFoundError). ``--model-id`` matches the getter's signature
+    shape exactly (required for the eight model-scoped families,
+    rejected for the six global ones) and never lands in the artifact
+    position."""
+    _validate_family(args.family, SHOW_FAMILIES,
+                     forge.PROJECT_RETENTION_FAMILIES)
+    method_name, scoped = _SHOW_DISPATCH[args.family]
+    if scoped and not args.model_id:
+        raise CliError(
+            f"family '{args.family}' is model-scoped: --model-id "
+            f"is required", EXIT_USAGE)
+    if not scoped and args.model_id:
+        raise CliError(
+            f"family '{args.family}' is not model-scoped: "
+            f"--model-id is not accepted", EXIT_USAGE)
+    method = getattr(forge, method_name)
+    if scoped:
+        return method(args.model_id, args.artifact_id)
+    return method(args.artifact_id)
+
+
 def _render(value, indent: int = 0) -> list[str]:
     """Deterministic human-readable lines for ONE ``model_dump``
     value: fields in the model's declaration order, nested dicts
@@ -607,7 +680,12 @@ def _emit(result, as_json: bool) -> None:
                 print(f"- [{i}]")
                 print("\n".join(_render(item, 1)))
         return
-    data = result.model_dump(mode="json")
+    if hasattr(result, "model_dump"):
+        data = result.model_dump(mode="json")
+    else:
+        # a pre-serialized dict facade result (get_dataset) — passed
+        # through verbatim, never a second serialization
+        data = result
     if as_json:
         print(json.dumps(data, indent=2, sort_keys=True))
     else:
@@ -634,6 +712,8 @@ def main(argv: list[str] | None = None) -> int:
             result = _run_history(get_forge(), args)
         elif args.command == "list":
             result = _run_list(get_forge(), args)
+        elif args.command == "show":
+            result = _run_show(get_forge(), args)
         elif args.command == "retention":
             if args.family is None:
                 raise CliError(
