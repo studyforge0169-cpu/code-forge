@@ -2288,6 +2288,43 @@ OpenAPI surface is untouched (still 119 paths / 14 DELETEs).
   the engine's complete `list_*_for_*` facade set (32 methods)
   with exact value types
 
+### Milestone 77 — READ-ONLY listing CLI commands
+
+The adapter layer completed over the existing LISTING surfaces —
+no second listing engine, registry or scanner: every command
+routes to ONE existing ModelForge facade listing method. Strictly
+read-only; OpenAPI untouched (still 119 paths / 14 DELETEs).
+
+- **commands**: `forge list <family> [--model-id M] [--json]` —
+  six GLOBAL families (`models`, `datasets`, `tokenizers`,
+  `recipes`, `policies`, `suites` -> `list_models`,
+  `list_datasets`, `list_tokenizers`, `list_workflow_recipes`,
+  `list_policies`, `list_probe_suites`) and eight MODEL-SCOPED
+  families (`checkpoints`, `evaluations`, `comparisons`, `gates`,
+  `workflows`, `suite_runs`, `samples`, `sample_quality` ->
+  the facade's per-model listings, including
+  `list_gate_decisions` and `list_sample_evaluations`);
+  `--model-id` exactly where the facade requires it (missing for
+  scoped families or stray for global ones -> usage error 2; a
+  misplaced positional is rejected by argparse, never routed);
+  unknown family -> 4; `training_run` -> 5 (lifecycle-less);
+  unknown model -> 3. Family names are the repository's own
+  vocabulary (underscores, plural collections) — hyphenated or
+  shortened aliases (`suite-runs`, `quality`) are not exposed
+- **output**: `--json` is the facade result serialized verbatim —
+  an array of per-record `model_dump(mode="json")`; the two
+  facades that already return pre-serialized dicts
+  (`list_datasets` / `list_tokenizers`) pass through unchanged
+  (never a second serialization); human mode is the M76 list
+  renderer (`count: N` + indexed blocks); an EMPTY listing is a
+  valid success (exit 0)
+- **registry drift protection**: a test pins the CLI table to the
+  engine's actual facade surface BY SIGNATURE SHAPE — the routed
+  global set IS the set of zero-argument `ModelForge.list_*`
+  methods and the routed scoped set IS the set of
+  `(model_id: str)`-shaped ones (resolved with `get_type_hints`;
+  no missing surface, no extra, no renamed method, no wrong scope)
+
 ### Milestone 75 — READ-ONLY usage & storage CLI commands
 
 The same thin-adapter discipline (M74) extended to the remaining
@@ -3121,7 +3158,7 @@ integrity) and the family's reclaimable files/bytes:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 695 tests
+pytest                       # 701 tests
 python -m uvicorn app.api:app --port 8000   # landing at /, docs at /docs
 forge retention project                    # read-only CLI (M74)
 ```
